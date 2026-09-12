@@ -15,9 +15,11 @@ import mmap
 import os
 import re
 import subprocess
+import struct
 import sys
 import time
 import zipfile
+import zlib
 from datetime import datetime, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -426,6 +428,70 @@ def _post_window_command(handle: int, command_id: int) -> None:
         raise OSError(ctypes.get_last_error(), "Could not invoke API Monitor command")
 
 
+def _png_chunk(kind: bytes, data: bytes) -> bytes:
+    return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data) & 0xFFFFFFFF)
+
+
+def _capture_window_png(handle: int, max_width: int, max_height: int) -> tuple[bytes, int, int]:
+    from ctypes import wintypes
+
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+    gdi32 = ctypes.WinDLL("gdi32", use_last_error=True)
+    rect = wintypes.RECT()
+    if not user32.GetClientRect(handle, ctypes.byref(rect)):
+        raise OSError(ctypes.get_last_error(), "Could not inspect API Monitor window")
+    width, height = rect.right - rect.left, rect.bottom - rect.top
+    if width < 1 or height < 1:
+        raise ValueError("API Monitor window has no drawable client area")
+    if width > max_width or height > max_height:
+        raise ValueError(f"window screenshot exceeds {max_width}x{max_height}")
+
+    source = user32.GetDC(handle)
+    memory = gdi32.CreateCompatibleDC(source)
+    bitmap = gdi32.CreateCompatibleBitmap(source, width, height)
+    if not source or not memory or not bitmap:
+        raise OSError(ctypes.get_last_error(), "Could not allocate API Monitor screenshot")
+    previous = gdi32.SelectObject(memory, bitmap)
+    try:
+        if not user32.PrintWindow(handle, memory, 2):  # PW_RENDERFULLCONTENT
+            raise OSError(ctypes.get_last_error(), "API Monitor did not render its window")
+        class BitmapInfoHeader(ctypes.Structure):
+            _fields_ = [
+                ("size", wintypes.DWORD),
+                ("width", wintypes.LONG),
+                ("height", wintypes.LONG),
+                ("planes", wintypes.WORD),
+                ("bits", wintypes.WORD),
+                ("compression", wintypes.DWORD),
+                ("size_image", wintypes.DWORD),
+                ("x_pixels_per_meter", wintypes.LONG),
+                ("y_pixels_per_meter", wintypes.LONG),
+                ("colors_used", wintypes.DWORD),
+                ("colors_important", wintypes.DWORD),
+            ]
+
+        header = BitmapInfoHeader(ctypes.sizeof(BitmapInfoHeader), width, height, 1, 32, 0, 0, 0, 0, 0, 0)
+        pixels = (ctypes.c_ubyte * (width * height * 4))()
+        if not gdi32.GetDIBits(memory, bitmap, 0, height, pixels, ctypes.byref(header), 0):
+            raise OSError(ctypes.get_last_error(), "Could not read API Monitor screenshot")
+        raw = bytes(pixels)
+    finally:
+        gdi32.SelectObject(memory, previous)
+        gdi32.DeleteObject(bitmap)
+        gdi32.DeleteDC(memory)
+        user32.ReleaseDC(handle, source)
+
+    rows = []
+    for row in range(height - 1, -1, -1):
+        start = row * width * 4
+        pixels = raw[start : start + width * 4]
+        rows.append(b"\x00" + b"".join(pixels[index : index + 3] + pixels[index + 3 : index + 4] for index in range(0, len(pixels), 4)))
+    png = b"\x89PNG\r\n\x1a\n"
+    png += _png_chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 6, 0, 0, 0))
+    png += _png_chunk(b"IDAT", zlib.compress(b"".join(rows), 6))
+    return png + _png_chunk(b"IEND", b""), width, height
+
+
 def _api_monitor_main_window(architecture: str, timeout_seconds: float) -> dict[str, Any] | None:
     if architecture not in {"x86", "x64"}:
         raise ValueError("architecture must be x86 or x64")
@@ -597,6 +663,42 @@ def api_monitor_ui_tree() -> dict[str, Any]:
     if sys.platform != "win32":
         return {"supported": False, "windows": []}
     return {"supported": True, "windows": _find_api_monitor_windows()}
+
+
+@mcp.tool()
+def api_monitor_gui_screenshot(
+    window_title: str = "",
+    window_handle: int | None = None,
+    max_width: int = 2400,
+    max_height: int = 1600,
+) -> dict[str, Any]:
+    """Capture an API Monitor window in the background as a PNG data URL."""
+    if sys.platform != "win32":
+        raise RuntimeError("Rohitab GUI screenshots require Windows")
+    max_width = _limit(max_width, "max_width", 10_000)
+    max_height = _limit(max_height, "max_height", 10_000)
+    windows = _find_api_monitor_windows()
+    if window_handle is not None:
+        candidates = [window for window in windows if window["handle"] == window_handle]
+    elif window_title:
+        candidates = [window for window in windows if window["title"] == window_title]
+    else:
+        candidates = [
+            window
+            for window in windows
+            if "api monitor v2" in window["title"].casefold()
+            and window["title"].casefold().startswith("monitoring")
+        ]
+    if len(candidates) != 1:
+        raise ValueError("screenshot requires one matching window_handle or window_title")
+    png, width, height = _capture_window_png(candidates[0]["handle"], max_width, max_height)
+    return {
+        "window": candidates[0],
+        "width": width,
+        "height": height,
+        "mime_type": "image/png",
+        "image_data_url": "data:image/png;base64," + base64.b64encode(png).decode("ascii"),
+    }
 
 
 @mcp.tool()
