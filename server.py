@@ -140,6 +140,19 @@ def _capture_info(path: Path) -> dict[str, Any]:
         result["zip_error"] = "No ZIP signature found"
         result["entries"] = []
         return result
+    prefix = data[:offset]
+    result["prefix_size"] = offset
+    result["format_marker"] = "RBAPM" if prefix.endswith(b"RBAPM") else None
+    result["format_header"] = prefix.decode("ascii", errors="replace").rstrip("\x00")
+    result["architecture"] = (
+        "x64"
+        if b"64-bit Capture" in prefix
+        else "x86"
+        if b"32-bit Capture" in prefix
+        else "x64"
+        if path.suffix.lower() == ".apmx64"
+        else "x86"
+    )
     try:
         result["entries"] = _zip_entries(path)
     except zipfile.BadZipFile as exc:
@@ -2323,17 +2336,19 @@ def _self_test() -> None:
                 "sample.exe: Monitoring Module 0x1234 -> C:\\sample.dll\n",
             )
             archive.writestr("process/0/info", "C:\\sample.exe".encode("utf-16-le"))
-        path.write_bytes(b"APMX-BARE-BONES\x00" + payload.getvalue())
+        path.write_bytes(b"\r\nAPI Monitor 64-bit Capture\r\nRBAPM" + payload.getvalue())
         second_path = Path(directory) / "variants" / "second.apmx64"
         second_path.parent.mkdir()
         second_payload = io.BytesIO()
         with zipfile.ZipFile(second_payload, "w", zipfile.ZIP_STORED) as archive:
             archive.writestr("metadata.txt", "process=changed.exe\n")
             archive.writestr("extra.bin", b"new")
-        second_path.write_bytes(b"APMX-BARE-BONES\x00" + second_payload.getvalue())
+        second_path.write_bytes(b"\r\nAPI Monitor 64-bit Capture\r\nRBAPM" + second_payload.getvalue())
 
         info = _capture_info(path)
         assert info["extension"] == ".apmx64"
+        assert info["format_marker"] == "RBAPM"
+        assert info["architecture"] == "x64"
         assert info["entries"][0]["name"] == "metadata.txt"
         strings = _capture_strings(path, "CreateFile", 10, 4)
         assert strings and "CreateFileW" in strings[0]["text"]
