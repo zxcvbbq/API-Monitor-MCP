@@ -5946,6 +5946,7 @@ def capture_filter_calls(
     api_module: str | None = None,
     definition_offset: int | None = None,
     flags: int | None = None,
+    pid: int | None = None,
 ) -> dict[str, Any]:
     """Filter saved calls by API definition, thread, error, and duration context."""
     if process_index is not None and process_index < 0:
@@ -5956,6 +5957,8 @@ def capture_filter_calls(
         raise ValueError("error_code must be between 0 and 4294967295")
     if flags is not None and not 0 <= flags <= 0xFF:
         raise ValueError("flags must be between 0 and 255")
+    if pid is not None and not 1 <= pid <= 0xFFFFFFFF:
+        raise ValueError("pid must be between 1 and 4294967295")
     if api_name is not None and not api_name.strip():
         raise ValueError("api_name must be non-empty when provided")
     if api_module is not None and not api_module.strip():
@@ -5993,6 +5996,7 @@ def capture_filter_calls(
         "api_name": api_name,
         "api_module": api_module,
         "definition_offset": definition_offset,
+        "pid": pid,
         "min_duration_seconds": min_duration_seconds,
         "max_duration_seconds": max_duration_seconds,
         "start_time_utc": start_time_utc,
@@ -6007,12 +6011,28 @@ def capture_filter_calls(
     with archive:
         entries = {info.filename for info in archive.infolist()}
         definitions = archive.read("definitions") if resolve_definitions and "definitions" in entries else None
-        process_indices = sorted(
-            int(match.group(1))
-            for name in entries
-            if (match := re.fullmatch(r"process/(\d+)/calls", name, re.IGNORECASE))
-            and (process_index is None or int(match.group(1)) == process_index)
-        )
+        process_indices = []
+        for name in entries:
+            match = re.fullmatch(r"process/(\d+)/calls", name, re.IGNORECASE)
+            if not match:
+                continue
+            index = int(match.group(1))
+            if process_index is not None and index != process_index:
+                continue
+            if pid is not None:
+                info_name = f"process/{index}/info"
+                if info_name not in entries:
+                    continue
+                try:
+                    process_pid = _parse_capture_process_info(
+                        archive.read(info_name), pointer_size
+                    ).get("pid")
+                except ValueError:
+                    continue
+                if process_pid != pid:
+                    continue
+            process_indices.append(index)
+        process_indices.sort()
         for index in process_indices:
             calls = archive.read(f"process/{index}/calls")
             data_name = f"process/{index}/data"
@@ -6118,6 +6138,7 @@ def capture_call_timeline(
     api_module: str | None = None,
     definition_offset: int | None = None,
     flags: int | None = None,
+    pid: int | None = None,
 ) -> dict[str, Any]:
     """Return saved calls as one bounded cross-process timeline."""
     if order_by not in {"timestamp", "capture"}:
@@ -6138,6 +6159,7 @@ def capture_call_timeline(
         api_name=api_name,
         api_module=api_module,
         definition_offset=definition_offset,
+        pid=pid,
     )
     events = list(filtered["matches"])
     if order_by == "capture":
@@ -6176,6 +6198,7 @@ def capture_call_timeline(
         "api_name": api_name,
         "api_module": api_module,
         "definition_offset": definition_offset,
+        "pid": pid,
         "timeline": events[:limit],
         "count": min(len(events), limit),
         "scanned_records": filtered["scanned_records"],
@@ -7003,6 +7026,7 @@ def _self_test() -> None:
             api_module="kernel32",
             definition_offset=16,
             flags=1,
+            pid=1234,
         )
         assert api_filtered["count"] == 1
         assert api_filtered["definitions_resolved"]
@@ -7010,7 +7034,11 @@ def _self_test() -> None:
         assert timeline["count"] == 1
         assert timeline["timeline"][0]["record"]["context"]["timestamp_utc"] == "2020-01-01T00:00:00+00:00"
         api_timeline = capture_call_timeline(
-            str(path), api_name="CreateFileW", api_module="kernel32", flags=1
+            str(path),
+            api_name="CreateFileW",
+            api_module="kernel32",
+            flags=1,
+            pid=1234,
         )
         assert api_timeline["count"] == 1
         assert api_timeline["timeline"][0]["record"]["definition"]["name"] == "CreateFileW"
