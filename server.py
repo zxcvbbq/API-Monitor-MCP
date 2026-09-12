@@ -37,6 +37,7 @@ ASCII_STRINGS = re.compile(rb"[\x20-\x7e]{4,}")
 UTF16_STRINGS = re.compile(rb"(?:[\x20-\x7e]\x00){4,}")
 API_NAME = re.compile(r'<Api\b[^>]*\bName\s*=\s*["\']([^"\']+)', re.I)
 MODULE_NAME = re.compile(r'<Module\b[^>]*\bName\s*=\s*["\']([^"\']+)', re.I)
+PROCESS_INFO = re.compile(r"process/(\d+)/info$", re.I)
 
 mcp = FastMCP(
     "rohitab-api-monitor",
@@ -1058,6 +1059,42 @@ def capture_monitoring_log(
 
 
 @mcp.tool()
+def capture_list_processes(file_path: str, limit: int = 200) -> dict[str, Any]:
+    """List process records and executable paths recoverable from an APMX capture."""
+    limit = _limit(limit, "limit", 2000)
+    path = _capture_path(file_path)
+    archive, _, _ = _open_capture_zip(path)
+    processes: list[dict[str, Any]] = []
+    with archive:
+        for info in archive.infolist():
+            match = PROCESS_INFO.fullmatch(info.filename)
+            if not match:
+                continue
+            data = archive.read(info)
+            strings = _scan_strings(data, ".exe", 200, 4)
+            executables = []
+            for item in strings:
+                value = item["text"].strip("\x00")
+                if value.casefold().endswith(".exe") and value not in executables:
+                    executables.append(value)
+            processes.append(
+                {
+                    "index": int(match.group(1)),
+                    "entry": info.filename,
+                    "size": info.file_size,
+                    "executables": executables,
+                }
+            )
+    processes.sort(key=lambda item: item["index"])
+    return {
+        "file": str(path),
+        "processes": processes[:limit],
+        "count": len(processes),
+        "truncated": len(processes) > limit,
+    }
+
+
+@mcp.tool()
 def capture_hex(file_path: str, offset: int = 0, length: int = 256) -> dict[str, Any]:
     """Return a bounded hex/ASCII view of raw bytes from an APMX capture."""
     if offset < 0:
@@ -1178,6 +1215,7 @@ def _self_test() -> None:
             archive.writestr("metadata.txt", "process=sample.exe\n")
             archive.writestr("calls.bin", b"CreateFileW\x00https://example.test\x00")
             archive.writestr("log/monitoring.txt", "sample.exe: Monitoring Module\n")
+            archive.writestr("process/0/info", "C:\\sample.exe".encode("utf-16-le"))
         path.write_bytes(b"APMX-BARE-BONES\x00" + payload.getvalue())
 
         info = _capture_info(path)
@@ -1187,11 +1225,14 @@ def _self_test() -> None:
         assert strings and "CreateFileW" in strings[0]["text"]
         log = capture_monitoring_log(str(path), "module", 10)
         assert log["lines"] == ["sample.exe: Monitoring Module"]
+        processes = capture_list_processes(str(path), 10)
+        assert processes["processes"][0]["executables"] == ["C:\\sample.exe"]
         entries = _zip_entries(path)
         assert {entry["name"] for entry in entries} == {
             "metadata.txt",
             "calls.bin",
             "log/monitoring.txt",
+            "process/0/info",
         }
         listed = capture_list_directory(directory, recursive=False, limit=10)
         assert listed["count"] == 1
