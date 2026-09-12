@@ -222,12 +222,24 @@ def _window_class(user32: Any, handle: Any) -> str:
     return buffer.value
 
 
+def _window_rectangle(user32: Any, handle: Any) -> dict[str, int]:
+    from ctypes import wintypes
+
+    rect = wintypes.RECT()
+    if not user32.GetWindowRect(handle, ctypes.byref(rect)):
+        return {}
+    return {"left": rect.left, "top": rect.top, "right": rect.right, "bottom": rect.bottom}
+
+
 def _ui_window(handle: Any, user32: Any) -> dict[str, Any]:
     return {
         "handle": int(handle),
         "class": _window_class(user32, handle),
         "title": _window_text(user32, handle),
         "control_id": int(user32.GetDlgCtrlID(handle)),
+        "rectangle": _window_rectangle(user32, handle),
+        "visible": bool(user32.IsWindowVisible(handle)),
+        "enabled": bool(user32.IsWindowEnabled(handle)),
     }
 
 
