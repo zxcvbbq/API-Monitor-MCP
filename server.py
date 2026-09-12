@@ -881,6 +881,9 @@ def _capture_call_stats(
         "data_bytes": len(data),
         "referenced_data_bytes": 0,
     }
+    thread_ids: set[int] = set()
+    timestamps: list[int] = []
+    durations: list[float] = []
     for index, offset in enumerate(offsets[:scanned]):
         if offset > len(data) - layout["minimum_record_size"]:
             stats["invalid_records"] += 1
@@ -900,6 +903,12 @@ def _capture_call_stats(
         flags = data[offset + 2]
         flag_key = f"0x{flags:02x}"
         stats["flags"][flag_key] = stats["flags"].get(flag_key, 0) + 1
+        context = _capture_call_context(data, offset, pointer_size)
+        thread_ids.add(context["thread_id"])
+        if context["timestamp_filetime"]:
+            timestamps.append(context["timestamp_filetime"])
+        if context.get("duration_valid"):
+            durations.append(context["duration_seconds"])
         for slot, pointer_offset, length_offset in layout["pointer_refs"]:
             if pointer_offset + pointer_size > record_size or length_offset + 4 > record_size:
                 continue
@@ -916,6 +925,19 @@ def _capture_call_stats(
             reference_stats["references"] += 1
             reference_stats["bytes"] += length
             stats["referenced_data_bytes"] += length
+    context_stats: dict[str, Any] = {
+        "thread_count": len(thread_ids),
+        "duration_count": len(durations),
+        "first_timestamp_utc": _windows_filetime(min(timestamps)) if timestamps else None,
+        "last_timestamp_utc": _windows_filetime(max(timestamps)) if timestamps else None,
+    }
+    if durations:
+        context_stats["duration_seconds"] = {
+            "minimum": min(durations),
+            "maximum": max(durations),
+            "average": sum(durations) / len(durations),
+        }
+    stats["context"] = context_stats
     stats["unreferenced_data_bytes"] = max(0, len(data) - stats["referenced_data_bytes"])
     return stats
 
@@ -5477,6 +5499,10 @@ def _self_test() -> None:
         call_stats = capture_call_stats(str(path), process_index=0)
         assert call_stats["processes"][0]["record_sizes"]["160"] == 1
         assert call_stats["totals"]["referenced_data_bytes"] == 9
+        call_context_stats = call_stats["processes"][0]["context"]
+        assert call_context_stats["thread_count"] == 1
+        assert call_context_stats["duration_seconds"]["average"] == 0.125
+        assert call_context_stats["first_timestamp_utc"] == "2020-01-01T00:00:00+00:00"
         api_list = capture_list_apis(str(path))
         assert api_list["count"] == 1
         assert api_list["apis"][0]["name"] == "CreateFileW"
@@ -5608,7 +5634,9 @@ def _self_test() -> None:
         assert x86_deep_validation["structural_valid"]
         assert x86_deep_validation["process_infos"][0]["valid"]
         assert x86_deep_validation["streams"][0]["definitions"]["resolved"] == 1
-        assert capture_call_stats(str(x86_path))["processes"][0]["record_sizes"]["120"] == 1
+        x86_call_stats = capture_call_stats(str(x86_path))
+        assert x86_call_stats["processes"][0]["record_sizes"]["120"] == 1
+        assert x86_call_stats["processes"][0]["context"]["duration_seconds"]["maximum"] == 0.25
         x86_processes = capture_list_processes(str(x86_path))
         assert x86_processes["processes"][0]["call_count"] == 1
         x86_metadata = x86_processes["processes"][0]["metadata"]
