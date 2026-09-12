@@ -363,6 +363,23 @@ def _find_ui_control(
     return matches[0] if matches else None
 
 
+def _post_mouse_click_at(handle: int, x: int, y: int, button: str = "left") -> None:
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+    from ctypes import wintypes
+
+    rect = wintypes.RECT()
+    if not user32.GetClientRect(handle, ctypes.byref(rect)):
+        raise OSError(ctypes.get_last_error(), "Could not inspect API Monitor control")
+    if button not in {"left", "right"}:
+        raise ValueError("button must be left or right")
+    if not 0 <= x < rect.right or not 0 <= y < rect.bottom:
+        raise ValueError("click coordinates are outside the control")
+    lparam = (y << 16) | (x & 0xFFFF)
+    down, up, key = (0x0201, 0x0202, 1) if button == "left" else (0x0204, 0x0205, 2)
+    user32.PostMessageW(handle, down, key, lparam)
+    user32.PostMessageW(handle, up, 0, lparam)
+
+
 def _post_mouse_click(handle: int) -> None:
     user32 = ctypes.WinDLL("user32", use_last_error=True)
     from ctypes import wintypes
@@ -370,11 +387,7 @@ def _post_mouse_click(handle: int) -> None:
     rect = wintypes.RECT()
     if not user32.GetClientRect(handle, ctypes.byref(rect)):
         raise OSError(ctypes.get_last_error(), "Could not inspect API Monitor control")
-    x = max(0, (rect.right - rect.left) // 2)
-    y = max(0, (rect.bottom - rect.top) // 2)
-    lparam = (y << 16) | (x & 0xFFFF)
-    user32.PostMessageW(handle, 0x0201, 1, lparam)  # WM_LBUTTONDOWN
-    user32.PostMessageW(handle, 0x0202, 0, lparam)  # WM_LBUTTONUP
+    _post_mouse_click_at(handle, max(0, rect.right // 2), max(0, rect.bottom // 2))
 
 
 def _uia_text(control: Any) -> str:
@@ -777,6 +790,37 @@ def api_monitor_gui_action(
     else:
         _set_control_text(control["handle"], text)
     return {"action": action, "window": parent, "control": control, "text": text}
+
+
+@mcp.tool()
+def api_monitor_gui_click_point(
+    control_handle: int,
+    x: int,
+    y: int,
+    button: str = "left",
+    window_title: str = "",
+) -> dict[str, Any]:
+    """Click a point inside an exact Rohitab control without foregrounding it."""
+    if sys.platform != "win32":
+        raise RuntimeError("Rohitab GUI clicks require Windows")
+    if control_handle < 1:
+        raise ValueError("control_handle must be positive")
+    target = _find_ui_control(
+        _find_api_monitor_windows(), None, "", "", window_title, control_handle
+    )
+    if target is None:
+        raise LookupError(f"Rohitab GUI control {control_handle} was not found")
+    parent, control = target
+    _post_mouse_click_at(control_handle, x, y, button)
+    return {
+        "clicked": True,
+        "method": "background-win32",
+        "button": button,
+        "x": x,
+        "y": y,
+        "window": parent,
+        "control": control,
+    }
 
 
 @mcp.tool()
