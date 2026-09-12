@@ -330,6 +330,18 @@ def _post_mouse_click(handle: int) -> None:
     user32.PostMessageW(handle, 0x0202, 0, lparam)  # WM_LBUTTONUP
 
 
+def _uia_text(control: Any) -> str:
+    try:
+        return control.window_text() or control.element_info.name or ""
+    except (OSError, RuntimeError):
+        return ""
+
+
+def _uia_rect(control: Any) -> dict[str, int]:
+    rect = control.rectangle()
+    return {"left": rect.left, "top": rect.top, "right": rect.right, "bottom": rect.bottom}
+
+
 def _post_button_click(handle: int) -> None:
     user32 = ctypes.WinDLL("user32", use_last_error=True)
     if not user32.PostMessageW(handle, 0x00F5, 0, 0):  # BM_CLICK
@@ -449,6 +461,61 @@ def api_monitor_gui_action(
     else:
         _set_control_text(control["handle"], text)
     return {"action": action, "window": parent, "control": control, "text": text}
+
+
+@mcp.tool()
+def api_monitor_gui_lists(window_title: str = "", limit: int = 200) -> dict[str, Any]:
+    """Read Rohitab list views through background Windows UI Automation."""
+    if sys.platform != "win32":
+        return {"supported": False, "windows": []}
+    limit = _limit(limit, "limit", 2000)
+    try:
+        from pywinauto import Desktop
+    except ImportError as exc:
+        raise RuntimeError("Install pywinauto to read Rohitab GUI lists") from exc
+
+    pids = {
+        int(process["pid"])
+        for process in api_monitor_status().get("processes", [])
+        if isinstance(process.get("pid"), int)
+    }
+    result: list[dict[str, Any]] = []
+    for window in Desktop(backend="uia").windows():
+        if window.process_id() not in pids or (window_title and window.window_text() != window_title):
+            continue
+        lists: list[dict[str, Any]] = []
+        for control in window.descendants():
+            if control.element_info.control_type != "List":
+                continue
+            headers = [
+                _uia_text(item)
+                for item in control.descendants()
+                if item.element_info.control_type == "HeaderItem"
+            ]
+            rows: list[list[str]] = []
+            for item in control.children():
+                if item.element_info.control_type != "ListItem":
+                    continue
+                cells = [
+                    _uia_text(cell)
+                    for cell in item.descendants()
+                    if cell.element_info.control_type == "Text"
+                ]
+                rows.append(cells or [_uia_text(item)])
+                if len(rows) > limit:
+                    break
+            truncated = len(rows) > limit
+            lists.append(
+                {
+                    "handle": control.handle,
+                    "rectangle": _uia_rect(control),
+                    "headers": headers,
+                    "rows": rows[:limit],
+                    "truncated": truncated,
+                }
+            )
+        result.append({"handle": window.handle, "title": window.window_text(), "lists": lists})
+    return {"supported": True, "windows": result}
 
 
 @mcp.tool()
