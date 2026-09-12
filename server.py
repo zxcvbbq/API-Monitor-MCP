@@ -846,6 +846,42 @@ def api_monitor_traffic(window_title: str = "", limit: int = 500) -> dict[str, A
 
 
 @mcp.tool()
+def api_monitor_traffic_details(
+    window_title: str = "",
+    row_index: int | None = None,
+    query: str = "",
+    limit: int = 500,
+) -> dict[str, Any]:
+    """Select one captured API call and return its related GUI detail panes."""
+    if row_index is None and not query:
+        raise ValueError("row_index or query is required")
+    limit = _limit(limit, "limit", 2000)
+    traffic = api_monitor_traffic(window_title, limit)
+    if len(traffic["panes"]) != 1:
+        raise ValueError("window_title must identify one window with one traffic pane")
+    call_pane = traffic["panes"][0]
+    selected = api_monitor_gui_select(call_pane["list_handle"], row_index, query)
+    time.sleep(0.2)
+    refreshed = api_monitor_gui_lists(window_title, limit)
+    details = [
+        {
+            "handle": pane["handle"],
+            "headers": pane["headers"],
+            "rows": pane["rows"],
+            "truncated": pane["truncated"],
+        }
+        for window in refreshed.get("windows", [])
+        for pane in window.get("lists", [])
+        if pane["handle"] != call_pane["list_handle"]
+    ]
+    return {
+        "selected_call": selected,
+        "details": details,
+        "summaries": api_monitor_summary(window_title)["summaries"],
+    }
+
+
+@mcp.tool()
 def api_monitor_add_display_filter(
     field: str,
     operator: str,
