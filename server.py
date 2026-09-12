@@ -6302,22 +6302,33 @@ def capture_export_definitions(
 @mcp.tool()
 def capture_search_calls(
     file_path: str,
-    query: str,
+    query: str = "",
     process_index: int | None = None,
     limit: int = 100,
     max_records: int = 100_000,
     max_data_bytes: int = 16_384,
     resolve_definitions: bool = False,
     decode_arguments: bool = False,
+    pattern_hex: str | None = None,
 ) -> dict[str, Any]:
     """Search saved call payloads, API definitions, and decoded arguments."""
-    if not query:
-        raise ValueError("query must not be empty")
+    if not query and pattern_hex is None:
+        raise ValueError("query or pattern_hex is required")
     if process_index is not None and process_index < 0:
         raise ValueError("process_index must be non-negative")
     limit = _limit(limit, "limit", 10_000)
     max_records = _limit(max_records, "max_records", 1_000_000)
     max_data_bytes = _limit(max_data_bytes, "max_data_bytes", 16 * 1024 * 1024)
+    pattern = None
+    if pattern_hex is not None:
+        if not pattern_hex.strip():
+            raise ValueError("pattern_hex must not be empty when provided")
+        try:
+            pattern = bytes.fromhex(pattern_hex)
+        except ValueError as exc:
+            raise ValueError("pattern_hex must contain hexadecimal bytes") from exc
+        if not pattern or len(pattern) > 256:
+            raise ValueError("pattern_hex must contain between 1 and 256 bytes")
     path = _capture_path(file_path)
     pointer_size = 4 if path.suffix.lower() == ".apmx86" else 8
     archive, _, _ = _open_capture_zip(path)
@@ -6357,7 +6368,7 @@ def capture_search_calls(
                 payload_matches = []
                 for reference in record.get("data_refs", []):
                     text = reference.get("payload", {}).get("text")
-                    if text is None or wanted not in text.casefold():
+                    if not wanted or text is None or wanted not in text.casefold():
                         continue
                     position = text.casefold().find(wanted)
                     start = max(0, position - 120)
@@ -6373,7 +6384,7 @@ def capture_search_calls(
                 definition = record.get("definition", {})
                 api_matches = []
                 api_text = f"{definition.get('name', '')} {definition.get('module', '')}"
-                if definition.get("valid") and wanted in api_text.casefold():
+                if wanted and definition.get("valid") and wanted in api_text.casefold():
                     api_matches.append(
                         {
                             "name": definition.get("name"),
@@ -6383,7 +6394,7 @@ def capture_search_calls(
                         }
                     )
                 argument_matches = []
-                if decode_arguments:
+                if decode_arguments and wanted:
                     slot0 = next(
                         (
                             reference.get("payload")
@@ -6412,7 +6423,32 @@ def capture_search_calls(
                             )
                             if wanted in searchable.casefold():
                                 argument_matches.append(argument)
-                if payload_matches or api_matches or argument_matches:
+                byte_matches = []
+                if pattern is not None:
+                    for reference in record.get("data_refs", []):
+                        if not reference.get("valid"):
+                            continue
+                        relative = reference["offset"]
+                        end = relative + reference["length"]
+                        if end > len(data):
+                            continue
+                        payload = data[relative:end]
+                        position = payload.find(pattern)
+                        while position >= 0 and len(byte_matches) < 32:
+                            context_start = max(0, position - 16)
+                            context_end = min(len(payload), position + len(pattern) + 16)
+                            byte_matches.append(
+                                {
+                                    "slot": reference["slot"],
+                                    "data_offset": relative,
+                                    "match_offset": position,
+                                    "absolute_offset": relative + position,
+                                    "length": len(pattern),
+                                    "context_hex": payload[context_start:context_end].hex(" "),
+                                }
+                            )
+                            position = payload.find(pattern, position + 1)
+                if payload_matches or api_matches or argument_matches or byte_matches:
                     match = {
                         "process_index": index,
                         "record": record,
@@ -6422,6 +6458,8 @@ def capture_search_calls(
                         match["api_matches"] = api_matches
                     if argument_matches:
                         match["argument_matches"] = argument_matches
+                    if byte_matches:
+                        match["byte_matches"] = byte_matches
                     matches.append(
                         match
                     )
@@ -6433,6 +6471,7 @@ def capture_search_calls(
                             "matches": matches,
                             "count": len(matches),
                             "scanned_records": scanned,
+                            "pattern_hex": pattern.hex(" ") if pattern is not None else None,
                             "truncated": True,
                             "definitions_resolved": resolve_definitions,
                             "arguments_decoded": decode_arguments,
@@ -6446,6 +6485,7 @@ def capture_search_calls(
         "matches": matches,
         "count": len(matches),
         "scanned_records": scanned,
+        "pattern_hex": pattern.hex(" ") if pattern is not None else None,
         "truncated": scan_truncated,
         "definitions_resolved": resolve_definitions,
         "arguments_decoded": decode_arguments,
@@ -7626,6 +7666,11 @@ def _self_test() -> None:
         call_search = capture_search_calls(str(path), "ell")
         assert call_search["count"] == 1
         assert call_search["matches"][0]["payload_matches"][0]["snippet"] == "hello"
+        binary_call_search = capture_search_calls(
+            str(path), pattern_hex="68 65 6c 6c 6f"
+        )
+        assert binary_call_search["count"] == 1
+        assert binary_call_search["matches"][0]["byte_matches"][0]["absolute_offset"] == 160
         api_search = capture_search_calls(str(path), "CreateFileW", resolve_definitions=True)
         assert api_search["count"] == 1
         assert api_search["matches"][0]["api_matches"][0]["module"] == "kernel32.dll"
