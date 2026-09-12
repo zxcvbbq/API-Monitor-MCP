@@ -15,6 +15,7 @@ import subprocess
 import struct
 import sys
 import time
+import uuid
 import zipfile
 import zlib
 from datetime import datetime, timedelta, timezone
@@ -1803,12 +1804,19 @@ def _capture_exact_scalar(data: bytes, type_info: dict[str, Any]) -> dict[str, A
     if kind == 13:
         if len(data) < 16:
             return None
-        return {
+        guid = uuid.UUID(bytes_le=data[:16])
+        formatted = f"{{{guid}}}"
+        result = {
             "exact": True,
-            "kind": "fixed_bytes",
+            "kind": "guid",
             "size": 16,
-            "value": data[:16].hex(" "),
+            "value": "IID_NULL" if guid.int == 0 else formatted,
+            "guid": formatted,
+            "hex": data[:16].hex(" "),
         }
+        if guid.int == 0:
+            result["name"] = "IID_NULL"
+        return result
     if kind == 4:
         pointer_size = int(type_info.get("pointer_size", 8))
         pointer_offset = 0 if int(type_info.get("flags", 0)) & 8 else 8
@@ -5160,7 +5168,10 @@ def _self_test() -> None:
         )["value"] == "hello"
         assert _capture_exact_scalar(
             bytes(range(16)), {"kind": 13, "flags": 0}
-        )["kind"] == "fixed_bytes"
+        )["value"] == "{03020100-0504-0706-0809-0a0b0c0d0e0f}"
+        assert _capture_exact_scalar(
+            bytes(16), {"kind": 13, "flags": 0}
+        )["value"] == "IID_NULL"
         array_type = _capture_type_info(bytes(definitions), array_type_offset)
         assert array_type and array_type["array_flags"] == 1
         array_value = _capture_exact_value(struct.pack("<III", 1, 2, 3), array_type)
