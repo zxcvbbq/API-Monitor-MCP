@@ -1,19 +1,8 @@
 # Rohitab API Monitor MCP
 
-MCP bridge for the installed Rohitab API Monitor app.
+MCP bridge for the installed Rohitab API Monitor on Windows.
 
-Features:
-
-- Launch/status, live background capture, process attach, native filter-tree inspection, and GUI actions
-- Open, validate, decode, search, inspect, and export `.apmx86`/`.apmx64` captures, including x86/x64 call streams and API names
-- Deep-validate saved process metadata, call streams, and payload references
-- Compare saved traffic by call index and payload fingerprint
-- Inspect/search capture ZIPs, XML filters, logs, process data, metadata/modules, strings, raw hex, and payloads
-- Resolve saved API names, search/decode saved parameters/returns, plus exact typed values
-- List saved API frequency across processes
-- Search Rohitab XML API definitions
-
-Install:
+## Install
 
 ```powershell
 claude plugin marketplace add https://github.com/zxcvbbq/API-Monitor-MCP.git
@@ -22,10 +11,15 @@ codex plugin marketplace add zxcvbbq/API-Monitor-MCP
 codex plugin add api-monitor-mcp@api-monitor-mcp
 ```
 
-Run locally:
+## Features
+
+- Background GUI control, process attach, live capture, filters, and screenshots
+- Read, validate, search, compare, decode, and export `.apmx86`/`.apmx64`
+- Inspect calls, API definitions, parameters, returns, payloads, processes, modules, logs, and raw bytes
+
+## Local
 
 ```powershell
-uv run python .\server.py
 uv run python .\server.py --self-test
 ```
 
