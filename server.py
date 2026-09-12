@@ -5746,6 +5746,202 @@ def capture_read_type(file_path: str, type_offset: int) -> dict[str, Any]:
 
 
 @mcp.tool()
+def capture_list_types(
+    file_path: str,
+    process_index: int | None = None,
+    query: str = "",
+    kind: int | None = None,
+    limit: int = 1000,
+    max_records: int = 1_000_000,
+    include_details: bool = False,
+    pid: int | None = None,
+) -> dict[str, Any]:
+    """List type descriptors reachable from API definitions used by saved calls."""
+    if process_index is not None and process_index < 0:
+        raise ValueError("process_index must be non-negative")
+    if kind is not None and not 0 <= kind <= 0xFFFFFFFF:
+        raise ValueError("kind must be between 0 and 4294967295")
+    if pid is not None and not 1 <= pid <= 0xFFFFFFFF:
+        raise ValueError("pid must be between 1 and 4294967295")
+    limit = _limit(limit, "limit", 10_000)
+    max_records = _limit(max_records, "max_records", 1_000_000)
+    path = _capture_path(file_path)
+    pointer_size = 4 if path.suffix.lower() == ".apmx86" else 8
+    archive, _, _ = _open_capture_zip(path)
+    types: dict[int, dict[str, Any]] = {}
+    scanned = 0
+    resolved_definitions: set[int] = set()
+    with archive:
+        entries = {info.filename for info in archive.infolist()}
+        if "definitions" not in entries:
+            return {
+                "file": str(path),
+                "process_index": process_index,
+                "pid": pid,
+                "definitions_available": False,
+                "types": [],
+                "count": 0,
+                "scanned_records": 0,
+                "truncated": False,
+            }
+        definitions = archive.read("definitions")
+        process_indices = sorted(
+            int(match.group(1))
+            for name in entries
+            if (match := re.fullmatch(r"process/(\d+)/calls", name, re.IGNORECASE))
+            and (process_index is None or int(match.group(1)) == process_index)
+        )
+
+        def add_type(
+            type_info: Any,
+            usage: dict[str, Any],
+            path_name: str,
+            visited: set[int],
+        ) -> None:
+            if not isinstance(type_info, dict):
+                return
+            offset = type_info.get("offset")
+            if not isinstance(offset, int) or offset <= 0:
+                return
+            item = types.setdefault(
+                offset,
+                {
+                    "offset": offset,
+                    "kind": type_info.get("kind"),
+                    "size": type_info.get("size"),
+                    "flags": type_info.get("flags"),
+                    "pointer_size": type_info.get("pointer_size"),
+                    "_details": type_info,
+                    "_uses": [],
+                    "_use_keys": set(),
+                    "_usage_truncated": False,
+                },
+            )
+            use = {**usage, "path": path_name}
+            use_key = tuple(sorted((key, str(value)) for key, value in use.items()))
+            if use_key not in item["_use_keys"]:
+                if len(item["_uses"]) < 256:
+                    item["_uses"].append(use)
+                else:
+                    item["_usage_truncated"] = True
+                item["_use_keys"].add(use_key)
+            if offset in visited:
+                return
+            visited.add(offset)
+            for index, field in enumerate(type_info.get("fields", [])):
+                add_type(
+                    field.get("type"),
+                    usage,
+                    f"{path_name}.field[{index}]",
+                    visited,
+                )
+            add_type(
+                type_info.get("element_type"),
+                usage,
+                f"{path_name}.element",
+                visited,
+            )
+
+        for index in process_indices:
+            if scanned >= max_records:
+                break
+            calls = archive.read(f"process/{index}/calls")
+            data_name = f"process/{index}/data"
+            data = archive.read(data_name) if data_name in entries else b""
+            process_pid = _capture_process_pid(archive, entries, index, pointer_size)
+            if pid is not None and process_pid != pid:
+                continue
+            if len(calls) % pointer_size:
+                raise ValueError(
+                    f"process/{index}/calls is not an array of {pointer_size * 8}-bit offsets"
+                )
+            record_count = len(calls) // pointer_size
+            page_count = min(record_count, max_records - scanned)
+            records = _capture_call_records(
+                calls,
+                data,
+                page_count,
+                False,
+                0,
+                definitions=definitions,
+                pointer_size=pointer_size,
+            )
+            scanned += len(records)
+            for record in records:
+                definition = record.get("definition", {})
+                if not definition.get("valid"):
+                    continue
+                definition_offset = definition.get("offset")
+                if isinstance(definition_offset, int):
+                    resolved_definitions.add(definition_offset)
+                usage = {
+                    "process_index": index,
+                    "pid": process_pid,
+                    "definition_offset": definition.get("offset"),
+                    "api_name": definition.get("name"),
+                    "api_module": definition.get("module"),
+                }
+                for parameter_index, parameter in enumerate(definition.get("parameters", [])):
+                    add_type(
+                        parameter.get("type"),
+                        usage,
+                        f"parameter[{parameter_index}]",
+                        set(),
+                    )
+                add_type(definition.get("return_type"), usage, "return", set())
+
+    wanted = query.casefold()
+    returned: list[dict[str, Any]] = []
+    for item in types.values():
+        details = item["_details"]
+        if kind is not None and details.get("kind") != kind:
+            continue
+        if wanted and wanted not in json.dumps(details, ensure_ascii=False).casefold():
+            continue
+        result = {
+            key: details[key]
+            for key in (
+                "offset",
+                "kind",
+                "size",
+                "flags",
+                "pointer_size",
+                "name",
+                "alias",
+                "structure_size",
+                "structure_size_flagged",
+                "alignment",
+                "struct_flags",
+                "element_type_offset",
+                "array_count",
+                "array_flags",
+                "enum_count",
+                "enum_flags",
+                "field_count",
+            )
+            if key in details
+        }
+        result["usage_count"] = len(item["_uses"])
+        result["usage_truncated"] = item["_usage_truncated"]
+        result["uses"] = item["_uses"]
+        if include_details:
+            result["type"] = details
+        returned.append(result)
+    returned.sort(key=lambda value: (str(value.get("name") or "").casefold(), value["offset"]))
+    return {
+        "file": str(path),
+        "process_index": process_index,
+        "pid": pid,
+        "definitions_available": True,
+        "types": returned[:limit],
+        "count": len(returned),
+        "scanned_records": scanned,
+        "resolved_definitions": len(resolved_definitions),
+        "truncated": len(returned) > limit or scanned >= max_records,
+    }
+
+
+@mcp.tool()
 def capture_export_calls(
     file_path: str,
     output_path: str,
@@ -9220,6 +9416,16 @@ def _self_test() -> None:
         assert x86_context["error_code"] == 6
         assert x86_context["duration_seconds"] == 0.25
         assert capture_read_definition(str(x86_path), 16)["architecture"] == "x86"
+        x86_types = capture_list_types(
+            str(x86_path), include_details=True, pid=4321
+        )
+        assert x86_types["count"] == 2
+        assert {item["offset"] for item in x86_types["types"]} == {
+            x86_struct_type_offset,
+            160,
+        }
+        assert capture_list_types(str(x86_path), kind=11)["count"] == 1
+        assert capture_list_types(str(x86_path), query="dwValue")["count"] == 1
         assert capture_list_apis(str(x86_path))["apis"][0]["module"] == "kernel32.dll"
         assert capture_list_apis(str(x86_path))["apis"][0]["pids"] == [4321]
         x86_deep_validation = capture_validate(str(x86_path), deep=True)
