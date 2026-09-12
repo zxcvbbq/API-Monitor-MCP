@@ -3485,6 +3485,56 @@ def api_monitor_wait_for_traffic(
 
 
 @mcp.tool()
+def api_monitor_wait_for_new_traffic(
+    minimum_new_calls: int = 1,
+    timeout_seconds: int = 30,
+    window_title: str = "",
+    window_handle: int | None = None,
+    baseline_calls: int | None = None,
+    limit: int = 500,
+) -> dict[str, Any]:
+    """Wait for new Rohitab traffic relative to an optional call-count baseline."""
+    if minimum_new_calls < 0:
+        raise ValueError("minimum_new_calls must be non-negative")
+    if timeout_seconds < 1 or timeout_seconds > 300:
+        raise ValueError("timeout_seconds must be between 1 and 300")
+    if baseline_calls is not None and baseline_calls < 0:
+        raise ValueError("baseline_calls must be non-negative")
+    limit = _limit(limit, "limit", 2000)
+    summaries = api_monitor_summary(window_title, window_handle)["summaries"]
+    if baseline_calls is None:
+        baseline_calls = sum(summary["calls"] for summary in summaries)
+    target_calls = baseline_calls + minimum_new_calls
+    deadline = time.monotonic() + timeout_seconds
+    while True:
+        summaries = api_monitor_summary(window_title, window_handle)["summaries"]
+        current_calls = sum(summary["calls"] for summary in summaries)
+        if current_calls >= target_calls:
+            return {
+                "ready": True,
+                "baseline_calls": baseline_calls,
+                "current_calls": current_calls,
+                "new_calls": current_calls - baseline_calls,
+                "minimum_new_calls": minimum_new_calls,
+                "summaries": summaries,
+                "traffic": api_monitor_traffic(window_title, limit, window_handle),
+            }
+        if time.monotonic() >= deadline:
+            break
+        time.sleep(0.2)
+    current_calls = sum(summary["calls"] for summary in summaries)
+    return {
+        "ready": False,
+        "baseline_calls": baseline_calls,
+        "current_calls": current_calls,
+        "new_calls": current_calls - baseline_calls,
+        "minimum_new_calls": minimum_new_calls,
+        "summaries": summaries,
+        "traffic": api_monitor_traffic(window_title, limit, window_handle),
+    }
+
+
+@mcp.tool()
 def api_monitor_add_display_filter(
     field: str,
     operator: str,
@@ -6568,6 +6618,7 @@ def api_monitor_read_api_definition(
 
 
 def _self_test() -> None:
+    global api_monitor_summary, api_monitor_traffic
     with TemporaryDirectory() as directory:
         assert _capture_output_path(str(Path(directory) / "out.apmx64"), "x64").suffix == ".apmx64"
         path = Path(directory) / "sample.apmx64"
@@ -7227,6 +7278,23 @@ def _self_test() -> None:
         raw_process_info += struct.pack("<I", zlib.crc32(raw_process_info) & 0xFFFFFFFF)
         raw_process = _parse_capture_process_info(raw_process_info, 8)
         assert raw_process["module_records"][0]["raw_payload"]["text"] == "raw-module"
+        original_summary = api_monitor_summary
+        original_traffic = api_monitor_traffic
+        summary_calls = iter((3, 4))
+        api_monitor_summary = lambda *_args, **_kwargs: {
+            "summaries": [{"calls": next(summary_calls)}]
+        }
+        api_monitor_traffic = lambda *_args, **_kwargs: {"panes": []}
+        try:
+            waited_new = api_monitor_wait_for_new_traffic(
+                minimum_new_calls=2, timeout_seconds=1, baseline_calls=2
+            )
+        finally:
+            api_monitor_summary = original_summary
+            api_monitor_traffic = original_traffic
+        assert waited_new["ready"]
+        assert waited_new["current_calls"] == 4
+        assert waited_new["new_calls"] == 2
 
 
 def main() -> None:
