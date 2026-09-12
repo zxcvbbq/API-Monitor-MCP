@@ -6036,6 +6036,105 @@ def capture_search_definitions(
 
 
 @mcp.tool()
+def capture_export_definitions(
+    file_path: str,
+    output_path: str,
+    process_index: int | None = None,
+    limit: int = 10_000,
+    max_records: int = 1_000_000,
+    output_format: str = "json",
+    include_details: bool = True,
+    overwrite: bool = False,
+) -> dict[str, Any]:
+    """Export referenced API definitions as bounded JSON or CSV."""
+    if output_format not in {"json", "csv"}:
+        raise ValueError("output_format must be json or csv")
+    if process_index is not None and process_index < 0:
+        raise ValueError("process_index must be non-negative")
+    limit = _limit(limit, "limit", 10_000)
+    max_records = _limit(max_records, "max_records", 1_000_000)
+    output = Path(output_path).expanduser()
+    if not output.parent.is_dir():
+        raise NotADirectoryError(f"Output directory not found: {output.parent}")
+    output = output.resolve()
+    if output.exists() and not overwrite:
+        raise FileExistsError(f"Output already exists: {output}")
+
+    result = capture_list_definitions(
+        file_path,
+        process_index=process_index,
+        limit=limit,
+        max_records=max_records,
+        include_details=include_details,
+    )
+    if output_format == "json":
+        content = json.dumps(result, indent=2, ensure_ascii=False) + "\n"
+    else:
+        stream = io.StringIO(newline="")
+        writer = csv.writer(stream)
+        writer.writerow(
+            [
+                "offset",
+                "count",
+                "process_indices",
+                "first_record",
+                "last_record",
+                "valid",
+                "name",
+                "module",
+                "ordinal",
+                "flags",
+                "parameter_count",
+                "error",
+                "details_json",
+            ]
+        )
+        for definition in result["definitions"]:
+            writer.writerow(
+                [
+                    definition.get("offset", ""),
+                    definition.get("count", ""),
+                    json.dumps(definition.get("process_indices", [])),
+                    json.dumps(definition.get("first_record", {})),
+                    json.dumps(definition.get("last_record", {})),
+                    definition.get("valid", ""),
+                    definition.get("name", ""),
+                    definition.get("module", ""),
+                    definition.get("ordinal", ""),
+                    definition.get("flags", ""),
+                    definition.get("parameter_count", ""),
+                    definition.get("error", ""),
+                    json.dumps(definition.get("details", {}), ensure_ascii=False)
+                    if include_details
+                    else "",
+                ]
+            )
+        content = stream.getvalue()
+    encoded = content.encode("utf-8")
+    digest = hashlib.sha256(encoded).hexdigest()
+    try:
+        mode = "wb" if overwrite else "xb"
+        with output.open(mode) as handle:
+            handle.write(encoded)
+    except Exception:
+        if output.exists() and not overwrite:
+            output.unlink()
+        raise
+    return {
+        "exported": True,
+        "file": result["file"],
+        "output": str(output),
+        "format": output_format,
+        "process_index": process_index,
+        "count": len(result["definitions"]),
+        "scanned_records": result["scanned_records"],
+        "truncated": result["truncated"],
+        "size": len(encoded),
+        "sha256": digest,
+    }
+
+
+@mcp.tool()
 def capture_search_calls(
     file_path: str,
     query: str,
@@ -6170,6 +6269,7 @@ def capture_search_calls(
                             "count": len(matches),
                             "scanned_records": scanned,
                             "truncated": True,
+                            "definitions_resolved": resolve_definitions,
                             "arguments_decoded": decode_arguments,
                         }
             if scanned >= max_records:
@@ -7386,6 +7486,18 @@ def _self_test() -> None:
             match["path"].endswith(".name")
             for match in definition_search["matches"][0]["matches"]
         )
+        definitions_json = Path(directory) / "definitions.json"
+        definition_export = capture_export_definitions(
+            str(argument_path), str(definitions_json), include_details=True
+        )
+        assert definition_export["count"] == 1
+        assert json.loads(definitions_json.read_text())["definitions"][0]["details"]["name"] == "CreateFileW"
+        definitions_csv = Path(directory) / "definitions.csv"
+        csv_definition_export = capture_export_definitions(
+            str(path), str(definitions_csv), output_format="csv", include_details=False
+        )
+        assert csv_definition_export["count"] == 1
+        assert "CreateFileW" in definitions_csv.read_text()
         call_window = capture_calls_around(str(path), 0, 0, before=2, after=2)
         assert call_window["window_start"] == 0
         assert call_window["records"][0]["is_target"]
