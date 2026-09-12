@@ -1,0 +1,9 @@
+[project]
+name = "rohitab-api-monitor-mcp"
+version = "0.1.0"
+description = "Read-only MCP bridge for Rohitab API Monitor captures and the installed app"
+requires-python = ">=3.10"
+dependencies = ["mcp>=1.0.0"]
+
+[tool.ruff]
+line-length = 100
