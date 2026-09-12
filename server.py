@@ -5946,6 +5946,138 @@ def capture_decode_all_calls(
 
 
 @mcp.tool()
+def capture_export_decoded_calls(
+    file_path: str,
+    output_path: str,
+    limit: int = 10_000,
+    output_format: str = "json",
+    max_data_bytes: int = 4096,
+    max_items: int = 64,
+    resolve_definitions: bool = False,
+    overwrite: bool = False,
+) -> dict[str, Any]:
+    """Export bounded decoded calls across every captured process as JSON or CSV."""
+    if output_format not in {"json", "csv"}:
+        raise ValueError("output_format must be json or csv")
+    limit = _limit(limit, "limit", 10_000)
+    output = Path(output_path).expanduser()
+    if not output.parent.is_dir():
+        raise NotADirectoryError(f"Output directory not found: {output.parent}")
+    output = output.resolve()
+    if output.exists() and not overwrite:
+        raise FileExistsError(f"Output already exists: {output}")
+
+    result = capture_decode_all_calls(
+        file_path,
+        limit=limit,
+        max_data_bytes=max_data_bytes,
+        max_items=max_items,
+        resolve_definitions=resolve_definitions,
+    )
+    if output_format == "json":
+        content = json.dumps(result, indent=2, ensure_ascii=False) + "\n"
+    else:
+        stream = io.StringIO(newline="")
+        writer = csv.writer(stream)
+        writer.writerow(
+            [
+                "process_index",
+                "record_index",
+                "offset",
+                "size",
+                "valid",
+                "flags",
+                "definition_offset",
+                "api_name",
+                "api_module",
+                "thread_id",
+                "thread_number",
+                "timestamp_utc",
+                "duration_seconds",
+                "error_code",
+                "argument_index",
+                "argument_name",
+                "argument_type",
+                "argument_value",
+                "argument_payload",
+                "return_available",
+                "return_type",
+                "return_value",
+                "return_payload",
+            ]
+        )
+        for process in result["processes"]:
+            process_index = process["process_index"]
+            for decoded in process["records"]:
+                record = decoded["record"]
+                definition = record.get("definition", {})
+                context = record.get("context", {})
+                arguments = decoded.get("argument_stream", {}).get("arguments", []) or [None]
+                return_value = decoded.get("return_value", {})
+                return_payload = return_value.get("payload", {})
+                for argument in arguments:
+                    argument = argument or {}
+                    argument_payload = argument.get("payload", {})
+                    writer.writerow(
+                        [
+                            process_index,
+                            record.get("index", ""),
+                            record.get("offset", ""),
+                            record.get("size", ""),
+                            record.get("valid", ""),
+                            record.get("flags", ""),
+                            record.get("definition_offset", ""),
+                            definition.get("name", ""),
+                            definition.get("module", ""),
+                            context.get("thread_id", ""),
+                            context.get("thread_number", ""),
+                            context.get("timestamp_utc", ""),
+                            context.get("duration_seconds", ""),
+                            context.get("error_code", ""),
+                            argument.get("index", ""),
+                            argument.get("name", ""),
+                            json.dumps(argument.get("type", {}), ensure_ascii=False)
+                            if argument.get("type")
+                            else "",
+                            json.dumps(argument.get("typed", {}), ensure_ascii=False)
+                            if argument.get("typed")
+                            else "",
+                            argument_payload.get("text", argument_payload.get("base64", "")),
+                            return_value.get("available", ""),
+                            json.dumps(return_value.get("type", {}), ensure_ascii=False)
+                            if return_value.get("type")
+                            else "",
+                            json.dumps(return_value.get("typed", {}), ensure_ascii=False)
+                            if return_value.get("typed")
+                            else "",
+                            return_payload.get("text", return_payload.get("base64", "")),
+                        ]
+                    )
+        content = stream.getvalue()
+    encoded = content.encode("utf-8")
+    digest = hashlib.sha256(encoded).hexdigest()
+    try:
+        mode = "wb" if overwrite else "xb"
+        with output.open(mode) as handle:
+            handle.write(encoded)
+    except Exception:
+        if output.exists() and not overwrite:
+            output.unlink()
+        raise
+    return {
+        "exported": True,
+        "file": result["file"],
+        "output": str(output),
+        "format": output_format,
+        "count": result["count"],
+        "total_count": result["total_count"],
+        "truncated": result["truncated"],
+        "size": len(encoded),
+        "sha256": digest,
+    }
+
+
+@mcp.tool()
 def capture_call_stats(
     file_path: str,
     process_index: int | None = None,
@@ -8067,6 +8199,18 @@ def _self_test() -> None:
         assert decoded_all["count"] == 2
         assert decoded_all["total_count"] == 2
         assert len(decoded_all["processes"]) == 2
+        decoded_json = Path(directory) / "decoded.json"
+        decoded_export = capture_export_decoded_calls(
+            str(path), str(decoded_json), resolve_definitions=True
+        )
+        assert decoded_export["count"] == 1
+        assert json.loads(decoded_json.read_text())["processes"][0]["records"][0]["return_value"]["typed"]["value"] == 7
+        decoded_csv = Path(directory) / "decoded.csv"
+        decoded_csv_export = capture_export_decoded_calls(
+            str(path), str(decoded_csv), output_format="csv", resolve_definitions=True
+        )
+        assert decoded_csv_export["count"] == 1
+        assert "CreateFileW" in decoded_csv.read_text()
 
         x86_path = Path(directory) / "sample.apmx86"
         x86_record = bytearray(120)
