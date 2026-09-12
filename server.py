@@ -5600,14 +5600,23 @@ def capture_filter_calls(
     include_data: bool = False,
     max_data_bytes: int = 4096,
     resolve_definitions: bool = False,
+    api_name: str | None = None,
+    api_module: str | None = None,
+    definition_offset: int | None = None,
 ) -> dict[str, Any]:
-    """Filter saved calls by verified thread, error, and duration context."""
+    """Filter saved calls by API definition, thread, error, and duration context."""
     if process_index is not None and process_index < 0:
         raise ValueError("process_index must be non-negative")
     if thread_id is not None and not 0 <= thread_id <= 0xFFFFFFFF:
         raise ValueError("thread_id must be between 0 and 4294967295")
     if error_code is not None and not 0 <= error_code <= 0xFFFFFFFF:
         raise ValueError("error_code must be between 0 and 4294967295")
+    if api_name is not None and not api_name.strip():
+        raise ValueError("api_name must be non-empty when provided")
+    if api_module is not None and not api_module.strip():
+        raise ValueError("api_module must be non-empty when provided")
+    if definition_offset is not None and definition_offset < 0:
+        raise ValueError("definition_offset must be non-negative")
     if min_duration_seconds is not None and (
         not math.isfinite(min_duration_seconds) or min_duration_seconds < 0
     ):
@@ -5629,6 +5638,20 @@ def capture_filter_calls(
     limit = _limit(limit, "limit", 10_000)
     max_records = _limit(max_records, "max_records", 1_000_000)
     max_data_bytes = _limit(max_data_bytes, "max_data_bytes", 16 * 1024 * 1024)
+    resolve_definitions = resolve_definitions or any(
+        value is not None for value in (api_name, api_module, definition_offset)
+    )
+    filters = {
+        "thread_id": thread_id,
+        "error_code": error_code,
+        "api_name": api_name,
+        "api_module": api_module,
+        "definition_offset": definition_offset,
+        "min_duration_seconds": min_duration_seconds,
+        "max_duration_seconds": max_duration_seconds,
+        "start_time_utc": start_time_utc,
+        "end_time_utc": end_time_utc,
+    }
     path = _capture_path(file_path)
     pointer_size = 4 if path.suffix.lower() == ".apmx86" else 8
     archive, _, _ = _open_capture_zip(path)
@@ -5676,6 +5699,17 @@ def capture_filter_calls(
                     continue
                 if error_code is not None and context.get("error_code") != error_code:
                     continue
+                definition = record.get("definition", {})
+                if definition_offset is not None and definition.get("offset") != definition_offset:
+                    continue
+                if api_name is not None and api_name.casefold() not in str(
+                    definition.get("name", "")
+                ).casefold():
+                    continue
+                if api_module is not None and api_module.casefold() not in str(
+                    definition.get("module", "")
+                ).casefold():
+                    continue
                 timestamp = context.get("timestamp_filetime", 0)
                 if start_filetime is not None and (
                     not timestamp or timestamp < start_filetime
@@ -5698,14 +5732,7 @@ def capture_filter_calls(
                     return {
                         "file": str(path),
                         "process_index": process_index,
-                        "filters": {
-                            "thread_id": thread_id,
-                            "error_code": error_code,
-                            "min_duration_seconds": min_duration_seconds,
-                            "max_duration_seconds": max_duration_seconds,
-                            "start_time_utc": start_time_utc,
-                            "end_time_utc": end_time_utc,
-                        },
+                        "filters": filters,
                         "matches": matches,
                         "count": len(matches),
                         "scanned_records": scanned,
@@ -5717,14 +5744,7 @@ def capture_filter_calls(
     return {
         "file": str(path),
         "process_index": process_index,
-        "filters": {
-            "thread_id": thread_id,
-            "error_code": error_code,
-            "min_duration_seconds": min_duration_seconds,
-            "max_duration_seconds": max_duration_seconds,
-            "start_time_utc": start_time_utc,
-            "end_time_utc": end_time_utc,
-        },
+        "filters": filters,
         "matches": matches,
         "count": len(matches),
         "scanned_records": scanned,
@@ -6603,6 +6623,11 @@ def _self_test() -> None:
         )
         assert filtered["count"] == 1
         assert filtered["matches"][0]["record"]["index"] == 0
+        api_filtered = capture_filter_calls(
+            str(path), api_name="CreateFileW", api_module="kernel32", definition_offset=16
+        )
+        assert api_filtered["count"] == 1
+        assert api_filtered["definitions_resolved"]
         timeline = capture_call_timeline(str(path), order_by="timestamp")
         assert timeline["count"] == 1
         assert timeline["timeline"][0]["record"]["context"]["timestamp_utc"] == "2020-01-01T00:00:00+00:00"
