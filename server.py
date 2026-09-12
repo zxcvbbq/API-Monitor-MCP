@@ -2614,6 +2614,26 @@ def _detect_process_architecture(pid: int) -> dict[str, Any]:
         close_handle(process)
 
 
+def _detect_executable_architecture(path: Path) -> dict[str, Any]:
+    machine_names = {0x014C: "x86", 0x8664: "x64", 0xAA64: "arm64"}
+    with path.open("rb") as handle:
+        dos_header = handle.read(64)
+        if len(dos_header) < 64 or dos_header[:2] != b"MZ":
+            raise ValueError(f"Not a Windows PE executable: {path}")
+        pe_offset = struct.unpack_from("<I", dos_header, 0x3C)[0]
+        handle.seek(pe_offset)
+        pe_header = handle.read(6)
+    if len(pe_header) < 6 or pe_header[:4] != b"PE\0\0":
+        raise ValueError(f"Not a Windows PE executable: {path}")
+    machine = struct.unpack_from("<H", pe_header, 4)[0]
+    return {
+        "file": str(path),
+        "architecture": machine_names.get(machine),
+        "machine": f"0x{machine:04x}",
+        "method": "PE machine header",
+    }
+
+
 def _named_gui_rows(headers: list[str], rows: list[list[str]]) -> list[dict[str, Any]]:
     return [
         {
@@ -2688,6 +2708,17 @@ def api_monitor_process_architecture(pid: int) -> dict[str, Any]:
         raise ValueError("pid must be positive")
     result = _detect_process_architecture(pid)
     return {"supported": True, **result}
+
+
+@mcp.tool()
+def api_monitor_executable_architecture(process_path: str) -> dict[str, Any]:
+    """Report a Windows executable architecture for API Monitor launch selection."""
+    if sys.platform != "win32":
+        return {"supported": False, "file": process_path, "architecture": None}
+    path = Path(process_path).expanduser()
+    if not path.is_file():
+        raise FileNotFoundError(f"Target process not found: {path}")
+    return {"supported": True, **_detect_executable_architecture(path.resolve())}
 
 
 @mcp.tool()
@@ -3695,10 +3726,20 @@ def api_monitor_monitor_process(
         raise RuntimeError("Starting API Monitor sessions requires Windows")
     if timeout_seconds < 1 or timeout_seconds > 60:
         raise ValueError("timeout_seconds must be between 1 and 60")
+    if architecture not in {"auto", "x86", "x64"}:
+        raise ValueError("architecture must be auto, x86, or x64")
     target = Path(process_path).expanduser()
     if not target.is_file():
         raise FileNotFoundError(f"Target process not found: {target}")
     target = target.resolve()
+    requested_architecture = architecture
+    if architecture == "auto":
+        detected = api_monitor_executable_architecture(str(target))
+        architecture = detected.get("architecture")
+        if architecture not in {"x86", "x64"}:
+            raise RuntimeError(
+                f"Could not determine an API Monitor-compatible architecture for {target}"
+            )
     if start_in:
         start_directory = Path(start_in).expanduser()
         if not start_directory.is_dir():
@@ -3738,6 +3779,7 @@ def api_monitor_monitor_process(
         "submitted": True,
         "process": str(target),
         "architecture": architecture,
+        "requested_architecture": requested_architecture,
         "arguments": arguments,
         "start_in": start_in,
         "window": {"handle": main_window["handle"], "title": main_window["title"]},
@@ -3765,6 +3807,19 @@ def api_monitor_capture_process(
         raise ValueError("minimum_calls must be non-negative")
     if timeout_seconds < 1 or timeout_seconds > 60:
         raise ValueError("timeout_seconds must be between 1 and 60")
+    if architecture not in {"auto", "x86", "x64"}:
+        raise ValueError("architecture must be auto, x86, or x64")
+    requested_architecture = architecture
+    if architecture == "auto":
+        target = Path(process_path).expanduser()
+        if not target.is_file():
+            raise FileNotFoundError(f"Target process not found: {target}")
+        detected = api_monitor_executable_architecture(str(target.resolve()))
+        architecture = detected.get("architecture")
+        if architecture not in {"x86", "x64"}:
+            raise RuntimeError(
+                f"Could not determine an API Monitor-compatible architecture for {target}"
+            )
     path = _capture_output_path(output_path, architecture)
     if path.exists() and not overwrite:
         raise FileExistsError(f"Capture already exists: {path}")
@@ -3811,6 +3866,7 @@ def api_monitor_capture_process(
         "captured": True,
         "ready": ready,
         "minimum_calls": minimum_calls,
+        "requested_architecture": requested_architecture,
         "waited_seconds": waited_seconds,
         "summaries": summaries,
         "started": started,
@@ -6847,6 +6903,14 @@ def _self_test() -> None:
             info += struct.pack("<7I", 64, 0, 6, 2, 1, 1, 0x409)
             archive.writestr("info", info + struct.pack("<I", zlib.crc32(info) & 0xFFFFFFFF))
         path.write_bytes(b"\r\nAPI Monitor 64-bit Capture\r\nRBAPM" + payload.getvalue())
+        executable = Path(directory) / "sample.exe"
+        pe = bytearray(0x4A)
+        pe[:2] = b"MZ"
+        struct.pack_into("<I", pe, 0x3C, 0x40)
+        pe[0x40:0x44] = b"PE\0\0"
+        struct.pack_into("<H", pe, 0x44, 0x014C)
+        executable.write_bytes(pe)
+        assert _detect_executable_architecture(executable)["architecture"] == "x86"
         second_path = Path(directory) / "variants" / "second.apmx64"
         second_path.parent.mkdir()
         second_payload = io.BytesIO()
