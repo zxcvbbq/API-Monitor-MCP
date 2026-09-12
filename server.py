@@ -3458,7 +3458,49 @@ def api_monitor_gui_uia(
             "depth": depth,
         }
 
+    selector_requested = bool(
+        control_name
+        or control_type
+        or control_handle is not None
+        or automation_id
+        or class_name
+    )
+
+    def selected(info: dict[str, Any]) -> bool:
+        return not (
+            (control_handle is not None and info["handle"] != control_handle)
+            or (control_name and info["name"] != control_name)
+            or (control_type and info["control_type"] != control_type)
+            or (automation_id and info["automation_id"] != automation_id)
+            or (class_name and info["class_name"] != class_name)
+        )
+
+    def all_controls(window: Any) -> list[Any]:
+        try:
+            return [window, *window.descendants()]
+        except (OSError, RuntimeError):
+            return []
+
     if action == "read":
+        if selector_requested:
+            matches = []
+            for window in windows:
+                for control in all_controls(window):
+                    info = control_info(control, 0)
+                    if selected(info):
+                        matches.append(
+                            {
+                                "window": {"handle": window.handle, "title": window.window_text()},
+                                "control": info,
+                            }
+                        )
+            return {
+                "supported": True,
+                "method": "background-ui-automation",
+                "controls": matches[:limit],
+                "count": len(matches),
+                "truncated": len(matches) > limit,
+            }
         returned_windows = []
         item_count = 0
         truncated = False
@@ -3504,21 +3546,9 @@ def api_monitor_gui_uia(
 
     matches = []
     for window in windows:
-        try:
-            controls = [window, *window.descendants()]
-        except (OSError, RuntimeError):
-            continue
-        for control in controls:
+        for control in all_controls(window):
             info = control_info(control, 0)
-            if control_handle is not None and info["handle"] != control_handle:
-                continue
-            if control_name and info["name"] != control_name:
-                continue
-            if control_type and info["control_type"] != control_type:
-                continue
-            if automation_id and info["automation_id"] != automation_id:
-                continue
-            if class_name and info["class_name"] != class_name:
+            if not selected(info):
                 continue
             matches.append((window, control, info))
     if len(matches) != 1:
