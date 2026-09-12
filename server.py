@@ -1870,7 +1870,10 @@ def _capture_type_alignment(
 
 
 def _capture_exact_fixed_structure(
-    data: bytes, type_info: dict[str, Any], depth: int, machine_flag: bool
+    data: bytes,
+    type_info: dict[str, Any],
+    depth: int,
+    machine_flag: bool,
 ) -> dict[str, Any] | None:
     if depth >= 4:
         return None
@@ -1898,7 +1901,9 @@ def _capture_exact_fixed_structure(
         else:
             raw = data[offset : offset + size]
             item["payload"] = _read_payload(raw)
-            typed = _capture_exact_value(raw, field_type, depth + 1, machine_flag)
+            typed = _capture_exact_value(
+                raw, field_type, depth + 1, machine_flag, inline_pointer=True
+            )
             if typed:
                 item["typed"] = typed
         decoded_fields.append(item)
@@ -1916,7 +1921,11 @@ def _capture_exact_fixed_structure(
 
 
 def _capture_exact_array(
-    data: bytes, type_info: dict[str, Any], depth: int, machine_flag: bool
+    data: bytes,
+    type_info: dict[str, Any],
+    depth: int,
+    machine_flag: bool,
+    inline_pointer: bool,
 ) -> dict[str, Any] | None:
     element_type = type_info.get("element_type")
     if not isinstance(element_type, dict) or depth >= 4:
@@ -1958,7 +1967,9 @@ def _capture_exact_array(
                 "valid": True,
                 "payload": _read_payload(raw),
             }
-            typed = _capture_exact_value(raw, element_type, depth + 1, machine_flag)
+            typed = _capture_exact_value(
+                raw, element_type, depth + 1, machine_flag, inline_pointer=True
+            )
             if typed:
                 item["typed"] = typed
             elements.append(item)
@@ -1987,7 +1998,9 @@ def _capture_exact_array(
             else:
                 raw = data[table_bytes + offset : table_bytes + offset + length]
                 item["payload"] = _read_payload(raw)
-                typed = _capture_exact_value(raw, element_type, depth + 1, machine_flag)
+                typed = _capture_exact_value(
+                    raw, element_type, depth + 1, machine_flag, inline_pointer=False
+                )
                 if typed:
                     item["typed"] = typed
             elements.append(item)
@@ -2020,7 +2033,10 @@ def _capture_exact_array(
 
 
 def _capture_exact_scalar(
-    data: bytes, type_info: dict[str, Any], machine_flag: bool = False
+    data: bytes,
+    type_info: dict[str, Any],
+    machine_flag: bool = False,
+    inline_pointer: bool = False,
 ) -> dict[str, Any] | None:
     kind = type_info.get("kind")
     size = type_info.get("size")
@@ -2042,7 +2058,7 @@ def _capture_exact_scalar(
         return result
     if kind == 4:
         pointer_size = int(type_info.get("pointer_size", 8))
-        pointer_offset = 0 if int(type_info.get("flags", 0)) & 8 else 8
+        pointer_offset = 0 if inline_pointer or int(type_info.get("flags", 0)) & 8 else 8
         serialized_size = pointer_offset + pointer_size
         if len(data) < serialized_size or pointer_size not in (4, 8):
             return None
@@ -2140,18 +2156,21 @@ def _capture_exact_value(
     type_info: dict[str, Any],
     depth: int = 0,
     machine_flag: bool = False,
+    inline_pointer: bool = False,
 ) -> dict[str, Any] | None:
-    scalar = _capture_exact_scalar(data, type_info, machine_flag)
+    scalar = _capture_exact_scalar(data, type_info, machine_flag, inline_pointer)
     if scalar or type_info.get("kind") == 14:
         return (
-            _capture_exact_array(data, type_info, depth, machine_flag)
+            _capture_exact_array(data, type_info, depth, machine_flag, inline_pointer)
             if not scalar
             else scalar
         )
     if type_info.get("kind") != 11 or depth >= 4:
         return scalar
     if int(type_info.get("struct_flags", 0)) & 2:
-        return _capture_exact_fixed_structure(data, type_info, depth, machine_flag)
+        return _capture_exact_fixed_structure(
+            data, type_info, depth, machine_flag
+        )
     fields = type_info.get("fields", [])
     if not fields:
         return None
@@ -2180,7 +2199,9 @@ def _capture_exact_value(
             item["payload"] = _read_payload(raw)
             field_type = field.get("type")
             if field_type:
-                typed = _capture_exact_value(raw, field_type, depth + 1, machine_flag)
+                typed = _capture_exact_value(
+                    raw, field_type, depth + 1, machine_flag, inline_pointer=False
+                )
                 if typed:
                     item["typed"] = typed
         decoded_fields.append(item)
@@ -5457,6 +5478,17 @@ def _self_test() -> None:
             {"kind": 14, "array_count": 4, "array_flags": 1, "element_type": {"kind": 8}},
         )
         assert wide_array_value and wide_array_value["value"] == "wide"
+        pointer_type = {"kind": 4, "pointer_size": 8, "flags": 0}
+        direct_pointer_array = _capture_exact_value(
+            struct.pack("<Q", 0x1234),
+            {"kind": 14, "array_count": 1, "array_flags": 1, "element_type": pointer_type},
+        )
+        assert direct_pointer_array and direct_pointer_array["elements"][0]["typed"]["value"] == "0x0000000000001234"
+        variable_pointer_array = _capture_exact_value(
+            struct.pack("<H", 1) + struct.pack("<HH", 0, 32) + b"\0" * 8 + struct.pack("<Q", 0x5678),
+            {"kind": 14, "array_count": 1, "array_flags": 0, "element_type": pointer_type},
+        )
+        assert variable_pointer_array and variable_pointer_array["elements"][0]["typed"]["value"] == "0x0000000000005678"
         prefixed_array_value = _capture_exact_value(
             struct.pack("<HIII", 3, 1, 2, 3), array_type
         )
