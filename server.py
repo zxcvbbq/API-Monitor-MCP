@@ -1526,6 +1526,68 @@ def _post_window_command(handle: int, command_id: int) -> None:
         raise OSError(ctypes.get_last_error(), "Could not invoke API Monitor command")
 
 
+def _read_native_menu(handle: int, max_items: int, max_depth: int) -> tuple[list[dict[str, Any]], bool]:
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+    menu = user32.GetMenu(handle)
+    if not menu:
+        raise LookupError("API Monitor window has no menu")
+    seen = 0
+    truncated = False
+
+    def visit(menu_handle: int, depth: int) -> list[dict[str, Any]]:
+        nonlocal seen, truncated
+        items: list[dict[str, Any]] = []
+        count = user32.GetMenuItemCount(menu_handle)
+        for position in range(max(0, count)):
+            if seen >= max_items:
+                truncated = True
+                break
+            seen += 1
+            state = user32.GetMenuState(menu_handle, position, 0x0400)  # MF_BYPOSITION
+            command_id = user32.GetMenuItemID(menu_handle, position)
+            text_buffer = ctypes.create_unicode_buffer(512)
+            text_length = user32.GetMenuStringW(
+                menu_handle, position, text_buffer, len(text_buffer), 0x0400
+            )
+            item: dict[str, Any] = {
+                "position": position,
+                "command_id": None if command_id == -1 else int(command_id),
+                "text": text_buffer.value[:text_length],
+                "separator": bool(state & 0x0800),
+                "enabled": not bool(state & 0x0003),
+                "checked": bool(state & 0x0008),
+                "state": int(state),
+            }
+            submenu = user32.GetSubMenu(menu_handle, position)
+            if submenu:
+                if depth < max_depth:
+                    item["items"] = visit(submenu, depth + 1)
+                else:
+                    item["items"] = []
+                    item["children_truncated"] = True
+            items.append(item)
+        return items
+
+    return visit(menu, 0), truncated
+
+
+def _menu_label(text: str) -> str:
+    return text.replace("&", "").replace("...", "").strip().casefold()
+
+
+def _find_native_menu_item(items: list[dict[str, Any]], path: list[str]) -> dict[str, Any] | None:
+    if not path:
+        return None
+    wanted = _menu_label(path[0])
+    for item in items:
+        if _menu_label(item.get("text", "")) != wanted:
+            continue
+        if len(path) == 1:
+            return item
+        return _find_native_menu_item(item.get("items", []), path[1:])
+    return None
+
+
 def _png_chunk(kind: bytes, data: bytes) -> bytes:
     return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data) & 0xFFFFFFFF)
 
@@ -2753,6 +2815,84 @@ def api_monitor_window_control(
         "method": "background-win32",
         "action": action,
         "window": target,
+    }
+
+
+@mcp.tool()
+def api_monitor_gui_menu(
+    action: str = "read",
+    window_title: str = "",
+    window_handle: int | None = None,
+    item_path: list[str] | None = None,
+    command_id: int | None = None,
+    max_items: int = 1000,
+    max_depth: int = 16,
+) -> dict[str, Any]:
+    """Read or invoke a Rohitab API Monitor menu without activating its window."""
+    if sys.platform != "win32":
+        raise RuntimeError("Rohitab menus require Windows")
+    if action not in {"read", "click"}:
+        raise ValueError("action must be read or click")
+    if window_handle is not None:
+        candidates = [window for window in _find_api_monitor_windows() if window["handle"] == window_handle]
+    elif window_title:
+        candidates = [window for window in _find_api_monitor_windows() if window["title"] == window_title]
+    else:
+        candidates = [
+            window
+            for window in _find_api_monitor_windows()
+            if window["title"].casefold().startswith("monitoring")
+        ]
+    if len(candidates) != 1:
+        raise ValueError("menu requires one matching window_handle or window_title")
+    max_items = _limit(max_items, "max_items", 20_000)
+    if not 0 <= max_depth <= 128:
+        raise ValueError("max_depth must be between 0 and 128")
+    target = candidates[0]
+    try:
+        items, truncated = _read_native_menu(target["handle"], max_items, max_depth)
+    except LookupError:
+        if action == "read":
+            return {
+                "supported": False,
+                "method": "background-win32",
+                "window": target,
+                "items": [],
+                "truncated": False,
+                "reason": "window has no native menu",
+            }
+        raise
+    if action == "read":
+        return {
+            "supported": True,
+            "method": "background-win32",
+            "window": target,
+            "items": items,
+            "truncated": truncated,
+        }
+    if command_id is not None and not 0 <= command_id <= 0xFFFF:
+        raise ValueError("command_id must be between 0 and 65535")
+    if command_id is None:
+        if not item_path or any(not part.strip() for part in item_path):
+            raise ValueError("click requires item_path or command_id")
+        selected = _find_native_menu_item(items, item_path)
+        if selected is None:
+            raise LookupError("Rohitab menu item was not found")
+        command_id = selected.get("command_id")
+        if command_id is None:
+            raise ValueError("selected menu item is not an actionable command")
+    else:
+        selected = None
+    if selected is not None and not selected["enabled"]:
+        raise PermissionError("selected Rohitab menu item is disabled")
+    _post_window_command(target["handle"], command_id)
+    return {
+        "clicked": True,
+        "method": "background-win32",
+        "window": target,
+        "item_path": item_path,
+        "command_id": command_id,
+        "item": selected,
     }
 
 
