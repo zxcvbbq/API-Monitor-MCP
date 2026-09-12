@@ -6779,6 +6779,7 @@ def capture_search_calls(
     pattern_hex: str | None = None,
     include_record_bytes: bool = False,
     pid: int | None = None,
+    query_regex: bool = False,
 ) -> dict[str, Any]:
     """Search saved call payloads, API definitions, and decoded arguments."""
     if not query and pattern_hex is None:
@@ -6787,6 +6788,8 @@ def capture_search_calls(
         raise ValueError("process_index must be non-negative")
     if pid is not None and not 1 <= pid <= 0xFFFFFFFF:
         raise ValueError("pid must be between 1 and 4294967295")
+    if len(query) > 4096:
+        raise ValueError("query must not exceed 4096 characters")
     limit = _limit(limit, "limit", 10_000)
     max_records = _limit(max_records, "max_records", 1_000_000)
     max_data_bytes = _limit(max_data_bytes, "max_data_bytes", 16 * 1024 * 1024)
@@ -6800,6 +6803,12 @@ def capture_search_calls(
             raise ValueError("pattern_hex must contain hexadecimal bytes") from exc
         if not pattern or len(pattern) > 256:
             raise ValueError("pattern_hex must contain between 1 and 256 bytes")
+    query_expression = None
+    if query_regex and query:
+        try:
+            query_expression = re.compile(query, re.IGNORECASE)
+        except re.error as exc:
+            raise ValueError(f"invalid query regular expression: {exc}") from exc
 
     def collect_byte_matches(
         payload: bytes,
@@ -6868,11 +6877,21 @@ def capture_search_calls(
                 payload_matches = []
                 for reference in record.get("data_refs", []):
                     text = reference.get("payload", {}).get("text")
-                    if not wanted or text is None or wanted not in text.casefold():
+                    if not wanted or text is None:
                         continue
-                    position = text.casefold().find(wanted)
+                    if query_expression is not None:
+                        found = query_expression.search(text)
+                        if found is None:
+                            continue
+                        position = found.start()
+                        match_end = found.end()
+                    else:
+                        if wanted not in text.casefold():
+                            continue
+                        position = text.casefold().find(wanted)
+                        match_end = position + len(query)
                     start = max(0, position - 120)
-                    end = min(len(text), position + len(query) + 120)
+                    end = min(len(text), match_end + 120)
                     payload_matches.append(
                         {
                             "slot": reference["slot"],
@@ -6884,7 +6903,16 @@ def capture_search_calls(
                 definition = record.get("definition", {})
                 api_matches = []
                 api_text = f"{definition.get('name', '')} {definition.get('module', '')}"
-                if wanted and definition.get("valid") and wanted in api_text.casefold():
+                api_matches_query = (
+                    query_expression.search(api_text)
+                    if query_expression is not None and wanted
+                    else None
+                )
+                if wanted and definition.get("valid") and (
+                    api_matches_query is not None
+                    if query_expression is not None
+                    else wanted in api_text.casefold()
+                ):
                     api_matches.append(
                         {
                             "name": definition.get("name"),
@@ -6921,7 +6949,11 @@ def capture_search_calls(
                                 )
                                 if value != ""
                             )
-                            if wanted in searchable.casefold():
+                            if (
+                                query_expression.search(searchable)
+                                if query_expression is not None
+                                else wanted in searchable.casefold()
+                            ):
                                 argument_matches.append(argument)
                 byte_matches = []
                 if pattern is not None:
@@ -6966,6 +6998,7 @@ def capture_search_calls(
                         return {
                             "file": str(path),
                             "query": query,
+                            "query_regex": query_regex,
                             "process_index": process_index,
                             "pid": pid,
                             "matches": matches,
@@ -6981,6 +7014,7 @@ def capture_search_calls(
     return {
         "file": str(path),
         "query": query,
+        "query_regex": query_regex,
         "process_index": process_index,
         "pid": pid,
         "matches": matches,
@@ -8577,6 +8611,8 @@ def _self_test() -> None:
         assert call_search["matches"][0]["pid"] == 1234
         assert call_search["matches"][0]["payload_matches"][0]["snippet"] == "hello"
         assert capture_search_calls(str(path), "ell", pid=1234)["count"] == 1
+        regex_search = capture_search_calls(str(path), r"he..o", query_regex=True)
+        assert regex_search["query_regex"] and regex_search["count"] == 1
         binary_call_search = capture_search_calls(
             str(path), pattern_hex="68 65 6c 6c 6f"
         )
