@@ -6987,7 +6987,7 @@ def capture_filter_calls(
     with archive:
         entries = {info.filename for info in archive.infolist()}
         definitions = archive.read("definitions") if resolve_definitions and "definitions" in entries else None
-        process_indices = []
+        process_entries = []
         for name in entries:
             match = re.fullmatch(r"process/(\d+)/calls", name, re.IGNORECASE)
             if not match:
@@ -6995,21 +6995,21 @@ def capture_filter_calls(
             index = int(match.group(1))
             if process_index is not None and index != process_index:
                 continue
-            if pid is not None:
-                info_name = f"process/{index}/info"
-                if info_name not in entries:
-                    continue
+            process_pid = None
+            info_name = f"process/{index}/info"
+            if info_name in entries:
                 try:
                     process_pid = _parse_capture_process_info(
                         archive.read(info_name), pointer_size
                     ).get("pid")
                 except ValueError:
-                    continue
-                if process_pid != pid:
-                    continue
-            process_indices.append(index)
-        process_indices.sort()
-        for index in process_indices:
+                    if pid is not None:
+                        continue
+            if pid is not None and process_pid != pid:
+                continue
+            process_entries.append((index, process_pid))
+        process_entries.sort()
+        for index, process_pid in process_entries:
             calls = archive.read(f"process/{index}/calls")
             data_name = f"process/{index}/data"
             data = archive.read(data_name) if data_name in entries else b""
@@ -7075,7 +7075,9 @@ def capture_filter_calls(
                     duration is None or duration > max_duration_seconds
                 ):
                     continue
-                matches.append({"process_index": index, "record": record})
+                matches.append(
+                    {"process_index": index, "pid": process_pid, "record": record}
+                )
                 if len(matches) >= limit:
                     return {
                         "file": str(path),
@@ -7308,7 +7310,7 @@ def capture_export_timeline(
                     record.get("definition_offset", ""),
                     definition.get("name", ""),
                     definition.get("module", ""),
-                    context.get("pid", ""),
+                    item.get("pid", ""),
                     context.get("thread_id", ""),
                     context.get("thread_number", ""),
                     context.get("module_base", ""),
@@ -8362,6 +8364,7 @@ def _self_test() -> None:
         )
         assert filtered["count"] == 1
         assert filtered["matches"][0]["record"]["index"] == 0
+        assert filtered["matches"][0]["pid"] == 1234
         api_filtered = capture_filter_calls(
             str(path),
             api_name="CreateFileW",
@@ -8404,12 +8407,14 @@ def _self_test() -> None:
         )
         assert timeline_export["count"] == 1
         assert json.loads(timeline_json.read_text())["timeline"][0]["process_index"] == 0
+        assert json.loads(timeline_json.read_text())["timeline"][0]["pid"] == 1234
         timeline_csv = Path(directory) / "timeline.csv"
         timeline_csv_export = capture_export_timeline(
             str(path), str(timeline_csv), output_format="csv", resolve_definitions=True
         )
         assert timeline_csv_export["count"] == 1
         assert "CreateFileW" in timeline_csv.read_text()
+        assert ",1234," in timeline_csv.read_text()
         resolved_records = capture_call_records(str(path), resolve_definitions=True)
         assert resolved_records["definitions_available"]
         assert resolved_records["records"][0]["definition"]["name"] == "CreateFileW"
