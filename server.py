@@ -7755,10 +7755,13 @@ def capture_list_modules(
     process_index: int | None = None,
     query: str = "",
     limit: int = 1000,
+    pid: int | None = None,
 ) -> dict[str, Any]:
     """List loaded modules across captured processes with their occurrences and bases."""
     if process_index is not None and process_index < 0:
         raise ValueError("process_index must be non-negative")
+    if pid is not None and not 1 <= pid <= 0xFFFFFFFF:
+        raise ValueError("pid must be between 1 and 4294967295")
     limit = _limit(limit, "limit", 10_000)
     source = capture_list_processes(file_path, limit=2000)
     wanted = query.casefold()
@@ -7768,6 +7771,9 @@ def capture_list_modules(
         if process_index is not None and index != process_index:
             continue
         metadata = process.get("metadata", {})
+        process_pid = metadata.get("pid") if isinstance(metadata, dict) else None
+        if pid is not None and process_pid != pid:
+            continue
         loaded = metadata.get("loaded_modules", []) if isinstance(metadata, dict) else []
         seen_in_process: set[str] = set()
         for item in loaded:
@@ -7781,15 +7787,19 @@ def capture_list_modules(
                     "name": path.replace("/", "\\").rsplit("\\", 1)[-1],
                     "path": path,
                     "process_indices": [],
+                    "pids": [],
                     "occurrences": [],
                 },
             )
             if key not in seen_in_process:
                 module["process_indices"].append(index)
+                if process_pid is not None:
+                    module["pids"].append(process_pid)
                 seen_in_process.add(key)
             module["occurrences"].append(
                 {
                     "process_index": index,
+                    "pid": process_pid,
                     "index": item.get("index"),
                     "base": item.get("base"),
                     "field": item.get("field"),
@@ -7808,18 +7818,22 @@ def capture_list_modules(
                     "name": path.replace("/", "\\").rsplit("\\", 1)[-1],
                     "path": path,
                     "process_indices": [],
+                    "pids": [],
                     "occurrences": [],
                 },
             )
             if index not in module["process_indices"]:
                 module["process_indices"].append(index)
+                if process_pid is not None:
+                    module["pids"].append(process_pid)
             module["occurrences"].append(
-                {"process_index": index, "source": "process_strings"}
+                {"process_index": index, "pid": process_pid, "source": "process_strings"}
             )
     returned = sorted(modules.values(), key=lambda item: (item["name"].casefold(), item["path"].casefold()))
     return {
         "file": source["file"],
         "process_index": process_index,
+        "pid": pid,
         "query": query,
         "modules": returned[:limit],
         "count": len(returned),
@@ -8736,6 +8750,8 @@ def _self_test() -> None:
         modules = capture_list_modules(str(path))
         assert modules["count"] == 1
         assert modules["modules"][0]["name"] == "sample.exe"
+        assert modules["modules"][0]["pids"] == [1234]
+        assert capture_list_modules(str(path), pid=1234)["count"] == 1
         call_stats = capture_call_stats(str(path), process_index=0)
         assert call_stats["processes"][0]["record_sizes"]["160"] == 1
         assert call_stats["totals"]["referenced_data_bytes"] == 9
@@ -8971,7 +8987,10 @@ def _self_test() -> None:
         assert x86_metadata["loaded_modules"][0]["path"] == x86_module_path
         x86_modules = capture_list_modules(str(x86_path), query="kernel32")
         assert x86_modules["count"] == 1
+        assert x86_modules["modules"][0]["pids"] == [4321]
+        assert capture_list_modules(str(x86_path), query="kernel32", pid=4321)["count"] == 1
         assert x86_modules["modules"][0]["occurrences"][0]["base"] is None
+        assert x86_modules["modules"][0]["occurrences"][0]["pid"] == 4321
         x86_decoded = capture_decode_call(str(x86_path), 0, 0, resolve_definitions=True)
         assert x86_decoded["argument_stream"]["arguments"][0]["typed"]["fields"][0]["typed"]["value"] == 77
         x86_array_type = _capture_type_info(bytes(x86_definitions), x86_array_type_offset, 4)
