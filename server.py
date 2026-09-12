@@ -17,7 +17,7 @@ import sys
 import time
 import zipfile
 import zlib
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any
@@ -184,6 +184,12 @@ def _parse_capture_info(data: bytes) -> dict[str, Any]:
     }
 
 
+def _windows_filetime(value: int) -> str | None:
+    if not value:
+        return None
+    return (datetime(1601, 1, 1, tzinfo=timezone.utc) + timedelta(microseconds=value / 10)).isoformat()
+
+
 def _parse_capture_process_info(data: bytes) -> dict[str, Any]:
     if len(data) < 24:
         raise ValueError("Process info entry is too small")
@@ -198,7 +204,9 @@ def _parse_capture_process_info(data: bytes) -> dict[str, Any]:
         "crc32_valid": checksum == zlib.crc32(data[:payload_end]) & 0xFFFFFFFF,
     }
     position = 20
-    for name in ("image_path", "command_line", "description"):
+
+    def read_utf16(name: str) -> str:
+        nonlocal position
         if position + 4 > payload_end:
             raise ValueError(f"Process info is missing {name} length")
         char_count = struct.unpack_from("<I", data, position)[0]
@@ -206,15 +214,72 @@ def _parse_capture_process_info(data: bytes) -> dict[str, Any]:
         byte_count = char_count * 2
         if byte_count > payload_end - position:
             raise ValueError(f"Process info {name} exceeds entry bounds")
-        result[name] = data[position : position + byte_count].decode("utf-16-le", errors="replace")
+        value = data[position : position + byte_count].decode("utf-16-le", errors="replace")
         position += byte_count
+        return value
+
+    for name in ("image_path", "command_line", "description"):
+        result[name] = read_utf16(name)
     if position + 24 > payload_end:
         return result
-    result["call_start_index"], result["field_qword_0"], result["field_qword_1"] = struct.unpack_from(
-        "<IQQ", data, position
-    )
+    result["call_start_index"], start_time, end_time = struct.unpack_from("<IQQ", data, position)
     position += 20
+    result["start_time_filetime"] = start_time
+    result["end_time_filetime"] = end_time
+    result["start_time_utc"] = _windows_filetime(start_time)
+    result["end_time_utc"] = _windows_filetime(end_time)
     result["module_record_count"] = struct.unpack_from("<I", data, position)[0]
+    position += 4
+    module_records = []
+    for index in range(result["module_record_count"]):
+        if position + 24 > payload_end:
+            raise ValueError(f"Process info module record {index} exceeds entry bounds")
+        field0, field1, field2 = struct.unpack_from("<III", data, position)
+        position += 12
+        qword0 = struct.unpack_from("<Q", data, position)[0]
+        position += 8
+        raw_length = struct.unpack_from("<I", data, position)[0]
+        position += 4
+        if raw_length > payload_end - position:
+            raise ValueError(f"Process info module record {index} has invalid raw length")
+        position += raw_length
+        if position + 16 > payload_end:
+            raise ValueError(f"Process info module record {index} is truncated")
+        qword1, qword2 = struct.unpack_from("<QQ", data, position)
+        position += 16
+        path = read_utf16(f"module record {index} path")
+        if position + 8 > payload_end:
+            raise ValueError(f"Process info module record {index} is missing its final field")
+        qword3 = struct.unpack_from("<Q", data, position)[0]
+        position += 8
+        module_records.append(
+            {
+                "index": index,
+                "fields": [field0, field1, field2],
+                "qwords": [qword0, qword1, qword2, qword3],
+                "raw_bytes": raw_length,
+                "path": path,
+            }
+        )
+    result["module_records"] = module_records
+    if position + 4 > payload_end:
+        return result
+    loaded_module_count = struct.unpack_from("<I", data, position)[0]
+    position += 4
+    result["loaded_module_count"] = loaded_module_count
+    loaded_modules = []
+    for index in range(loaded_module_count):
+        if position + 16 > payload_end:
+            raise ValueError(f"Process info loaded module {index} exceeds entry bounds")
+        field0 = struct.unpack_from("<I", data, position)[0]
+        position += 4
+        base = struct.unpack_from("<Q", data, position)[0]
+        position += 8
+        path = read_utf16(f"loaded module {index} path")
+        loaded_modules.append(
+            {"index": index, "field": field0, "base": f"0x{base:x}", "path": path}
+        )
+    result["loaded_modules"] = loaded_modules
     return result
 
 
@@ -3264,6 +3329,7 @@ def _self_test() -> None:
         assert processes["processes"][0]["executables"] == ["C:\\sample.exe"]
         assert processes["processes"][0]["metadata"]["pid"] == 1234
         assert processes["processes"][0]["metadata"]["crc32_valid"]
+        assert processes["processes"][0]["metadata"]["module_records"] == []
         assert processes["processes"][0]["call_count"] == 1
         call_stats = capture_call_stats(str(path), process_index=0)
         assert call_stats["processes"][0]["record_sizes"]["160"] == 1
