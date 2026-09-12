@@ -1234,6 +1234,38 @@ def api_monitor_monitoring_control(
 
 
 @mcp.tool()
+def api_monitor_detach_all(timeout_seconds: int = 30) -> dict[str, Any]:
+    """Detach pending Rohitab API Monitor hooks through its background safeguard dialog."""
+    if sys.platform != "win32":
+        raise RuntimeError("Rohitab detach control requires Windows")
+    if timeout_seconds < 1 or timeout_seconds > 120:
+        raise ValueError("timeout_seconds must be between 1 and 120")
+    dialog = next(
+        (
+            window
+            for window in _find_api_monitor_windows()
+            if window["title"] == "Action Required: Detach or Close Processes"
+        ),
+        None,
+    )
+    if dialog is None:
+        return {"detached": False, "method": "background-gui", "reason": "no-pending-dialog"}
+    button = next((child for child in dialog.get("children", []) if child["control_id"] == 32929), None)
+    if button is None:
+        raise RuntimeError("API Monitor Detach All button was not found")
+    _post_button_click(button["handle"])
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        if not any(
+            window["title"] == "Action Required: Detach or Close Processes"
+            for window in _find_api_monitor_windows()
+        ):
+            return {"detached": True, "method": "background-gui"}
+        time.sleep(0.1)
+    raise TimeoutError("API Monitor did not finish detaching processes")
+
+
+@mcp.tool()
 def api_monitor_launch(architecture: str = "x64", install_root: str | None = None) -> dict[str, Any]:
     """Launch the installed Rohitab API Monitor x86 or x64 executable."""
     root = _app_root(install_root)
