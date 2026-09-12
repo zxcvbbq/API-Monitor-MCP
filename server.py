@@ -2662,6 +2662,37 @@ def _named_gui_rows(headers: list[str], rows: list[list[str]]) -> list[dict[str,
     ]
 
 
+def _gui_traffic_delta(baseline: dict[str, Any], current: dict[str, Any]) -> dict[str, Any]:
+    baseline_rows = {
+        pane.get("list_handle"): pane.get("rows", [])
+        for pane in baseline.get("panes", [])
+    }
+    panes = []
+    complete = True
+    for pane in current.get("panes", []):
+        rows = pane.get("rows", [])
+        previous = baseline_rows.get(pane.get("list_handle"), [])
+        prefix_matches = rows[: len(previous)] == previous
+        pane_complete = prefix_matches and not pane.get("truncated", False)
+        new_rows = rows[len(previous) :] if prefix_matches else []
+        complete = complete and pane_complete
+        if new_rows or not pane_complete:
+            panes.append(
+                {
+                    **pane,
+                    "rows": new_rows,
+                    "records": _named_gui_rows(pane.get("headers", []), new_rows),
+                    "baseline_rows": len(previous),
+                    "delta_complete": pane_complete,
+                }
+            )
+    return {
+        "supported": current.get("supported", False),
+        "panes": panes,
+        "complete": complete,
+    }
+
+
 @mcp.tool()
 def api_monitor_status() -> dict[str, Any]:
     """List running Rohitab API Monitor x86/x64 processes."""
@@ -3869,36 +3900,35 @@ def api_monitor_wait_for_new_traffic(
         raise ValueError("baseline_calls must be non-negative")
     limit = _limit(limit, "limit", 2000)
     summaries = api_monitor_summary(window_title, window_handle)["summaries"]
+    baseline_traffic = api_monitor_traffic(window_title, limit, window_handle)
     if baseline_calls is None:
         baseline_calls = sum(summary["calls"] for summary in summaries)
     target_calls = baseline_calls + minimum_new_calls
     deadline = time.monotonic() + timeout_seconds
+
+    def result(ready: bool, current_calls: int) -> dict[str, Any]:
+        traffic = api_monitor_traffic(window_title, limit, window_handle)
+        return {
+            "ready": ready,
+            "baseline_calls": baseline_calls,
+            "current_calls": current_calls,
+            "new_calls": current_calls - baseline_calls,
+            "minimum_new_calls": minimum_new_calls,
+            "summaries": summaries,
+            "traffic": traffic,
+            "new_traffic": _gui_traffic_delta(baseline_traffic, traffic),
+        }
+
     while True:
         summaries = api_monitor_summary(window_title, window_handle)["summaries"]
         current_calls = sum(summary["calls"] for summary in summaries)
         if current_calls >= target_calls:
-            return {
-                "ready": True,
-                "baseline_calls": baseline_calls,
-                "current_calls": current_calls,
-                "new_calls": current_calls - baseline_calls,
-                "minimum_new_calls": minimum_new_calls,
-                "summaries": summaries,
-                "traffic": api_monitor_traffic(window_title, limit, window_handle),
-            }
+            return result(True, current_calls)
         if time.monotonic() >= deadline:
             break
         time.sleep(0.2)
     current_calls = sum(summary["calls"] for summary in summaries)
-    return {
-        "ready": False,
-        "baseline_calls": baseline_calls,
-        "current_calls": current_calls,
-        "new_calls": current_calls - baseline_calls,
-        "minimum_new_calls": minimum_new_calls,
-        "summaries": summaries,
-        "traffic": api_monitor_traffic(window_title, limit, window_handle),
-    }
+    return result(False, current_calls)
 
 
 @mcp.tool()
@@ -9094,6 +9124,21 @@ def _self_test() -> None:
         assert waited_new["ready"]
         assert waited_new["current_calls"] == 4
         assert waited_new["new_calls"] == 2
+        delta = _gui_traffic_delta(
+            {"panes": [{"list_handle": 1, "headers": ["API"], "rows": [["old"]]}]},
+            {
+                "supported": True,
+                "panes": [
+                    {
+                        "list_handle": 1,
+                        "headers": ["API"],
+                        "rows": [["old"], ["new"]],
+                        "truncated": False,
+                    }
+                ],
+            },
+        )
+        assert delta["complete"] and delta["panes"][0]["rows"] == [["new"]]
         if sys.platform == "win32":
             process_architecture = api_monitor_process_architecture(os.getpid())
             assert process_architecture["architecture"] in {"x86", "x64", "arm64"}
