@@ -2192,6 +2192,7 @@ def api_monitor_capture_process(
         timeout_seconds=timeout_seconds,
         window_handle=started["window"]["handle"],
     )
+    validation = capture_validate(str(path))
     result: dict[str, Any] = {
         "captured": True,
         "ready": ready,
@@ -2201,7 +2202,10 @@ def api_monitor_capture_process(
         "started": started,
         "stopped": stopped,
         "saved": saved,
+        "validation": validation,
     }
+    if validation["valid"]:
+        result["capture"] = capture_info(str(path))
     if wait_error:
         result["wait_error"] = wait_error
     return result
