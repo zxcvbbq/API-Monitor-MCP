@@ -1117,6 +1117,12 @@ def _run_file_dialog(
 
 
 def _read_payload(data: bytes) -> dict[str, Any]:
+    metadata = {
+        "size": len(data),
+        "sha256": hashlib.sha256(data).hexdigest(),
+        "hex_preview": data[:256].hex(" "),
+        "hex_truncated": len(data) > 256,
+    }
     try:
         text = data.decode("utf-8")
         encoding = "utf-8"
@@ -1131,8 +1137,12 @@ def _read_payload(data: bytes) -> dict[str, Any]:
     if text and "\x00" not in text and sum(
         char.isprintable() or char in "\r\n\t" for char in text
     ) / len(text) >= 0.9:
-        return {"encoding": encoding, "text": text}
-    return {"encoding": "base64", "base64": base64.b64encode(data).decode("ascii")}
+        return {**metadata, "encoding": encoding, "text": text}
+    return {
+        **metadata,
+        "encoding": "base64",
+        "base64": base64.b64encode(data).decode("ascii"),
+    }
 
 
 def _xml_entry_nodes(
@@ -3583,7 +3593,10 @@ def _self_test() -> None:
         call_window = capture_calls_around(str(path), 0, 0, before=2, after=2)
         assert call_window["window_start"] == 0
         assert call_window["records"][0]["is_target"]
-        assert _read_payload(b"\x01\x00\xff\x00")["encoding"] == "base64"
+        binary_payload = _read_payload(b"\x01\x00\xff\x00")
+        assert binary_payload["encoding"] == "base64"
+        assert binary_payload["size"] == 4
+        assert binary_payload["hex_preview"] == "01 00 ff 00"
         extracted = Path(directory) / "calls.bin"
         exported = capture_extract_entry(str(path), "calls.bin", str(extracted))
         assert exported["size"] == len(b"CreateFileW\x00https://example.test\x00")
