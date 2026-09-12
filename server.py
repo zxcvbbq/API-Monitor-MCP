@@ -882,6 +882,67 @@ def api_monitor_gui_scroll(
 
 
 @mcp.tool()
+def api_monitor_window_control(
+    action: str,
+    window_title: str = "",
+    window_handle: int | None = None,
+    left: int | None = None,
+    top: int | None = None,
+    width: int | None = None,
+    height: int | None = None,
+) -> dict[str, Any]:
+    """Move or change API Monitor window state without activating it."""
+    if sys.platform != "win32":
+        raise RuntimeError("Rohitab window controls require Windows")
+    if action not in {"show", "hide", "minimize", "restore", "move", "resize"}:
+        raise ValueError("action must be show, hide, minimize, restore, move, or resize")
+    windows = _find_api_monitor_windows()
+    if window_handle is not None:
+        candidates = [window for window in windows if window["handle"] == window_handle]
+    elif window_title:
+        candidates = [window for window in windows if window["title"] == window_title]
+    else:
+        candidates = [
+            window
+            for window in windows
+            if "api monitor v2" in window["title"].casefold()
+            and window["title"].casefold().startswith("monitoring")
+        ]
+    if len(candidates) != 1:
+        raise ValueError("window control requires one matching window_handle or window_title")
+    target = candidates[0]
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+    if action in {"show", "hide", "minimize", "restore"}:
+        command = {"show": 4, "hide": 0, "minimize": 6, "restore": 4}[action]
+        if not user32.ShowWindow(target["handle"], command):
+            error = ctypes.get_last_error()
+            if action != "hide" and error:
+                raise OSError(error, "Could not change API Monitor window state")
+    else:
+        rectangle = target["rectangle"]
+        current_width = rectangle.get("right", 0) - rectangle.get("left", 0)
+        current_height = rectangle.get("bottom", 0) - rectangle.get("top", 0)
+        if action == "move" and (left is None or top is None):
+            raise ValueError("move requires left and top")
+        if action == "resize" and (width is None or height is None):
+            raise ValueError("resize requires width and height")
+        left = rectangle.get("left", 0) if left is None else left
+        top = rectangle.get("top", 0) if top is None else top
+        width = current_width if width is None else width
+        height = current_height if height is None else height
+        if width < 1 or height < 1 or width > 10_000 or height > 10_000:
+            raise ValueError("width and height must be between 1 and 10000")
+        if not user32.SetWindowPos(target["handle"], 0, left, top, width, height, 0x0014):
+            raise OSError(ctypes.get_last_error(), "Could not position API Monitor window")
+    return {
+        "changed": True,
+        "method": "background-win32",
+        "action": action,
+        "window": target,
+    }
+
+
+@mcp.tool()
 def api_monitor_gui_read(
     control_id: int | None = None,
     title: str = "",
