@@ -42,6 +42,14 @@ PROCESS_INFO = re.compile(r"process/(\d+)/info$", re.I)
 SUMMARY_TEXT = re.compile(
     r"Summary\s*\|\s*([\d,]+)\s*calls\s*\|\s*([^|]+?)\s*\|\s*(.*)", re.I
 )
+MODULE_EVENT = re.compile(
+    r"^(?P<process>[^:]+): Monitoring Module (?P<address>0x[0-9a-f]+) -> (?P<module>.+)$",
+    re.I,
+)
+CHILD_EVENT = re.compile(
+    r"^(?P<process>[^:]+): Monitoring Child Process - PID: (?P<pid>\d+) \| Attach: (?P<attach>.+)$",
+    re.I,
+)
 
 mcp = FastMCP(
     "rohitab-api-monitor",
@@ -158,6 +166,18 @@ def _scan_strings(data: bytes | mmap.mmap, query: str, limit: int, minimum: int)
         if len(unique) >= limit:
             break
     return unique
+
+
+def _monitoring_event(line: str) -> dict[str, Any]:
+    if match := MODULE_EVENT.fullmatch(line):
+        event = {"type": "module", **match.groupdict()}
+        event["module"] = event["module"].rstrip(".")
+        return event
+    if match := CHILD_EVENT.fullmatch(line):
+        event = {"type": "child_process", **match.groupdict()}
+        event["pid"] = int(event["pid"])
+        return event
+    return {"type": "unknown"}
 
 
 def _capture_strings(path: Path, query: str, limit: int, minimum: int) -> list[dict[str, Any]]:
@@ -1454,10 +1474,15 @@ def capture_monitoring_log(
         for line in text.splitlines()
         if not needle or needle in line.casefold()
     ]
+    returned = lines[:limit]
     return {
         "file": str(_capture_path(file_path)),
         "query": query,
-        "lines": lines[:limit],
+        "lines": returned,
+        "events": [
+            {"line": line, **_monitoring_event(line)}
+            for line in returned
+        ],
         "count": len(lines),
         "truncated": len(lines) > limit,
     }
@@ -1693,7 +1718,10 @@ def _self_test() -> None:
         with zipfile.ZipFile(payload, "w", zipfile.ZIP_STORED) as archive:
             archive.writestr("metadata.txt", "process=sample.exe\n")
             archive.writestr("calls.bin", b"CreateFileW\x00https://example.test\x00")
-            archive.writestr("log/monitoring.txt", "sample.exe: Monitoring Module\n")
+            archive.writestr(
+                "log/monitoring.txt",
+                "sample.exe: Monitoring Module 0x1234 -> C:\\sample.dll\n",
+            )
             archive.writestr("process/0/info", "C:\\sample.exe".encode("utf-16-le"))
         path.write_bytes(b"APMX-BARE-BONES\x00" + payload.getvalue())
 
@@ -1703,7 +1731,8 @@ def _self_test() -> None:
         strings = _capture_strings(path, "CreateFile", 10, 4)
         assert strings and "CreateFileW" in strings[0]["text"]
         log = capture_monitoring_log(str(path), "module", 10)
-        assert log["lines"] == ["sample.exe: Monitoring Module"]
+        assert log["lines"] == ["sample.exe: Monitoring Module 0x1234 -> C:\\sample.dll"]
+        assert log["events"][0]["type"] == "module"
         searched = capture_search_entries(str(path), "CreateFile", 1)
         assert searched["entries"][0]["entry"] == "calls.bin"
         assert not searched["truncated"]
