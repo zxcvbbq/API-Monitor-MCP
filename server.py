@@ -1519,6 +1519,24 @@ def _set_tree_item_check(tree_handle: int, item_handle: int, checked: bool) -> N
         kernel32.CloseHandle(process)
 
 
+def _tree_item_action(tree_handle: int, item_handle: int, action: str) -> None:
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+    user32.SendMessageW.restype = ctypes.c_ssize_t
+    messages = {
+        "expand": (0x1102, 2),  # TVM_EXPAND / TVE_EXPAND
+        "collapse": (0x1102, 1),  # TVM_EXPAND / TVE_COLLAPSE
+        "toggle": (0x1102, 3),  # TVM_EXPAND / TVE_TOGGLE
+        "select": (0x110B, 9),  # TVM_SELECTITEM / TVGN_CARET
+        "ensure_visible": (0x1114, 0),  # TVM_ENSUREVISIBLE
+    }
+    message, command = messages[action]
+    result = user32.SendMessageW(tree_handle, message, command, item_handle)
+    if action != "collapse" and not result:
+        error = ctypes.get_last_error()
+        if error:
+            raise OSError(error, f"Could not {action.replace('_', ' ')} API Monitor tree item")
+
+
 def _wait_for_api_monitor_window(predicate: Any, timeout_seconds: float) -> dict[str, Any] | None:
     deadline = time.monotonic() + timeout_seconds
     while time.monotonic() < deadline:
@@ -2880,6 +2898,54 @@ def api_monitor_gui_tree_check(
         "tree": tree,
         "item_handle": item_handle,
         "checked": checked,
+    }
+
+
+@mcp.tool()
+def api_monitor_gui_tree_action(
+    action: str,
+    item_handle: int,
+    tree_handle: int | None = None,
+    window_title: str = "",
+) -> dict[str, Any]:
+    """Expand, select, or scroll a Rohitab API/filter tree item in the background."""
+    if sys.platform != "win32":
+        raise RuntimeError("Rohitab tree controls require Windows")
+    if action not in {"expand", "collapse", "toggle", "select", "ensure_visible"}:
+        raise ValueError("action must be expand, collapse, toggle, select, or ensure_visible")
+    if item_handle < 1:
+        raise ValueError("item_handle must be positive")
+    windows = _find_api_monitor_windows()
+    if tree_handle is not None:
+        candidates = [
+            (window, child)
+            for window in windows
+            for child in window.get("children", [])
+            if child.get("handle") == tree_handle
+            and child.get("class") == "SysTreeView32"
+            and (not window_title or window.get("title") == window_title)
+        ]
+    else:
+        candidates = [
+            (window, child)
+            for window in windows
+            for child in window.get("children", [])
+            if child.get("class") == "SysTreeView32"
+            and child.get("control_id") == 32804
+            and child.get("visible")
+            and (not window_title or window.get("title") == window_title)
+        ]
+    if len(candidates) != 1:
+        raise ValueError("tree_handle or window_title must identify one API Monitor tree")
+    window, tree = candidates[0]
+    _tree_item_action(tree["handle"], item_handle, action)
+    return {
+        "updated": True,
+        "method": "background-win32",
+        "action": action,
+        "window": {"handle": window["handle"], "title": window["title"]},
+        "tree": tree,
+        "item_handle": item_handle,
     }
 
 
