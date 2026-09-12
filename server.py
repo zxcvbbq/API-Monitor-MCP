@@ -475,7 +475,7 @@ def _parse_capture_process_info(data: bytes, pointer_size: int = 8) -> dict[str,
                 "fields": [field0, field1, field2],
                 "qwords": [qword0, qword1, qword2, qword3],
                 "raw_bytes": raw_length,
-                "raw_payload": _read_payload(raw_data),
+                "raw_payload": _read_payload(raw_data, 1024 * 1024),
                 "path": path,
             }
         )
@@ -1888,19 +1888,25 @@ def _run_file_dialog(
     return dialog
 
 
-def _read_payload(data: bytes) -> dict[str, Any]:
+def _read_payload(data: bytes, max_bytes: int | None = None) -> dict[str, Any]:
+    if max_bytes is not None and max_bytes < 1:
+        raise ValueError("max_bytes must be positive")
+    view = data if max_bytes is None else data[:max_bytes]
+    truncated = len(view) < len(data)
     metadata = {
         "size": len(data),
         "sha256": hashlib.sha256(data).hexdigest(),
         "hex_preview": data[:256].hex(" "),
         "hex_truncated": len(data) > 256,
     }
+    if truncated:
+        metadata.update({"returned_bytes": len(view), "truncated": True})
     try:
-        text = data.decode("utf-8")
+        text = view.decode("utf-8")
         encoding = "utf-8"
     except UnicodeDecodeError:
         try:
-            text = data.decode("utf-16-le")
+            text = view.decode("utf-16-le")
             encoding = "utf-16-le"
         except UnicodeDecodeError:
             text = ""
@@ -1913,7 +1919,7 @@ def _read_payload(data: bytes) -> dict[str, Any]:
     return {
         **metadata,
         "encoding": "base64",
-        "base64": base64.b64encode(data).decode("ascii"),
+        "base64": base64.b64encode(view).decode("ascii"),
     }
 
 
@@ -6476,6 +6482,11 @@ def _self_test() -> None:
         assert binary_payload["encoding"] == "base64"
         assert binary_payload["size"] == 4
         assert binary_payload["hex_preview"] == "01 00 ff 00"
+        bounded_payload = _read_payload(b"abcdef", max_bytes=3)
+        assert bounded_payload["size"] == 6
+        assert bounded_payload["returned_bytes"] == 3
+        assert bounded_payload["text"] == "abc"
+        assert bounded_payload["truncated"]
         encoded = _capture_encoded_argument_stream(
             b"\x01" + struct.pack("<HH", 0, 8) + struct.pack("<I", 42),
             parameter_count=1,
