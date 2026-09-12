@@ -282,6 +282,24 @@ def _windows_filetime(value: int) -> str | None:
         return None
 
 
+def _parse_utc_timestamp(value: str | None) -> int | None:
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError("UTC timestamps must be non-empty ISO-8601 strings")
+    try:
+        parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError(f"invalid UTC timestamp: {value}") from exc
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    epoch = datetime(1601, 1, 1, tzinfo=timezone.utc)
+    delta = parsed.astimezone(timezone.utc) - epoch
+    if delta.days < 0:
+        raise ValueError("UTC timestamp must not be before 1601-01-01")
+    return delta.days * 864_000_000_000 + delta.seconds * 10_000_000 + delta.microseconds * 10
+
+
 def _parse_capture_process_info(data: bytes, pointer_size: int = 8) -> dict[str, Any]:
     if pointer_size == 4:
         if len(data) < 16:
@@ -4882,6 +4900,8 @@ def capture_filter_calls(
     error_code: int | None = None,
     min_duration_seconds: float | None = None,
     max_duration_seconds: float | None = None,
+    start_time_utc: str | None = None,
+    end_time_utc: str | None = None,
     limit: int = 500,
     max_records: int = 100_000,
     include_data: bool = False,
@@ -4909,6 +4929,10 @@ def capture_filter_calls(
         and min_duration_seconds > max_duration_seconds
     ):
         raise ValueError("min_duration_seconds must not exceed max_duration_seconds")
+    start_filetime = _parse_utc_timestamp(start_time_utc)
+    end_filetime = _parse_utc_timestamp(end_time_utc)
+    if start_filetime is not None and end_filetime is not None and start_filetime > end_filetime:
+        raise ValueError("start_time_utc must not be after end_time_utc")
     limit = _limit(limit, "limit", 10_000)
     max_records = _limit(max_records, "max_records", 1_000_000)
     max_data_bytes = _limit(max_data_bytes, "max_data_bytes", 16 * 1024 * 1024)
@@ -4959,6 +4983,15 @@ def capture_filter_calls(
                     continue
                 if error_code is not None and context.get("error_code") != error_code:
                     continue
+                timestamp = context.get("timestamp_filetime", 0)
+                if start_filetime is not None and (
+                    not timestamp or timestamp < start_filetime
+                ):
+                    continue
+                if end_filetime is not None and (
+                    not timestamp or timestamp > end_filetime
+                ):
+                    continue
                 if min_duration_seconds is not None and (
                     duration is None or duration < min_duration_seconds
                 ):
@@ -4977,6 +5010,8 @@ def capture_filter_calls(
                             "error_code": error_code,
                             "min_duration_seconds": min_duration_seconds,
                             "max_duration_seconds": max_duration_seconds,
+                            "start_time_utc": start_time_utc,
+                            "end_time_utc": end_time_utc,
                         },
                         "matches": matches,
                         "count": len(matches),
@@ -4994,6 +5029,8 @@ def capture_filter_calls(
             "error_code": error_code,
             "min_duration_seconds": min_duration_seconds,
             "max_duration_seconds": max_duration_seconds,
+            "start_time_utc": start_time_utc,
+            "end_time_utc": end_time_utc,
         },
         "matches": matches,
         "count": len(matches),
@@ -5624,6 +5661,8 @@ def _self_test() -> None:
             error_code=5,
             min_duration_seconds=0.1,
             max_duration_seconds=0.2,
+            start_time_utc="2020-01-01T00:00:00Z",
+            end_time_utc="2020-01-01T00:00:01+00:00",
         )
         assert filtered["count"] == 1
         assert filtered["matches"][0]["record"]["index"] == 0
