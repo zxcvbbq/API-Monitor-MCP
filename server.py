@@ -5909,58 +5909,92 @@ def _api_definition_path(definition_path: str, install_root: str | None = None) 
     return path
 
 
+def _api_definition_documents(
+    path: Path, api_root: Path, resolve_includes: bool
+) -> list[tuple[Path, Any]]:
+    documents: list[tuple[Path, Any]] = []
+    pending = [path]
+    seen: set[Path] = set()
+    while pending:
+        current = pending.pop(0)
+        if current in seen:
+            continue
+        seen.add(current)
+        try:
+            root = ElementTree.parse(current).getroot()
+        except ElementTree.ParseError as exc:
+            raise ValueError(f"Invalid API definition XML: {current}") from exc
+        documents.append((current, root))
+        if not resolve_includes:
+            break
+        for include in root.iter("Include"):
+            filename = (include.get("Filename") or "").strip()
+            if not filename:
+                continue
+            included = (api_root / filename.replace("\\", "/")).resolve()
+            try:
+                included.relative_to(api_root)
+            except ValueError as exc:
+                raise ValueError(f"Included API definition escapes API directory: {filename}") from exc
+            if included.suffix.lower() != ".xml" or not included.is_file():
+                raise FileNotFoundError(f"Included API definition not found: {included}")
+            pending.append(included)
+    return documents
+
+
 @mcp.tool()
 def api_monitor_parse_api_definition(
     definition_path: str,
     api_name: str = "",
     limit: int = 200,
+    resolve_includes: bool = False,
     install_root: str | None = None,
 ) -> dict[str, Any]:
     """Return structured Rohitab API signatures from one XML definition."""
     limit = _limit(limit, "limit", 5000)
     path = _api_definition_path(definition_path, install_root)
-    try:
-        root = ElementTree.parse(path).getroot()
-    except ElementTree.ParseError as exc:
-        raise ValueError(f"Invalid API definition XML: {path}") from exc
-
-    parents = {child: parent for parent in root.iter() for child in parent}
+    api_root = (_app_root(install_root) / "API").resolve()
+    documents = _api_definition_documents(path, api_root, resolve_includes)
     needle = api_name.casefold()
     results: list[dict[str, Any]] = []
-    for api in root.iter("Api"):
-        name = api.get("Name", "")
-        if needle and needle not in name.casefold():
-            continue
-        ancestor = parents.get(api)
-        module = None
-        interface = None
-        module_attributes: dict[str, str] = {}
-        interface_attributes: dict[str, str] = {}
-        while ancestor is not None:
-            if ancestor.tag == "Module" and module is None:
-                module = ancestor.get("Name")
-                module_attributes = dict(ancestor.attrib)
-            if ancestor.tag == "Interface" and interface is None:
-                interface = ancestor.get("Name")
-                interface_attributes = dict(ancestor.attrib)
-            ancestor = parents.get(ancestor)
-        results.append(
-            {
-                "name": name,
-                "api_attributes": dict(api.attrib),
-                "module": module,
-                "module_attributes": module_attributes,
-                "interface": interface,
-                "interface_attributes": interface_attributes,
-                "params": [dict(param.attrib) for param in api.findall("Param")],
-                "returns": [dict(return_value.attrib) for return_value in api.findall("Return")],
-                "definition": str(path),
-            }
-        )
+    for document, root in documents:
+        parents = {child: parent for parent in root.iter() for child in parent}
+        for api in root.iter("Api"):
+            name = api.get("Name", "")
+            if needle and needle not in name.casefold():
+                continue
+            ancestor = parents.get(api)
+            module = None
+            interface = None
+            module_attributes: dict[str, str] = {}
+            interface_attributes: dict[str, str] = {}
+            while ancestor is not None:
+                if ancestor.tag == "Module" and module is None:
+                    module = ancestor.get("Name")
+                    module_attributes = dict(ancestor.attrib)
+                if ancestor.tag == "Interface" and interface is None:
+                    interface = ancestor.get("Name")
+                    interface_attributes = dict(ancestor.attrib)
+                ancestor = parents.get(ancestor)
+            results.append(
+                {
+                    "name": name,
+                    "api_attributes": dict(api.attrib),
+                    "module": module,
+                    "module_attributes": module_attributes,
+                    "interface": interface,
+                    "interface_attributes": interface_attributes,
+                    "params": [dict(param.attrib) for param in api.findall("Param")],
+                    "returns": [dict(return_value.attrib) for return_value in api.findall("Return")],
+                    "definition": str(document),
+                }
+            )
     returned = results[:limit]
     return {
         "definition": str(path),
         "api_name": api_name,
+        "includes_resolved": resolve_includes,
+        "documents": [str(document) for document, _ in documents],
         "apis": returned,
         "count": len(returned),
         "truncated": len(results) > limit,
@@ -6524,9 +6558,16 @@ def _self_test() -> None:
         app_root = Path(directory) / "app"
         definition_root = app_root / "API"
         definition_root.mkdir(parents=True)
+        included_definition = definition_root / "included.xml"
+        included_definition.write_text(
+            '<ApiMonitor><Module Name="included.dll"><Api Name="IncludedThing">'
+            '<Return Type="BOOL" /></Api></Module></ApiMonitor>',
+            encoding="utf-8",
+        )
         definition = definition_root / "sample.xml"
         definition.write_text(
-            '<ApiMonitor><Module Name="sample.dll" CallingConvention="STDCALL">'
+            '<ApiMonitor><Include Filename="included.xml" />'
+            '<Module Name="sample.dll" CallingConvention="STDCALL">'
             '<Api Name="OpenThing"><Param Type="HANDLE" Name="hThing" />'
             '<Return Type="BOOL" /></Api></Module></ApiMonitor>',
             encoding="utf-8",
@@ -6534,6 +6575,14 @@ def _self_test() -> None:
         parsed = api_monitor_parse_api_definition(str(definition), install_root=str(app_root))
         assert parsed["apis"][0]["module"] == "sample.dll"
         assert parsed["apis"][0]["params"] == [{"Type": "HANDLE", "Name": "hThing"}]
+        parsed_includes = api_monitor_parse_api_definition(
+            str(definition), resolve_includes=True, install_root=str(app_root)
+        )
+        assert len(parsed_includes["documents"]) == 2
+        assert {api["name"] for api in parsed_includes["apis"]} == {
+            "OpenThing",
+            "IncludedThing",
+        }
         assert _named_gui_rows(["API", "Error"], [["OpenThing", "5"]])[0]["values"] == {
             "API": "OpenThing",
             "Error": "5",
