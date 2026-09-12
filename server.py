@@ -5151,6 +5151,10 @@ def capture_compare_calls(
         "first": first.get("file"),
         "second": second.get("file"),
         "process_index": process_index,
+        "process_pids": {
+            "first": first.get("process_pid"),
+            "second": second.get("process_pid"),
+        },
         "match_mode": match_mode,
         "compare_context": compare_context,
         "architectures": {
@@ -5226,6 +5230,10 @@ def capture_compare_all_calls(
         "match_mode": match_mode,
         "compare_context": compare_context,
         "process_indices": indices,
+        "process_pids": {
+            str(index): comparison.get("process_pids", {})
+            for index, comparison in zip(indices, comparisons)
+        },
         "comparisons": comparisons,
         "counts": totals,
         "same": not any(totals.values()) and not truncated,
@@ -8925,6 +8933,7 @@ def _self_test() -> None:
         call_comparison = capture_compare_calls(
             str(path), str(second_path), resolve_definitions=True
         )
+        assert call_comparison["process_pids"] == {"first": 1234, "second": None}
         assert call_comparison["counts"]["removed"] == 1
         assert call_comparison["counts"]["changed"] == 0
         context_comparison = capture_compare_calls(
@@ -8942,6 +8951,7 @@ def _self_test() -> None:
         assert api_comparison["counts"] == {"added": 0, "removed": 0, "changed": 0}
         all_call_comparison = capture_compare_all_calls(str(path), str(path))
         assert all_call_comparison["process_indices"] == [0]
+        assert all_call_comparison["process_pids"]["0"] == {"first": 1234, "second": 1234}
         assert all_call_comparison["same"]
         all_json_path = Path(directory) / "all-calls.json"
         all_json_export = capture_export_all_calls(str(path), str(all_json_path))
