@@ -189,12 +189,13 @@ def _capture_call_records(
     limit: int,
     include_data: bool,
     max_data_bytes: int,
+    start_index: int = 0,
 ) -> list[dict[str, Any]]:
     if len(calls) % 8:
         raise ValueError("process calls entry is not an array of 64-bit offsets")
     offsets = [struct.unpack_from("<Q", calls, index)[0] for index in range(0, len(calls), 8)]
     records: list[dict[str, Any]] = []
-    for index, offset in enumerate(offsets[:limit]):
+    for index, offset in enumerate(offsets[start_index : start_index + limit], start=start_index):
         if offset > len(data) - 144:
             records.append({"index": index, "offset": offset, "valid": False, "error": "record offset is outside process data"})
             continue
@@ -2462,6 +2463,65 @@ def capture_search_calls(
 
 
 @mcp.tool()
+def capture_calls_around(
+    file_path: str,
+    process_index: int,
+    record_index: int,
+    before: int = 5,
+    after: int = 5,
+    include_data: bool = True,
+    max_data_bytes: int = 4096,
+) -> dict[str, Any]:
+    """Return a bounded raw call-record window around one saved call."""
+    if process_index < 0 or record_index < 0:
+        raise ValueError("process_index and record_index must be non-negative")
+    if not 0 <= before <= 1000 or not 0 <= after <= 1000:
+        raise ValueError("before and after must be between 0 and 1000")
+    max_data_bytes = _limit(max_data_bytes, "max_data_bytes", 16 * 1024 * 1024)
+    path = _capture_path(file_path)
+    calls_name = f"process/{process_index}/calls"
+    data_name = f"process/{process_index}/data"
+    archive, _, _ = _open_capture_zip(path)
+    with archive:
+        try:
+            calls = archive.read(calls_name)
+        except KeyError as exc:
+            raise FileNotFoundError(f"Capture call entry not found: {calls_name}") from exc
+        data = archive.read(data_name) if data_name in archive.namelist() else b""
+    if len(calls) % 8:
+        raise ValueError("process calls entry is not an array of 64-bit offsets")
+    count = len(calls) // 8
+    if record_index >= count:
+        raise IndexError(f"record_index {record_index} is outside {count} saved calls")
+    start = max(0, record_index - before)
+    end = min(count, record_index + after + 1)
+    records = _capture_call_records(
+        calls,
+        data,
+        end - start,
+        include_data,
+        max_data_bytes,
+        start_index=start,
+    )
+    for record in records:
+        record["is_target"] = record["index"] == record_index
+    return {
+        "file": str(path),
+        "process_index": process_index,
+        "record_index": record_index,
+        "before": before,
+        "after": after,
+        "calls_entry": calls_name,
+        "data_entry": data_name if data else None,
+        "count": count,
+        "window_start": start,
+        "window_end": end - 1,
+        "records": records,
+        "format": "APMX process call offset stream; record fields remain raw until API definition correlation is added",
+    }
+
+
+@mcp.tool()
 def capture_extract_entry(
     file_path: str,
     entry_name: str,
@@ -2899,6 +2959,9 @@ def _self_test() -> None:
         call_search = capture_search_calls(str(path), "ell")
         assert call_search["count"] == 1
         assert call_search["matches"][0]["payload_matches"][0]["snippet"] == "hello"
+        call_window = capture_calls_around(str(path), 0, 0, before=2, after=2)
+        assert call_window["window_start"] == 0
+        assert call_window["records"][0]["is_target"]
         assert _read_payload(b"\x01\x00\xff\x00")["encoding"] == "base64"
         extracted = Path(directory) / "calls.bin"
         exported = capture_extract_entry(str(path), "calls.bin", str(extracted))
