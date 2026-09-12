@@ -405,7 +405,9 @@ def _api_monitor_main_window(architecture: str, timeout_seconds: float) -> dict[
         return main
     api_monitor_launch(architecture)
     return _wait_for_api_monitor_window(
-        lambda window: "api monitor v2" in window["title"].casefold(), timeout_seconds
+        lambda window: "api monitor v2" in window["title"].casefold()
+        and bitness in window["title"],
+        timeout_seconds,
     )
 
 
@@ -859,20 +861,14 @@ def api_monitor_monitor_process(
             raise NotADirectoryError(f"Start directory not found: {start_directory}")
         start_in = str(start_directory.resolve())
 
-    windows = _find_api_monitor_windows()
-    main_window = next(
-        (window for window in windows if "api monitor v2" in window["title"].casefold()),
-        None,
-    )
-    if main_window is None:
-        api_monitor_launch(architecture)
-        main_window = _wait_for_api_monitor_window(
-            lambda window: "api monitor v2" in window["title"].casefold(), timeout_seconds
-        )
+    main_window = _api_monitor_main_window(architecture, timeout_seconds)
     if main_window is None:
         raise TimeoutError("API Monitor main window did not appear")
 
-    dialog = next((window for window in windows if window["title"] == "Monitor Process"), None)
+    dialog = next(
+        (window for window in _find_api_monitor_windows() if window["title"] == "Monitor Process"),
+        None,
+    )
     if dialog is None:
         button = next(
             (
@@ -1056,7 +1052,9 @@ def api_monitor_open_capture(file_path: str, install_root: str | None = None) ->
         executable = _app_executable(root, architecture)
         process = subprocess.Popen([str(executable)], cwd=str(root))
         main_window = _wait_for_api_monitor_window(
-            lambda window: "api monitor v2" in window["title"].casefold(), 15
+            lambda window: "api monitor v2" in window["title"].casefold()
+            and bitness in window["title"],
+            15,
         )
         if main_window is None:
             return {
