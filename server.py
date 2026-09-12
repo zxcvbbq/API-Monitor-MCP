@@ -897,6 +897,41 @@ def api_monitor_traffic_details(
 
 
 @mcp.tool()
+def api_monitor_wait_for_traffic(
+    minimum_calls: int = 1,
+    timeout_seconds: int = 30,
+    window_title: str = "",
+    window_handle: int | None = None,
+    limit: int = 500,
+) -> dict[str, Any]:
+    """Wait for a Rohitab Summary call count, then return the current traffic panes."""
+    if minimum_calls < 0:
+        raise ValueError("minimum_calls must be non-negative")
+    if timeout_seconds < 1 or timeout_seconds > 300:
+        raise ValueError("timeout_seconds must be between 1 and 300")
+    limit = _limit(limit, "limit", 2000)
+    deadline = time.monotonic() + timeout_seconds
+    summaries: list[dict[str, Any]] = []
+    while True:
+        summaries = api_monitor_summary(window_title, window_handle)["summaries"]
+        if any(summary["calls"] >= minimum_calls for summary in summaries):
+            return {
+                "ready": True,
+                "summaries": summaries,
+                "traffic": api_monitor_traffic(window_title, limit, window_handle),
+            }
+        if time.monotonic() >= deadline:
+            break
+        time.sleep(0.2)
+    return {
+        "ready": False,
+        "minimum_calls": minimum_calls,
+        "summaries": summaries,
+        "traffic": api_monitor_traffic(window_title, limit, window_handle),
+    }
+
+
+@mcp.tool()
 def api_monitor_add_display_filter(
     field: str,
     operator: str,
