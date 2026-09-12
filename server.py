@@ -5949,14 +5949,16 @@ def api_monitor_parse_api_definition(
     limit: int = 200,
     resolve_includes: bool = False,
     install_root: str | None = None,
+    include_variables: bool = False,
 ) -> dict[str, Any]:
-    """Return structured Rohitab API signatures from one XML definition."""
+    """Return structured Rohitab API signatures and optional XML variables."""
     limit = _limit(limit, "limit", 5000)
     path = _api_definition_path(definition_path, install_root)
     api_root = (_app_root(install_root) / "API").resolve()
     documents = _api_definition_documents(path, api_root, resolve_includes)
     needle = api_name.casefold()
     results: list[dict[str, Any]] = []
+    variables: list[dict[str, Any]] = []
     for document, root in documents:
         parents = {child: parent for parent in root.iter() for child in parent}
         for api in root.iter("Api"):
@@ -5989,15 +5991,40 @@ def api_monitor_parse_api_definition(
                     "definition": str(document),
                 }
             )
+        if include_variables:
+            for variable in root.iter("Variable"):
+                variables.append(
+                    {
+                        "name": variable.get("Name", ""),
+                        "attributes": dict(variable.attrib),
+                        "fields": [dict(field.attrib) for field in variable.findall("Field")],
+                        "displays": [
+                            dict(display.attrib) for display in variable.findall("Display")
+                        ],
+                        "enums": [
+                            {
+                                "attributes": dict(enum.attrib),
+                                "sets": [dict(item.attrib) for item in enum.findall("Set")],
+                            }
+                            for enum in variable.findall("Enum")
+                        ],
+                        "definition": str(document),
+                    }
+                )
     returned = results[:limit]
+    returned_variables = variables[:limit]
     return {
         "definition": str(path),
         "api_name": api_name,
         "includes_resolved": resolve_includes,
+        "variables_included": include_variables,
         "documents": [str(document) for document, _ in documents],
         "apis": returned,
         "count": len(returned),
         "truncated": len(results) > limit,
+        "variables": returned_variables,
+        "variable_count": len(returned_variables),
+        "variables_truncated": len(variables) > limit,
     }
 
 
@@ -6561,7 +6588,10 @@ def _self_test() -> None:
         included_definition = definition_root / "included.xml"
         included_definition.write_text(
             '<ApiMonitor><Module Name="included.dll"><Api Name="IncludedThing">'
-            '<Return Type="BOOL" /></Api></Module></ApiMonitor>',
+            '<Return Type="BOOL" /></Api></Module>'
+            '<Variable Name="IncludedStruct" Type="Struct">'
+            '<Field Type="DWORD" Name="value" />'
+            '<Enum><Set Name="One" Value="1" /></Enum></Variable></ApiMonitor>',
             encoding="utf-8",
         )
         definition = definition_root / "sample.xml"
@@ -6576,13 +6606,22 @@ def _self_test() -> None:
         assert parsed["apis"][0]["module"] == "sample.dll"
         assert parsed["apis"][0]["params"] == [{"Type": "HANDLE", "Name": "hThing"}]
         parsed_includes = api_monitor_parse_api_definition(
-            str(definition), resolve_includes=True, install_root=str(app_root)
+            str(definition),
+            resolve_includes=True,
+            install_root=str(app_root),
+            include_variables=True,
         )
         assert len(parsed_includes["documents"]) == 2
         assert {api["name"] for api in parsed_includes["apis"]} == {
             "OpenThing",
             "IncludedThing",
         }
+        assert parsed_includes["variables"][0]["fields"] == [
+            {"Type": "DWORD", "Name": "value"}
+        ]
+        assert parsed_includes["variables"][0]["enums"][0]["sets"] == [
+            {"Name": "One", "Value": "1"}
+        ]
         assert _named_gui_rows(["API", "Error"], [["OpenThing", "5"]])[0]["values"] == {
             "API": "OpenThing",
             "Error": "5",
