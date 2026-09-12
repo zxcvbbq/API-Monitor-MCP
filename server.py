@@ -2896,6 +2896,7 @@ def capture_validate(
     archive = zipfile.ZipFile(io.BytesIO(data[offset:]))
     with archive:
         entries = {info.filename: info for info in archive.infolist()}
+        definitions = archive.read("definitions") if "definitions" in entries else None
         process_infos = []
         for name in sorted(entries):
             match = PROCESS_INFO.fullmatch(name)
@@ -2937,6 +2938,35 @@ def capture_validate(
                 stats = _capture_call_stats(calls, data, max_records, pointer_size)
                 stream["stats"] = stats
                 stream["valid"] = stats["invalid_records"] == 0
+                if definitions is not None:
+                    records = _capture_call_records(
+                        calls,
+                        data,
+                        min(len(calls) // pointer_size, max_records),
+                        False,
+                        0,
+                        definitions=definitions,
+                        pointer_size=pointer_size,
+                    )
+                    definition_checks = {
+                        "available": True,
+                        "resolved": 0,
+                        "unknown": 0,
+                        "invalid": 0,
+                        "truncated": len(calls) // pointer_size > max_records,
+                    }
+                    for record in records:
+                        definition_offset = record.get("definition_offset", 0)
+                        if not definition_offset:
+                            definition_checks["unknown"] += 1
+                        elif record.get("definition", {}).get("valid"):
+                            definition_checks["resolved"] += 1
+                        else:
+                            definition_checks["invalid"] += 1
+                    stream["definitions"] = definition_checks
+                    stream["valid"] = stream["valid"] and not definition_checks["invalid"]
+                else:
+                    stream["definitions"] = {"available": False}
             except (ValueError, struct.error) as exc:
                 stream["error"] = str(exc)
             streams.append(stream)
@@ -4500,6 +4530,7 @@ def _self_test() -> None:
         deep_validation = capture_validate(str(path), deep=True)
         assert deep_validation["structural_valid"]
         assert deep_validation["process_infos"][0]["valid"]
+        assert deep_validation["streams"][0]["definitions"]["resolved"] == 1
         invalid_prefix = Path(directory) / "invalid-prefix.apmx64"
         invalid_prefix.write_bytes(b"not-an-apmx" + path.read_bytes()[info["zip_offset"] :])
         assert not capture_validate(str(invalid_prefix))["valid"]
@@ -4683,6 +4714,7 @@ def _self_test() -> None:
         x86_deep_validation = capture_validate(str(x86_path), deep=True)
         assert x86_deep_validation["structural_valid"]
         assert x86_deep_validation["process_infos"][0]["valid"]
+        assert x86_deep_validation["streams"][0]["definitions"]["resolved"] == 1
         assert capture_call_stats(str(x86_path))["processes"][0]["record_sizes"]["120"] == 1
         x86_processes = capture_list_processes(str(x86_path))
         assert x86_processes["processes"][0]["call_count"] == 1
