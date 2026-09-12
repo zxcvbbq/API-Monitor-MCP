@@ -1123,6 +1123,44 @@ def _read_payload(data: bytes) -> dict[str, Any]:
     return {"encoding": "base64", "base64": base64.b64encode(data).decode("ascii")}
 
 
+def _xml_entry_nodes(
+    root: ElementTree.Element, query: str, limit: int
+) -> tuple[list[dict[str, Any]], int]:
+    needle = query.casefold()
+    nodes: list[dict[str, Any]] = []
+    matched = 0
+    seen = 0
+    stack: list[tuple[ElementTree.Element, int, int]] = [(root, -1, 0)]
+    while stack:
+        element, parent_index, depth = stack.pop()
+        index = seen
+        seen += 1
+        tag = (
+            element.tag.rsplit("}", 1)[-1]
+            if isinstance(element.tag, str)
+            else str(element.tag)
+        )
+        text = " ".join((element.text or "").split())
+        searchable = " ".join((tag, text, *element.attrib.values())).casefold()
+        if not needle or needle in searchable:
+            matched += 1
+            if len(nodes) < limit:
+                nodes.append(
+                    {
+                        "index": index,
+                        "parent_index": parent_index,
+                        "depth": depth,
+                        "tag": tag,
+                        "attributes": dict(element.attrib),
+                        "text": text[:4096],
+                        "truncated_text": len(text) > 4096,
+                    }
+                )
+        for child in reversed(list(element)):
+            stack.append((child, index, depth + 1))
+    return nodes, matched
+
+
 def _tasklist_rows() -> tuple[list[list[str]], str | None]:
     try:
         completed = subprocess.run(
@@ -2501,6 +2539,51 @@ def capture_read_entry(file_path: str, entry_name: str, max_bytes: int = 1_048_5
 
 
 @mcp.tool()
+def capture_xml_entry(
+    file_path: str,
+    entry_name: str = "filter/display.xml",
+    query: str = "",
+    limit: int = 1000,
+    max_bytes: int = 16 * 1024 * 1024,
+) -> dict[str, Any]:
+    """Parse one bounded XML entry, such as an APMX display/filter tree."""
+    if not entry_name:
+        raise ValueError("entry_name must not be empty")
+    limit = _limit(limit, "limit", 20_000)
+    max_bytes = _limit(max_bytes, "max_bytes", 64 * 1024 * 1024)
+    path = _capture_path(file_path)
+    archive, _, _ = _open_capture_zip(path)
+    with archive:
+        try:
+            info = archive.getinfo(entry_name)
+        except KeyError as exc:
+            raise FileNotFoundError(f"ZIP entry not found: {entry_name}") from exc
+        if info.is_dir():
+            raise IsADirectoryError(f"ZIP entry is a directory: {entry_name}")
+        with archive.open(info) as member:
+            data = member.read(max_bytes + 1)
+    if len(data) > max_bytes:
+        raise ValueError(f"XML entry exceeds max_bytes: {info.file_size}")
+    try:
+        root = ElementTree.fromstring(data)
+    except ElementTree.ParseError as exc:
+        raise ValueError(f"Invalid XML entry: {entry_name}") from exc
+    nodes, matched = _xml_entry_nodes(root, query, limit)
+    root_tag = root.tag.rsplit("}", 1)[-1] if isinstance(root.tag, str) else str(root.tag)
+    return {
+        "file": str(path),
+        "entry": entry_name,
+        "size": info.file_size,
+        "root": root_tag,
+        "query": query,
+        "nodes": nodes,
+        "count": matched,
+        "truncated": matched > limit,
+        "format": "XML element stream; node indexes preserve document order",
+    }
+
+
+@mcp.tool()
 def capture_call_records(
     file_path: str,
     process_index: int = 0,
@@ -3252,6 +3335,10 @@ def _self_test() -> None:
         with zipfile.ZipFile(payload, "w", zipfile.ZIP_STORED) as archive:
             archive.writestr("metadata.txt", "process=sample.exe\n")
             archive.writestr("calls.bin", b"CreateFileW\x00https://example.test\x00")
+            archive.writestr(
+                "filter/display.xml",
+                '<DisplayFilters><Filter Field="API" Operator="contains">CreateFile</Filter></DisplayFilters>',
+            )
             record = bytearray(160)
             record[2] = 1
             struct.pack_into("<I", record, 32, 5)
@@ -3296,9 +3383,12 @@ def _self_test() -> None:
         log = capture_monitoring_log(str(path), "module", 10)
         assert log["lines"] == ["sample.exe: Monitoring Module 0x1234 -> C:\\sample.dll"]
         assert log["events"][0]["type"] == "module"
-        searched = capture_search_entries(str(path), "CreateFile", 1)
+        searched = capture_search_entries(str(path), "CreateFile", 10)
         assert searched["entries"][0]["entry"] == "calls.bin"
         assert not searched["truncated"]
+        xml = capture_xml_entry(str(path), query="CreateFile")
+        assert xml["root"] == "DisplayFilters"
+        assert xml["nodes"][0]["attributes"]["Field"] == "API"
         call_records = capture_call_records(str(path), include_data=True)
         assert call_records["count"] == 1
         assert call_records["start_index"] == 0
@@ -3338,6 +3428,7 @@ def _self_test() -> None:
         assert {entry["name"] for entry in entries} == {
             "metadata.txt",
             "calls.bin",
+            "filter/display.xml",
             "process/0/calls",
             "process/0/data",
             "log/monitoring.txt",
@@ -3349,7 +3440,7 @@ def _self_test() -> None:
         directory_search = capture_search_directory(directory, "CreateFile", recursive=False, limit=10)
         assert directory_search["captures"][0]["entries"][0]["entry"] == "calls.bin"
         comparison = capture_compare(str(path), str(second_path))
-        assert comparison["counts"] == {"added": 1, "removed": 6, "changed": 1}
+        assert comparison["counts"] == {"added": 1, "removed": 7, "changed": 1}
         assert not comparison["same"]
 
         app_root = Path(directory) / "app"
