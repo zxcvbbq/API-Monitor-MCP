@@ -633,10 +633,11 @@ def api_monitor_gui_action(
         candidates = [
             window
             for window in windows
-            if not window_title or window.get("title") == window_title
+            if (handle is None or window.get("handle") == handle)
+            and (not window_title or window.get("title") == window_title)
         ]
         if len(candidates) != 1:
-            raise ValueError("close requires one matching window_title")
+            raise ValueError("close requires one matching window handle or window_title")
         user32 = ctypes.WinDLL("user32", use_last_error=True)
         user32.PostMessageW(candidates[0]["handle"], 0x0010, 0, 0)  # WM_CLOSE
         return {"action": action, "window": candidates[0]}
