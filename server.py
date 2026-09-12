@@ -501,7 +501,9 @@ def _parse_capture_process_info(data: bytes, pointer_size: int = 8) -> dict[str,
     return result
 
 
-def _capture_process_pid(archive: Any, entries: set[str], process_index: int, pointer_size: int) -> int | None:
+def _capture_process_pid(
+    archive: Any, entries: Any, process_index: int, pointer_size: int
+) -> int | None:
     entry_name = f"process/{process_index}/info"
     if entry_name not in entries:
         return None
@@ -6257,6 +6259,7 @@ def capture_call_stats(
             processes.append(
                 {
                     "process_index": index,
+                    "process_pid": _capture_process_pid(archive, entries, index, pointer_size),
                     "calls_entry": calls_name,
                     "data_entry": data_name if data else None,
                     **stats,
@@ -6710,12 +6713,15 @@ def capture_search_calls(
     decode_arguments: bool = False,
     pattern_hex: str | None = None,
     include_record_bytes: bool = False,
+    pid: int | None = None,
 ) -> dict[str, Any]:
     """Search saved call payloads, API definitions, and decoded arguments."""
     if not query and pattern_hex is None:
         raise ValueError("query or pattern_hex is required")
     if process_index is not None and process_index < 0:
         raise ValueError("process_index must be non-negative")
+    if pid is not None and not 1 <= pid <= 0xFFFFFFFF:
+        raise ValueError("pid must be between 1 and 4294967295")
     limit = _limit(limit, "limit", 10_000)
     max_records = _limit(max_records, "max_records", 1_000_000)
     max_data_bytes = _limit(max_data_bytes, "max_data_bytes", 16 * 1024 * 1024)
@@ -6770,6 +6776,9 @@ def capture_search_calls(
             if match and (process_index is None or int(match.group(1)) == process_index):
                 process_indices.add(int(match.group(1)))
         for index in sorted(process_indices):
+            process_pid = _capture_process_pid(archive, entries, index, pointer_size)
+            if pid is not None and process_pid != pid:
+                continue
             calls = archive.read(f"process/{index}/calls")
             data = archive.read(f"process/{index}/data") if f"process/{index}/data" in entries else b""
             definitions = archive.read("definitions") if resolve_definitions and "definitions" in entries else None
@@ -6875,6 +6884,7 @@ def capture_search_calls(
                 if payload_matches or api_matches or argument_matches or byte_matches:
                     match = {
                         "process_index": index,
+                        "pid": process_pid,
                         "record": record,
                         "payload_matches": payload_matches,
                     }
@@ -6892,6 +6902,7 @@ def capture_search_calls(
                             "file": str(path),
                             "query": query,
                             "process_index": process_index,
+                            "pid": pid,
                             "matches": matches,
                             "count": len(matches),
                             "scanned_records": scanned,
@@ -6906,6 +6917,7 @@ def capture_search_calls(
         "file": str(path),
         "query": query,
         "process_index": process_index,
+        "pid": pid,
         "matches": matches,
         "count": len(matches),
         "scanned_records": scanned,
@@ -8370,6 +8382,7 @@ def _self_test() -> None:
         assert call_context["timestamp_utc"] == "2020-01-01T00:00:00+00:00"
         assert call_context["duration_seconds"] == 0.125
         stats = capture_call_stats(str(path))
+        assert stats["processes"][0]["process_pid"] == 1234
         assert stats["processes"][0]["context"]["error_count"] == 1
         assert stats["processes"][0]["context"]["error_codes"] == {"0x00000005": 1}
         bounded_records = bytearray(257 * 160)
@@ -8482,7 +8495,9 @@ def _self_test() -> None:
         assert "CreateFileW" in csv_text and "kernel32.dll" in csv_text and ",1234," in csv_text
         call_search = capture_search_calls(str(path), "ell")
         assert call_search["count"] == 1
+        assert call_search["matches"][0]["pid"] == 1234
         assert call_search["matches"][0]["payload_matches"][0]["snippet"] == "hello"
+        assert capture_search_calls(str(path), "ell", pid=1234)["count"] == 1
         binary_call_search = capture_search_calls(
             str(path), pattern_hex="68 65 6c 6c 6f"
         )
