@@ -4702,6 +4702,9 @@ def capture_compare_calls(
         added.append(summary(second_records[index]))
     for index in range(len(second_records), len(first_records)):
         removed.append(summary(first_records[index]))
+    truncated = any(
+        len(items) > limit for items in (added, removed, changed)
+    ) or first.get("truncated", False) or second.get("truncated", False)
     return {
         "first": first.get("file"),
         "second": second.get("file"),
@@ -4720,9 +4723,8 @@ def capture_compare_calls(
         "added": added[:limit],
         "removed": removed[:limit],
         "changed": changed[:limit],
-        "truncated": any(
-            len(items) > limit for items in (added, removed, changed)
-        ) or first.get("truncated", False) or second.get("truncated", False),
+        "truncated": truncated,
+        "same": not added and not removed and not changed and not truncated,
         "payload_fingerprint": "sha256 when payload is within max_data_bytes",
     }
 
@@ -4767,14 +4769,15 @@ def capture_compare_all_calls(
         key: sum(comparison["counts"][key] for comparison in comparisons)
         for key in ("added", "removed", "changed")
     }
+    truncated = any(comparison["truncated"] for comparison in comparisons)
     return {
         "first": str(first),
         "second": str(second),
         "process_indices": indices,
         "comparisons": comparisons,
         "counts": totals,
-        "same": not any(totals.values()),
-        "truncated": any(comparison["truncated"] for comparison in comparisons),
+        "same": not any(totals.values()) and not truncated,
+        "truncated": truncated,
         "payload_fingerprint": "sha256 when payload is within max_data_bytes",
     }
 
@@ -4848,7 +4851,9 @@ def capture_compare_apis(
         "added": added[:limit],
         "removed": removed[:limit],
         "changed": changed[:limit],
-        "same": not added_keys and not removed_keys and not changed_keys,
+        "same": not added_keys and not removed_keys and not changed_keys and not (
+            first["truncated"] or second["truncated"]
+        ),
         "truncated": any(
             len(items) > limit for items in (added, removed, changed)
         ) or first["truncated"] or second["truncated"],
