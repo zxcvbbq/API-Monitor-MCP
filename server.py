@@ -1467,6 +1467,15 @@ def _capture_encoded_argument_stream(
 def _capture_exact_scalar(data: bytes, type_info: dict[str, Any]) -> dict[str, Any] | None:
     kind = type_info.get("kind")
     size = type_info.get("size")
+    if kind == 13:
+        if len(data) < 16:
+            return None
+        return {
+            "exact": True,
+            "kind": "fixed_bytes",
+            "size": 16,
+            "value": data[:16].hex(" "),
+        }
     if kind == 4:
         pointer_size = int(type_info.get("pointer_size", 8))
         pointer_offset = 0 if int(type_info.get("flags", 0)) & 8 else 8
@@ -4728,6 +4737,9 @@ def _self_test() -> None:
         assert _capture_exact_scalar(
             struct.pack("<HH", 1, 5) + b"hello", {"kind": 7, "flags": 0}
         )["value"] == "hello"
+        assert _capture_exact_scalar(
+            bytes(range(16)), {"kind": 13, "flags": 0}
+        )["kind"] == "fixed_bytes"
         extracted = Path(directory) / "calls.bin"
         exported = capture_extract_entry(str(path), "calls.bin", str(extracted))
         assert exported["size"] == len(b"CreateFileW\x00https://example.test\x00")
