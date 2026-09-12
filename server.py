@@ -1308,14 +1308,15 @@ def capture_search_entries(
                         "entry_truncated": len(data) > max_entry_bytes,
                     }
                 )
-                if len(matches) >= limit:
+                if len(matches) > limit:
                     truncated = True
                     break
+    returned = matches[:limit]
     return {
         "file": str(path),
         "query": query,
-        "entries": matches,
-        "count": len(matches),
+        "entries": returned,
+        "count": len(returned),
         "truncated": truncated,
     }
 
@@ -1570,8 +1571,9 @@ def _self_test() -> None:
         assert strings and "CreateFileW" in strings[0]["text"]
         log = capture_monitoring_log(str(path), "module", 10)
         assert log["lines"] == ["sample.exe: Monitoring Module"]
-        searched = capture_search_entries(str(path), "CreateFile", 10)
+        searched = capture_search_entries(str(path), "CreateFile", 1)
         assert searched["entries"][0]["entry"] == "calls.bin"
+        assert not searched["truncated"]
         processes = capture_list_processes(str(path), 10)
         assert processes["processes"][0]["executables"] == ["C:\\sample.exe"]
         entries = _zip_entries(path)
