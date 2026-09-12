@@ -476,6 +476,11 @@ def _capture_type_info(
             structure_size = struct.unpack_from("<H", definitions, size_field)[0]
             if structure_size:
                 type_info["structure_size"] = structure_size
+        alignment_field = relative + (45 if pointer_size == 8 else 25)
+        flags_field = relative + (46 if pointer_size == 8 else 26)
+        if flags_field < len(definitions):
+            type_info["alignment"] = definitions[alignment_field]
+            type_info["struct_flags"] = definitions[flags_field]
     if type_info["kind"] == 14:
         element_field = relative + (32 if pointer_size == 8 else 16)
         count_field = relative + (40 if pointer_size == 8 else 20)
@@ -1710,6 +1715,76 @@ def _capture_array_element_size(type_info: dict[str, Any], depth: int = 0) -> in
     return pointer_size
 
 
+def _capture_type_alignment(type_info: dict[str, Any], depth: int = 0) -> int | None:
+    if depth >= 4:
+        return None
+    kind = type_info.get("kind")
+    if kind == 14:
+        element_type = type_info.get("element_type")
+        return (
+            _capture_type_alignment(element_type, depth + 1)
+            if isinstance(element_type, dict)
+            else None
+        )
+    if kind == 11:
+        alignment = type_info.get("alignment")
+        if isinstance(alignment, int) and alignment > 0:
+            return alignment
+        alignments = [
+            _capture_type_alignment(field["type"], depth + 1)
+            for field in type_info.get("fields", [])
+            if isinstance(field.get("type"), dict)
+        ]
+        return max(alignments, default=None)
+    return _capture_array_element_size(type_info, depth)
+
+
+def _capture_exact_fixed_structure(
+    data: bytes, type_info: dict[str, Any], depth: int
+) -> dict[str, Any] | None:
+    if depth >= 4:
+        return None
+    fields = type_info.get("fields", [])
+    offset = 0
+    decoded_fields = []
+    for index, field in enumerate(fields):
+        field_type = field.get("type")
+        if not isinstance(field_type, dict):
+            return None
+        size = _capture_array_element_size(field_type, depth + 1)
+        alignment = _capture_type_alignment(field_type, depth + 1) or 1
+        if offset % alignment:
+            offset += alignment - offset % alignment
+        item: dict[str, Any] = {
+            "index": index,
+            "offset": offset,
+            "length": size,
+            "valid": size is not None and offset + size <= len(data),
+        }
+        if field.get("name"):
+            item["name"] = field["name"]
+        if not item["valid"]:
+            item["error"] = "fixed structure field exceeds payload"
+        else:
+            raw = data[offset : offset + size]
+            item["payload"] = _read_payload(raw)
+            typed = _capture_exact_value(raw, field_type, depth + 1)
+            if typed:
+                item["typed"] = typed
+        decoded_fields.append(item)
+        offset += size or 0
+    return {
+        "exact": True,
+        "kind": "structure",
+        "valid": all(field["valid"] for field in decoded_fields),
+        "field_count": len(decoded_fields),
+        "representation": "fixed",
+        "serialized_table_bytes": 0,
+        "size": offset,
+        "fields": decoded_fields,
+    }
+
+
 def _capture_exact_array(
     data: bytes, type_info: dict[str, Any], depth: int
 ) -> dict[str, Any] | None:
@@ -1918,6 +1993,8 @@ def _capture_exact_value(
         return _capture_exact_array(data, type_info, depth) if not scalar else scalar
     if type_info.get("kind") != 11 or depth >= 4:
         return scalar
+    if int(type_info.get("struct_flags", 0)) & 2:
+        return _capture_exact_fixed_structure(data, type_info, depth)
     fields = type_info.get("fields", [])
     if not fields:
         return None
@@ -5009,6 +5086,13 @@ def _self_test() -> None:
             struct.pack_into("<Q", definitions, 688 + 8, 2)
             definitions[704 : 704 + len(b"Red\x00")] = b"Red\x00"
             definitions[720 : 720 + len(b"Green\x00")] = b"Green\x00"
+            fixed_struct_type_offset = 384
+            struct.pack_into("<I", definitions, fixed_struct_type_offset + 8, 11)
+            struct.pack_into("<Q", definitions, fixed_struct_type_offset + 32, 320)
+            struct.pack_into("<H", definitions, fixed_struct_type_offset + 40, 4)
+            definitions[fixed_struct_type_offset + 44] = 1
+            definitions[fixed_struct_type_offset + 45] = 4
+            definitions[fixed_struct_type_offset + 46] = 2
             archive.writestr("definitions", bytes(definitions))
             archive.writestr(
                 "log/monitoring.txt",
@@ -5180,6 +5264,11 @@ def _self_test() -> None:
             struct.pack("<HIII", 3, 1, 2, 3), array_type
         )
         assert prefixed_array_value and prefixed_array_value["count"] == 3
+        fixed_struct_type = _capture_type_info(bytes(definitions), fixed_struct_type_offset)
+        assert fixed_struct_type and fixed_struct_type["struct_flags"] == 2
+        fixed_struct_value = _capture_exact_value(struct.pack("<I", 99), fixed_struct_type)
+        assert fixed_struct_value and fixed_struct_value["representation"] == "fixed"
+        assert fixed_struct_value["fields"][0]["typed"]["value"] == 99
         variable_array_type = _capture_type_info(
             bytes(definitions), variable_array_type_offset
         )
@@ -5288,6 +5377,13 @@ def _self_test() -> None:
         struct.pack_into("<Q", x86_definitions, 640 + 8, 2)
         x86_definitions[656 : 656 + len(b"Red\x00")] = b"Red\x00"
         x86_definitions[664 : 664 + len(b"Green\x00")] = b"Green\x00"
+        x86_fixed_struct_type_offset = 536
+        struct.pack_into("<I", x86_definitions, x86_fixed_struct_type_offset + 4, 11)
+        struct.pack_into("<I", x86_definitions, x86_fixed_struct_type_offset + 16, 320)
+        struct.pack_into("<H", x86_definitions, x86_fixed_struct_type_offset + 20, 4)
+        x86_definitions[x86_fixed_struct_type_offset + 24] = 1
+        x86_definitions[x86_fixed_struct_type_offset + 25] = 4
+        x86_definitions[x86_fixed_struct_type_offset + 26] = 2
         x86_struct_argument = struct.pack("<HH", 0, 8) + struct.pack("<I", 77)
         x86_encoded_argument = b"\x01" + struct.pack(
             "<HH", 0, len(x86_struct_argument) << 1
@@ -5351,6 +5447,14 @@ def _self_test() -> None:
         assert x86_enum_type and x86_enum_type["enum_entries"][1]["name"] == "Green"
         x86_enum_value = _capture_exact_value(struct.pack("<I", 2), x86_enum_type)
         assert x86_enum_value and x86_enum_value["enum"]["names"] == ["Green"]
+        x86_fixed_struct_type = _capture_type_info(
+            bytes(x86_definitions), x86_fixed_struct_type_offset, 4
+        )
+        assert x86_fixed_struct_type and x86_fixed_struct_type["struct_flags"] == 2
+        x86_fixed_struct_value = _capture_exact_value(
+            struct.pack("<I", 88), x86_fixed_struct_type
+        )
+        assert x86_fixed_struct_value and x86_fixed_struct_value["fields"][0]["typed"]["value"] == 88
 
         app_root = Path(directory) / "app"
         definition_root = app_root / "API"
