@@ -6472,12 +6472,18 @@ def capture_filter_calls(
     definition_offset: int | None = None,
     flags: int | None = None,
     pid: int | None = None,
+    thread_number: int | None = None,
+    module_base: int | None = None,
 ) -> dict[str, Any]:
     """Filter saved calls by API definition, thread, error, and duration context."""
     if process_index is not None and process_index < 0:
         raise ValueError("process_index must be non-negative")
     if thread_id is not None and not 0 <= thread_id <= 0xFFFFFFFF:
         raise ValueError("thread_id must be between 0 and 4294967295")
+    if thread_number is not None and not 0 <= thread_number <= 0xFFFFFFFF:
+        raise ValueError("thread_number must be between 0 and 4294967295")
+    if module_base is not None and not 0 <= module_base <= 0xFFFFFFFFFFFFFFFF:
+        raise ValueError("module_base must be between 0 and 18446744073709551615")
     if error_code is not None and not 0 <= error_code <= 0xFFFFFFFF:
         raise ValueError("error_code must be between 0 and 4294967295")
     if flags is not None and not 0 <= flags <= 0xFF:
@@ -6516,6 +6522,8 @@ def capture_filter_calls(
     )
     filters = {
         "thread_id": thread_id,
+        "thread_number": thread_number,
+        "module_base": module_base,
         "error_code": error_code,
         "flags": flags,
         "api_name": api_name,
@@ -6587,6 +6595,10 @@ def capture_filter_calls(
                 if duration is not None and not math.isfinite(duration):
                     duration = None
                 if thread_id is not None and context.get("thread_id") != thread_id:
+                    continue
+                if thread_number is not None and context.get("thread_number") != thread_number:
+                    continue
+                if module_base is not None and int(context.get("module_base", "0"), 16) != module_base:
                     continue
                 if error_code is not None and context.get("error_code") != error_code:
                     continue
@@ -6664,6 +6676,8 @@ def capture_call_timeline(
     definition_offset: int | None = None,
     flags: int | None = None,
     pid: int | None = None,
+    thread_number: int | None = None,
+    module_base: int | None = None,
 ) -> dict[str, Any]:
     """Return saved calls as one bounded cross-process timeline."""
     if order_by not in {"timestamp", "capture"}:
@@ -6685,6 +6699,8 @@ def capture_call_timeline(
         api_module=api_module,
         definition_offset=definition_offset,
         pid=pid,
+        thread_number=thread_number,
+        module_base=module_base,
     )
     events = list(filtered["matches"])
     if order_by == "capture":
@@ -6715,6 +6731,8 @@ def capture_call_timeline(
     return {
         "file": filtered["file"],
         "process_index": process_index,
+        "thread_number": thread_number,
+        "module_base": module_base,
         "flags": flags,
         "order_by": order_by,
         "descending": descending,
@@ -7552,6 +7570,8 @@ def _self_test() -> None:
             definition_offset=16,
             flags=1,
             pid=1234,
+            thread_number=7,
+            module_base=0x7FF600001000,
         )
         assert api_filtered["count"] == 1
         assert api_filtered["definitions_resolved"]
@@ -7564,6 +7584,8 @@ def _self_test() -> None:
             api_module="kernel32",
             flags=1,
             pid=1234,
+            thread_number=7,
+            module_base=0x7FF600001000,
         )
         assert api_timeline["count"] == 1
         assert api_timeline["timeline"][0]["record"]["definition"]["name"] == "CreateFileW"
