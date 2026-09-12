@@ -2662,6 +2662,42 @@ def _named_gui_rows(headers: list[str], rows: list[list[str]]) -> list[dict[str,
     ]
 
 
+def _gui_pane_title(window: dict[str, Any], list_handle: int) -> str | None:
+    list_child = next(
+        (child for child in window.get("children", []) if child.get("handle") == list_handle),
+        None,
+    )
+    list_rect = (list_child or {}).get("rectangle", {})
+    if not list_rect:
+        return None
+
+    def contains(outer: dict[str, Any], inner: dict[str, Any]) -> bool:
+        return (
+            outer.get("left", 0) <= inner.get("left", 0)
+            and outer.get("top", 0) <= inner.get("top", 0)
+            and outer.get("right", 0) >= inner.get("right", 0)
+            and outer.get("bottom", 0) >= inner.get("bottom", 0)
+        )
+
+    candidates = [
+        child
+        for child in window.get("children", [])
+        if child.get("class", "").startswith("Afx:ControlBar")
+        and child.get("title")
+        and contains(child.get("rectangle", {}), list_rect)
+    ]
+    if not candidates:
+        return None
+    candidates.sort(
+        key=lambda child: (
+            (child["rectangle"].get("right", 0) - child["rectangle"].get("left", 0))
+            * (child["rectangle"].get("bottom", 0) - child["rectangle"].get("top", 0)),
+            child["handle"],
+        )
+    )
+    return candidates[0]["title"]
+
+
 def _gui_traffic_delta(baseline: dict[str, Any], current: dict[str, Any]) -> dict[str, Any]:
     baseline_rows = {
         pane.get("list_handle"): pane.get("rows", [])
@@ -3664,6 +3700,7 @@ def api_monitor_gui_lists(
         for process in api_monitor_status().get("processes", [])
         if isinstance(process.get("pid"), int)
     }
+    native_windows = {window["handle"]: window for window in _find_api_monitor_windows()}
     result: list[dict[str, Any]] = []
     for window in Desktop(backend="uia").windows():
         if window.process_id() not in pids:
@@ -3725,6 +3762,9 @@ def api_monitor_gui_lists(
             lists.append(
                 {
                     "handle": control.handle,
+                    "pane_title": _gui_pane_title(
+                        native_windows.get(window.handle, {}), int(control.handle)
+                    ),
                     "rectangle": _uia_rect(control),
                     "headers": headers,
                     "rows": rows[:limit],
@@ -3829,6 +3869,7 @@ def api_monitor_traffic(
                 {
                     "window": {"handle": window["handle"], "title": window["title"]},
                     "list_handle": pane["handle"],
+                    "pane_title": pane.get("pane_title"),
                     "headers": headers,
                     "rows": pane["rows"],
                     "records": _named_gui_rows(headers, pane["rows"]),
@@ -3861,6 +3902,7 @@ def api_monitor_traffic_details(
     details = [
         {
             "handle": pane["handle"],
+            "pane_title": pane.get("pane_title"),
             "headers": pane["headers"],
             "rows": pane["rows"],
             "records": _named_gui_rows(pane["headers"], pane["rows"]),
@@ -3871,9 +3913,16 @@ def api_monitor_traffic_details(
         for pane in window.get("lists", [])
         if pane["handle"] != call_pane["list_handle"]
     ]
+    details_by_pane: dict[str, dict[str, Any]] = {}
+    for pane in details:
+        key = pane.get("pane_title") or f"list:{pane['handle']}"
+        if key in details_by_pane:
+            key = f"{key}#{pane['handle']}"
+        details_by_pane[key] = pane
     return {
         "selected_call": selected,
         "details": details,
+        "details_by_pane": details_by_pane,
         "summaries": api_monitor_summary(window_title, window_handle)["summaries"],
     }
 
@@ -9520,6 +9569,25 @@ def _self_test() -> None:
             "API": "OpenThing",
             "Error": "5",
         }
+        assert _gui_pane_title(
+            {
+                "children": [
+                    {
+                        "handle": 10,
+                        "class": "Afx:ControlBar:test",
+                        "title": "Call Stack",
+                        "rectangle": {"left": 0, "top": 0, "right": 100, "bottom": 100},
+                    },
+                    {
+                        "handle": 11,
+                        "class": "SysListView32",
+                        "title": "",
+                        "rectangle": {"left": 1, "top": 1, "right": 99, "bottom": 99},
+                    },
+                ]
+            },
+            11,
+        ) == "Call Stack"
         raw_module = b"raw-module"
         raw_process_info = struct.pack("<IIIQ", 1, 0, 77, 0x140000000)
         for value in ("C:\\sample.exe", "sample.exe", "Sample"):
