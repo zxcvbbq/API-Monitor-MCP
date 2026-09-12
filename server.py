@@ -2330,13 +2330,14 @@ def capture_read_entry(file_path: str, entry_name: str, max_bytes: int = 1_048_5
 def capture_call_records(
     file_path: str,
     process_index: int = 0,
+    start_index: int = 0,
     limit: int = 500,
     include_data: bool = False,
     max_data_bytes: int = 4096,
 ) -> dict[str, Any]:
     """Decode saved process call offsets and their raw data references."""
-    if process_index < 0:
-        raise ValueError("process_index must be non-negative")
+    if process_index < 0 or start_index < 0:
+        raise ValueError("process_index and start_index must be non-negative")
     limit = _limit(limit, "limit", 10_000)
     max_data_bytes = _limit(max_data_bytes, "max_data_bytes", 16 * 1024 * 1024)
     path = _capture_path(file_path)
@@ -2352,8 +2353,15 @@ def capture_call_records(
             data = archive.read(data_name)
         except KeyError:
             data = b""
-    records = _capture_call_records(calls, data, limit, include_data, max_data_bytes)
     count = len(calls) // 8
+    records = _capture_call_records(
+        calls,
+        data,
+        limit,
+        include_data,
+        max_data_bytes,
+        start_index=start_index,
+    )
     return {
         "file": str(path),
         "process_index": process_index,
@@ -2362,8 +2370,10 @@ def capture_call_records(
         "call_entry_bytes": len(calls),
         "data_entry_bytes": len(data),
         "count": count,
+        "start_index": start_index,
+        "end_index": records[-1]["index"] if records else None,
         "records": records,
-        "truncated": count > limit,
+        "truncated": start_index + len(records) < count,
         "format": "APMX process call offset stream; record fields remain raw until API definition correlation is added",
     }
 
@@ -2955,6 +2965,7 @@ def _self_test() -> None:
         assert not searched["truncated"]
         call_records = capture_call_records(str(path), include_data=True)
         assert call_records["count"] == 1
+        assert call_records["start_index"] == 0
         assert call_records["records"][0]["data_refs"][0]["payload"]["text"] == "hello"
         call_search = capture_search_calls(str(path), "ell")
         assert call_search["count"] == 1
