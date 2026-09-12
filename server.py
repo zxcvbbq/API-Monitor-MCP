@@ -7,6 +7,7 @@ import csv
 import ctypes
 import hashlib
 import io
+import json
 import mmap
 import os
 import re
@@ -2455,6 +2456,100 @@ def capture_call_records(
 
 
 @mcp.tool()
+def capture_export_calls(
+    file_path: str,
+    output_path: str,
+    process_index: int = 0,
+    start_index: int = 0,
+    limit: int = 500,
+    output_format: str = "json",
+    include_data: bool = True,
+    max_data_bytes: int = 4096,
+    overwrite: bool = False,
+) -> dict[str, Any]:
+    """Export a bounded saved call-record page as JSON or CSV."""
+    if output_format not in {"json", "csv"}:
+        raise ValueError("output_format must be json or csv")
+    output = Path(output_path).expanduser()
+    if not output.parent.is_dir():
+        raise NotADirectoryError(f"Output directory not found: {output.parent}")
+    output = output.resolve()
+    if output.exists() and not overwrite:
+        raise FileExistsError(f"Output already exists: {output}")
+    result = capture_call_records(
+        file_path,
+        process_index=process_index,
+        start_index=start_index,
+        limit=limit,
+        include_data=include_data,
+        max_data_bytes=max_data_bytes,
+    )
+    if output_format == "json":
+        content = json.dumps(result, indent=2, ensure_ascii=False) + "\n"
+    else:
+        stream = io.StringIO(newline="")
+        writer = csv.writer(stream)
+        writer.writerow(
+            [
+                "process_index",
+                "record_index",
+                "offset",
+                "size",
+                "valid",
+                "flags",
+                "slot",
+                "data_offset",
+                "length",
+                "encoding",
+                "payload",
+            ]
+        )
+        for record in result["records"]:
+            references = record.get("data_refs", []) or [{}]
+            for reference in references:
+                payload = reference.get("payload", {})
+                writer.writerow(
+                    [
+                        process_index,
+                        record["index"],
+                        record["offset"],
+                        record["size"],
+                        record["valid"],
+                        record["flags"],
+                        reference.get("slot", ""),
+                        reference.get("offset", ""),
+                        reference.get("length", ""),
+                        payload.get("encoding", ""),
+                        payload.get("text", payload.get("base64", "")),
+                    ]
+                )
+        content = stream.getvalue()
+    encoded = content.encode("utf-8")
+    digest = hashlib.sha256(encoded).hexdigest()
+    try:
+        mode = "wb" if overwrite else "xb"
+        with output.open(mode) as handle:
+            handle.write(encoded)
+    except Exception:
+        if output.exists() and not overwrite:
+            output.unlink()
+        raise
+    return {
+        "exported": True,
+        "file": result["file"],
+        "output": str(output),
+        "format": output_format,
+        "process_index": process_index,
+        "start_index": result["start_index"],
+        "end_index": result["end_index"],
+        "count": len(result["records"]),
+        "truncated": result["truncated"],
+        "size": len(encoded),
+        "sha256": digest,
+    }
+
+
+@mcp.tool()
 def capture_call_stats(
     file_path: str,
     process_index: int | None = None,
@@ -3097,6 +3192,14 @@ def _self_test() -> None:
         assert call_records["count"] == 1
         assert call_records["start_index"] == 0
         assert call_records["records"][0]["data_refs"][0]["payload"]["text"] == "hello"
+        json_export = capture_export_calls(str(path), str(Path(directory) / "calls.json"))
+        assert json_export["count"] == 1
+        assert json.loads((Path(directory) / "calls.json").read_text())["records"][0]["index"] == 0
+        csv_export = capture_export_calls(
+            str(path), str(Path(directory) / "calls.csv"), output_format="csv"
+        )
+        assert csv_export["format"] == "csv"
+        assert (Path(directory) / "calls.csv").read_text().startswith("process_index,record_index")
         call_search = capture_search_calls(str(path), "ell")
         assert call_search["count"] == 1
         assert call_search["matches"][0]["payload_matches"][0]["snippet"] == "hello"
