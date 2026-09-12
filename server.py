@@ -151,10 +151,36 @@ def _capture_info(path: Path) -> dict[str, Any]:
     )
     try:
         result["entries"] = _zip_entries(path)
+        archive, _, _ = _open_capture_zip(path)
+        with archive:
+            if "info" in archive.namelist():
+                result["metadata"] = _parse_capture_info(archive.read("info"))
     except zipfile.BadZipFile as exc:
         result["zip_error"] = str(exc)
         result["entries"] = []
     return result
+
+
+def _parse_capture_info(data: bytes) -> dict[str, Any]:
+    if len(data) < 12:
+        raise ValueError("Capture info entry is too small")
+    version, title_length = struct.unpack_from("<II", data)
+    title_end = 8 + title_length * 2
+    if title_end + 28 > len(data):
+        raise ValueError("Capture info entry has an invalid title length")
+    title = data[8:title_end].decode("utf-16-le", errors="replace").rstrip("\x00")
+    values = struct.unpack_from("<7I", data, title_end)
+    checksum = struct.unpack_from("<I", data, len(data) - 4)[0] if len(data) >= 4 else None
+    return {
+        "version": version,
+        "title_length": title_length,
+        "application": title,
+        "bitness": values[0],
+        "fields": list(values[1:6]),
+        "locale_id": values[6],
+        "crc32": f"0x{checksum:08x}" if checksum is not None else None,
+        "crc32_valid": checksum == zlib.crc32(data[:-4]) & 0xFFFFFFFF if checksum is not None else False,
+    }
 
 
 def _capture_call_records(
@@ -2433,6 +2459,10 @@ def _self_test() -> None:
                 "sample.exe: Monitoring Module 0x1234 -> C:\\sample.dll\n",
             )
             archive.writestr("process/0/info", "C:\\sample.exe".encode("utf-16-le"))
+            title = "API Monitor v2 Alpha-r13 64-bit"
+            info = struct.pack("<II", 2, len(title)) + title.encode("utf-16-le")
+            info += struct.pack("<7I", 64, 0, 6, 2, 1, 1, 0x409)
+            archive.writestr("info", info + struct.pack("<I", zlib.crc32(info) & 0xFFFFFFFF))
         path.write_bytes(b"\r\nAPI Monitor 64-bit Capture\r\nRBAPM" + payload.getvalue())
         second_path = Path(directory) / "variants" / "second.apmx64"
         second_path.parent.mkdir()
@@ -2446,6 +2476,8 @@ def _self_test() -> None:
         assert info["extension"] == ".apmx64"
         assert info["format_marker"] == "RBAPM"
         assert info["architecture"] == "x64"
+        assert info["metadata"]["application"] == "API Monitor v2 Alpha-r13 64-bit"
+        assert info["metadata"]["crc32_valid"]
         assert info["entries"][0]["name"] == "metadata.txt"
         strings = _capture_strings(path, "CreateFile", 10, 4)
         assert strings and "CreateFileW" in strings[0]["text"]
@@ -2475,11 +2507,12 @@ def _self_test() -> None:
             "process/0/data",
             "log/monitoring.txt",
             "process/0/info",
+            "info",
         }
         listed = capture_list_directory(directory, recursive=False, limit=10)
         assert listed["count"] == 1
         comparison = capture_compare(str(path), str(second_path))
-        assert comparison["counts"] == {"added": 1, "removed": 5, "changed": 1}
+        assert comparison["counts"] == {"added": 1, "removed": 6, "changed": 1}
         assert not comparison["same"]
 
         app_root = Path(directory) / "app"
