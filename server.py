@@ -1,7 +1,7 @@
-"""Bare-bones MCP bridge for the real Rohitab API Monitor application.
+"""MCP bridge for the real Rohitab API Monitor application.
 
 This version intentionally does not reverse engineer live IPC or the APMX call
-record format. It exposes safe capture triage plus launch/open operations.
+record format. It exposes capture triage plus background GUI operations.
 """
 
 from __future__ import annotations
@@ -38,8 +38,9 @@ mcp = FastMCP(
     "rohitab-api-monitor",
     instructions=(
         "Read Rohitab API Monitor .apmx captures, search their raw contents, "
-        "and launch the installed API Monitor application. This server does not "
-        "decode live API calls yet."
+        "launch the installed API Monitor application, and automate its GUI "
+        "without bringing it to the foreground. This server does not decode "
+        "live API calls yet."
     ),
 )
 
@@ -291,6 +292,44 @@ def _find_control(windows: list[dict[str, Any]], control_id: int) -> dict[str, A
     return None
 
 
+def _find_ui_control(
+    windows: list[dict[str, Any]],
+    control_id: int | None,
+    title: str,
+    class_name: str,
+    window_title: str,
+) -> tuple[dict[str, Any], dict[str, Any]] | None:
+    matches: list[tuple[dict[str, Any], dict[str, Any]]] = []
+    for window in windows:
+        if window_title and window.get("title") != window_title:
+            continue
+        for child in window.get("children", []):
+            if control_id is not None and child.get("control_id") != control_id:
+                continue
+            if title and child.get("title") != title:
+                continue
+            if class_name and child.get("class") != class_name:
+                continue
+            matches.append((window, child))
+    if len(matches) > 1:
+        raise ValueError("GUI target is ambiguous; add window_title, title, or class_name")
+    return matches[0] if matches else None
+
+
+def _post_mouse_click(handle: int) -> None:
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+    from ctypes import wintypes
+
+    rect = wintypes.RECT()
+    if not user32.GetClientRect(handle, ctypes.byref(rect)):
+        raise OSError(ctypes.get_last_error(), "Could not inspect API Monitor control")
+    x = max(0, (rect.right - rect.left) // 2)
+    y = max(0, (rect.bottom - rect.top) // 2)
+    lparam = (y << 16) | (x & 0xFFFF)
+    user32.PostMessageW(handle, 0x0201, 1, lparam)  # WM_LBUTTONDOWN
+    user32.PostMessageW(handle, 0x0202, 0, lparam)  # WM_LBUTTONUP
+
+
 def _post_button_click(handle: int) -> None:
     user32 = ctypes.WinDLL("user32", use_last_error=True)
     if not user32.PostMessageW(handle, 0x00F5, 0, 0):  # BM_CLICK
@@ -365,6 +404,51 @@ def api_monitor_ui_tree() -> dict[str, Any]:
     if sys.platform != "win32":
         return {"supported": False, "windows": []}
     return {"supported": True, "windows": _find_api_monitor_windows()}
+
+
+@mcp.tool()
+def api_monitor_gui_action(
+    action: str,
+    control_id: int | None = None,
+    title: str = "",
+    class_name: str = "",
+    window_title: str = "",
+    text: str = "",
+) -> dict[str, Any]:
+    """Act on a Rohitab GUI control using background Win32 messages."""
+    if sys.platform != "win32":
+        raise RuntimeError("Rohitab GUI actions require Windows")
+    if action not in {"click", "set_text", "close"}:
+        raise ValueError("action must be click, set_text, or close")
+    if action == "close":
+        windows = _find_api_monitor_windows()
+        candidates = [
+            window
+            for window in windows
+            if not window_title or window.get("title") == window_title
+        ]
+        if len(candidates) != 1:
+            raise ValueError("close requires one matching window_title")
+        user32 = ctypes.WinDLL("user32", use_last_error=True)
+        user32.PostMessageW(candidates[0]["handle"], 0x0010, 0, 0)  # WM_CLOSE
+        return {"action": action, "window": candidates[0]}
+
+    if control_id is None and not title and not class_name:
+        raise ValueError("click and set_text require control_id, title, or class_name")
+    target = _find_ui_control(
+        _find_api_monitor_windows(), control_id, title, class_name, window_title
+    )
+    if target is None:
+        raise LookupError("Rohitab GUI control not found")
+    parent, control = target
+    if action == "click":
+        if control["class"].casefold() == "button":
+            _post_button_click(control["handle"])
+        else:
+            _post_mouse_click(control["handle"])
+    else:
+        _set_control_text(control["handle"], text)
+    return {"action": action, "window": parent, "control": control, "text": text}
 
 
 @mcp.tool()
