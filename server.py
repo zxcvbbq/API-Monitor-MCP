@@ -4183,6 +4183,11 @@ def capture_export_calls(
                 "definition_offset",
                 "api_name",
                 "api_module",
+                "thread_id",
+                "thread_number",
+                "timestamp_utc",
+                "duration_seconds",
+                "error_code",
                 "slot",
                 "data_offset",
                 "length",
@@ -4193,6 +4198,7 @@ def capture_export_calls(
         for record in result["records"]:
             references = record.get("data_refs", []) or [{}]
             definition = record.get("definition", {})
+            context = record.get("context", {})
             for reference in references:
                 payload = reference.get("payload", {})
                 writer.writerow(
@@ -4206,6 +4212,11 @@ def capture_export_calls(
                         record.get("definition_offset", ""),
                         definition.get("name", ""),
                         definition.get("module", ""),
+                        context.get("thread_id", ""),
+                        context.get("thread_number", ""),
+                        context.get("timestamp_utc", ""),
+                        context.get("duration_seconds", ""),
+                        context.get("error_code", ""),
                         reference.get("slot", ""),
                         reference.get("offset", ""),
                         reference.get("length", ""),
@@ -5399,6 +5410,7 @@ def _self_test() -> None:
         assert csv_export["format"] == "csv"
         csv_text = (Path(directory) / "calls.csv").read_text()
         assert csv_text.startswith("process_index,record_index")
+        assert "thread_id" in csv_text.splitlines()[0]
         assert "CreateFileW" in csv_text and "kernel32.dll" in csv_text
         call_search = capture_search_calls(str(path), "ell")
         assert call_search["count"] == 1
