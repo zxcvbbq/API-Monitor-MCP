@@ -2199,10 +2199,12 @@ def capture_list_processes(file_path: str, limit: int = 200) -> dict[str, Any]:
     archive, _, _ = _open_capture_zip(path)
     processes: list[dict[str, Any]] = []
     with archive:
-        for info in archive.infolist():
+        entries = {info.filename: info for info in archive.infolist()}
+        for info in entries.values():
             match = PROCESS_INFO.fullmatch(info.filename)
             if not match:
                 continue
+            index = int(match.group(1))
             data = archive.read(info)
             strings = _scan_strings(data, "", 2000, 4)
             modules = []
@@ -2217,11 +2219,20 @@ def capture_list_processes(file_path: str, limit: int = 200) -> dict[str, Any]:
                     executables.append(value)
             processes.append(
                 {
-                    "index": int(match.group(1)),
+                    "index": index,
                     "entry": info.filename,
                     "size": info.file_size,
                     "modules": modules,
                     "executables": executables,
+                    "calls_entry": f"process/{index}/calls" if f"process/{index}/calls" in entries else None,
+                    "data_entry": f"process/{index}/data" if f"process/{index}/data" in entries else None,
+                    "call_count": entries[f"process/{index}/calls"].file_size // 8
+                    if f"process/{index}/calls" in entries
+                    and entries[f"process/{index}/calls"].file_size % 8 == 0
+                    else None,
+                    "data_size": entries[f"process/{index}/data"].file_size
+                    if f"process/{index}/data" in entries
+                    else 0,
                 }
             )
     processes.sort(key=lambda item: item["index"])
@@ -2536,6 +2547,7 @@ def _self_test() -> None:
         assert not found["truncated"]
         processes = capture_list_processes(str(path), 10)
         assert processes["processes"][0]["executables"] == ["C:\\sample.exe"]
+        assert processes["processes"][0]["call_count"] == 1
         entries = _zip_entries(path)
         assert {entry["name"] for entry in entries} == {
             "metadata.txt",
