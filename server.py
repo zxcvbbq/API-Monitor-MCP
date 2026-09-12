@@ -1460,7 +1460,7 @@ def _set_tree_item_check(tree_handle: int, item_handle: int, checked: bool) -> N
     user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
     user32.GetWindowThreadProcessId.restype = wintypes.DWORD
     user32.SendMessageW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
-    user32.SendMessageW.restype = wintypes.LRESULT
+    user32.SendMessageW.restype = ctypes.c_ssize_t
     kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
     kernel32.OpenProcess.restype = wintypes.HANDLE
     kernel32.VirtualAllocEx.argtypes = [wintypes.HANDLE, wintypes.LPVOID, ctypes.c_size_t, wintypes.DWORD, wintypes.DWORD]
@@ -1586,6 +1586,123 @@ def _find_native_menu_item(items: list[dict[str, Any]], path: list[str]) -> dict
             return item
         return _find_native_menu_item(item.get("items", []), path[1:])
     return None
+
+
+def _read_native_toolbar(handle: int, max_items: int) -> tuple[list[dict[str, Any]], bool]:
+    from ctypes import wintypes
+
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
+    user32.GetWindowThreadProcessId.restype = wintypes.DWORD
+    user32.SendMessageW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
+    user32.SendMessageW.restype = ctypes.c_ssize_t
+    kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.VirtualAllocEx.argtypes = [
+        wintypes.HANDLE,
+        wintypes.LPVOID,
+        ctypes.c_size_t,
+        wintypes.DWORD,
+        wintypes.DWORD,
+    ]
+    kernel32.VirtualAllocEx.restype = wintypes.LPVOID
+    kernel32.VirtualFreeEx.argtypes = [wintypes.HANDLE, wintypes.LPVOID, ctypes.c_size_t, wintypes.DWORD]
+    kernel32.WriteProcessMemory.argtypes = [
+        wintypes.HANDLE,
+        wintypes.LPVOID,
+        wintypes.LPCVOID,
+        ctypes.c_size_t,
+        ctypes.POINTER(ctypes.c_size_t),
+    ]
+    kernel32.ReadProcessMemory.argtypes = [
+        wintypes.HANDLE,
+        wintypes.LPCVOID,
+        wintypes.LPVOID,
+        ctypes.c_size_t,
+        ctypes.POINTER(ctypes.c_size_t),
+    ]
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+
+    class ToolbarButton(ctypes.Structure):
+        _fields_ = [
+            ("bitmap", ctypes.c_int),
+            ("command_id", ctypes.c_int),
+            ("state", ctypes.c_ubyte),
+            ("style", ctypes.c_ubyte),
+            ("reserved", ctypes.c_ubyte * 2),
+            ("data", ctypes.c_void_p),
+            ("string", ctypes.c_void_p),
+        ]
+
+    process_id = wintypes.DWORD()
+    if not user32.GetWindowThreadProcessId(handle, ctypes.byref(process_id)):
+        raise OSError(ctypes.get_last_error(), "Could not inspect API Monitor toolbar")
+    process = kernel32.OpenProcess(0x438, False, process_id.value)
+    if not process:
+        error = ctypes.get_last_error()
+        if error == 5:
+            raise PermissionError(
+                error,
+                "API Monitor toolbar requires the MCP client to run at the same elevation level",
+            )
+        raise OSError(error, "Could not open API Monitor toolbar process")
+    button_size = ctypes.sizeof(ToolbarButton)
+    remote_button = kernel32.VirtualAllocEx(process, None, button_size, 0x3000, 4)
+    remote_text = kernel32.VirtualAllocEx(process, None, 2048, 0x3000, 4)
+    if not remote_button or not remote_text:
+        if remote_button:
+            kernel32.VirtualFreeEx(process, remote_button, 0, 0x8000)
+        if remote_text:
+            kernel32.VirtualFreeEx(process, remote_text, 0, 0x8000)
+        kernel32.CloseHandle(process)
+        raise OSError(ctypes.get_last_error(), "Could not allocate API Monitor toolbar buffer")
+
+    try:
+        count = int(user32.SendMessageW(handle, 0x0418, 0, 0))  # TB_BUTTONCOUNT
+        if count < 0:
+            raise OSError(ctypes.get_last_error(), "Could not count API Monitor toolbar buttons")
+        truncated = count > max_items
+        items: list[dict[str, Any]] = []
+        written = ctypes.c_size_t()
+        for index in range(min(count, max_items)):
+            if not user32.SendMessageW(handle, 0x0417, index, remote_button):  # TB_GETBUTTON
+                raise OSError(ctypes.get_last_error(), f"Could not read toolbar button {index}")
+            button = ToolbarButton()
+            if not kernel32.ReadProcessMemory(
+                process, remote_button, ctypes.byref(button), button_size, ctypes.byref(written)
+            ):
+                raise OSError(ctypes.get_last_error(), f"Could not copy toolbar button {index}")
+            text = ""
+            if button.command_id >= 0:
+                text_length = int(
+                    user32.SendMessageW(handle, 0x044B, button.command_id, remote_text)
+                )  # TB_GETBUTTONTEXTW
+                if text_length >= 0:
+                    text_buffer = ctypes.create_unicode_buffer(1024)
+                    if kernel32.ReadProcessMemory(
+                        process, remote_text, text_buffer, 2048, ctypes.byref(written)
+                    ):
+                        text = text_buffer.value[: min(text_length, 1023)]
+            items.append(
+                {
+                    "index": index,
+                    "command_id": button.command_id,
+                    "bitmap": button.bitmap,
+                    "state": int(button.state),
+                    "style": int(button.style),
+                    "text": text,
+                    "separator": bool(button.style & 0x01),
+                    "enabled": bool(button.state & 0x04),
+                    "checked": bool(button.state & 0x01),
+                    "hidden": bool(button.state & 0x08),
+                }
+            )
+        return items, truncated
+    finally:
+        kernel32.VirtualFreeEx(process, remote_button, 0, 0x8000)
+        kernel32.VirtualFreeEx(process, remote_text, 0, 0x8000)
+        kernel32.CloseHandle(process)
 
 
 def _png_chunk(kind: bytes, data: bytes) -> bytes:
@@ -2893,6 +3010,103 @@ def api_monitor_gui_menu(
         "item_path": item_path,
         "command_id": command_id,
         "item": selected,
+    }
+
+
+@mcp.tool()
+def api_monitor_gui_toolbars(
+    action: str = "read",
+    window_title: str = "",
+    window_handle: int | None = None,
+    toolbar_handle: int | None = None,
+    toolbar_title: str = "",
+    command_id: int | None = None,
+    limit: int = 500,
+    include_hidden: bool = False,
+) -> dict[str, Any]:
+    """Read or invoke Rohitab MFC toolbar commands without activating the window."""
+    if sys.platform != "win32":
+        raise RuntimeError("Rohitab toolbars require Windows")
+    if action not in {"read", "click"}:
+        raise ValueError("action must be read or click")
+    if command_id is not None and not 0 <= command_id <= 0xFFFF:
+        raise ValueError("command_id must be between 0 and 65535")
+    limit = _limit(limit, "limit", 20_000)
+    if window_handle is not None:
+        candidates = [window for window in _find_api_monitor_windows() if window["handle"] == window_handle]
+    elif window_title:
+        candidates = [window for window in _find_api_monitor_windows() if window["title"] == window_title]
+    else:
+        candidates = [
+            window
+            for window in _find_api_monitor_windows()
+            if window["title"].casefold().startswith("monitoring")
+        ]
+    if len(candidates) != 1:
+        raise ValueError("toolbar requires one matching window_handle or window_title")
+    target = candidates[0]
+    toolbars = [
+        child
+        for child in target.get("children", [])
+        if child.get("class", "").startswith("Afx:ToolBar")
+        and (include_hidden or child.get("visible"))
+        and (toolbar_handle is None or child.get("handle") == toolbar_handle)
+        and (not toolbar_title or child.get("title") == toolbar_title)
+    ]
+    if toolbar_handle is not None and len(toolbars) != 1:
+        raise ValueError("toolbar_handle must identify one toolbar")
+    if toolbar_title and not toolbars:
+        raise LookupError("Rohitab toolbar was not found")
+    if action == "click":
+        if command_id is None:
+            raise ValueError("click requires command_id")
+        if len(toolbars) != 1:
+            raise ValueError("click requires one toolbar_handle or toolbar_title")
+        items, _ = _read_native_toolbar(toolbars[0]["handle"], 20_000)
+        selected = next((item for item in items if item["command_id"] == command_id), None)
+        if selected is None:
+            raise LookupError(f"Toolbar command {command_id} was not found")
+        if not selected["enabled"]:
+            raise PermissionError(f"Toolbar command {command_id} is disabled")
+        _post_window_command(target["handle"], command_id)
+        return {
+            "clicked": True,
+            "method": "background-win32",
+            "window": target,
+            "toolbar": toolbars[0],
+            "command_id": command_id,
+            "item": selected,
+        }
+
+    returned: list[dict[str, Any]] = []
+    remaining = limit
+    truncated = False
+    try:
+        for toolbar in toolbars:
+            items, item_truncated = _read_native_toolbar(toolbar["handle"], remaining)
+            returned.append({**toolbar, "items": items, "truncated": item_truncated})
+            remaining -= len(items)
+            truncated |= item_truncated
+            if remaining <= 0:
+                truncated = True
+                break
+    except PermissionError as exc:
+        return {
+            "supported": False,
+            "method": "background-win32",
+            "window": target,
+            "toolbars": [],
+            "count": 0,
+            "truncated": False,
+            "reason": str(exc),
+        }
+    return {
+        "supported": True,
+        "method": "background-win32",
+        "window": target,
+        "toolbars": returned,
+        "count": len(returned),
+        "truncated": truncated,
     }
 
 
