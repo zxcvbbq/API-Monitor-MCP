@@ -1489,6 +1489,37 @@ def _capture_exact_scalar(data: bytes, type_info: dict[str, Any]) -> dict[str, A
     return None
 
 
+def _capture_decoded_argument_stream(
+    data: bytes,
+    definition: dict[str, Any],
+    max_items: int,
+    max_data_bytes: int,
+) -> dict[str, Any]:
+    parameter_count = (
+        definition.get("parameter_count") if definition.get("valid") else None
+    )
+    stream = _capture_encoded_argument_stream(
+        data,
+        parameter_count=parameter_count,
+        max_items=max_items,
+        max_data_bytes=max_data_bytes,
+    )
+    parameters = definition.get("parameters", [])
+    for argument in stream.get("arguments", []):
+        raw = argument.pop("_raw", None)
+        if raw is None or argument["index"] >= len(parameters):
+            continue
+        parameter = parameters[argument["index"]]
+        type_info = parameter.get("type")
+        if type_info:
+            exact = _capture_exact_scalar(raw, type_info)
+            if exact:
+                argument["typed"] = exact
+        if parameter.get("name"):
+            argument["name"] = parameter["name"]
+    return stream
+
+
 def _xml_entry_nodes(
     root: ElementTree.Element, query: str, limit: int
 ) -> tuple[list[dict[str, Any]], int]:
@@ -3496,9 +3527,6 @@ def capture_decode_call(
         None,
     )
     definition = record.get("definition", {})
-    parameter_count = (
-        definition.get("parameter_count") if definition.get("valid") else None
-    )
     if slot0 is None:
         argument_stream = {
             "format": "APMX encoded parameter stream",
@@ -3506,24 +3534,9 @@ def capture_decode_call(
             "error": "call has no bounded slot-0 payload",
         }
     else:
-        argument_stream = _capture_encoded_argument_stream(
-            _payload_bytes(slot0),
-            parameter_count=parameter_count,
-            max_items=max_items,
-            max_data_bytes=max_data_bytes,
+        argument_stream = _capture_decoded_argument_stream(
+            _payload_bytes(slot0), definition, max_items, max_data_bytes
         )
-        parameters = definition.get("parameters", [])
-        for argument in argument_stream.get("arguments", []):
-            raw = argument.pop("_raw", None)
-            if raw is None or argument["index"] >= len(parameters):
-                continue
-            type_info = parameters[argument["index"]].get("type")
-            if type_info:
-                exact = _capture_exact_scalar(raw, type_info)
-                if exact:
-                    argument["typed"] = exact
-            if parameters[argument["index"]].get("name"):
-                argument["name"] = parameters[argument["index"]]["name"]
     return_reference = next(
         (
             reference
@@ -3719,8 +3732,9 @@ def capture_search_calls(
     max_records: int = 100_000,
     max_data_bytes: int = 16_384,
     resolve_definitions: bool = False,
+    decode_arguments: bool = False,
 ) -> dict[str, Any]:
-    """Search saved call payloads and optionally resolved API definitions."""
+    """Search saved call payloads, API definitions, and decoded arguments."""
     if not query:
         raise ValueError("query must not be empty")
     if process_index is not None and process_index < 0:
@@ -3792,7 +3806,36 @@ def capture_search_calls(
                             "offset": definition.get("offset"),
                         }
                     )
-                if payload_matches or api_matches:
+                argument_matches = []
+                if decode_arguments:
+                    slot0 = next(
+                        (
+                            reference.get("payload")
+                            for reference in record.get("data_refs", [])
+                            if reference.get("slot") == 0
+                        ),
+                        None,
+                    )
+                    if slot0 is not None:
+                        argument_stream = _capture_decoded_argument_stream(
+                            _payload_bytes(slot0), definition, 256, max_data_bytes
+                        )
+                        for argument in argument_stream.get("arguments", []):
+                            payload = argument.get("payload", {})
+                            typed = argument.get("typed", {})
+                            searchable = " ".join(
+                                str(value)
+                                for value in (
+                                    argument.get("name", ""),
+                                    payload.get("text", ""),
+                                    payload.get("hex_preview", ""),
+                                    typed.get("value", ""),
+                                )
+                                if value != ""
+                            )
+                            if wanted in searchable.casefold():
+                                argument_matches.append(argument)
+                if payload_matches or api_matches or argument_matches:
                     match = {
                         "process_index": index,
                         "record": record,
@@ -3800,6 +3843,8 @@ def capture_search_calls(
                     }
                     if api_matches:
                         match["api_matches"] = api_matches
+                    if argument_matches:
+                        match["argument_matches"] = argument_matches
                     matches.append(
                         match
                     )
@@ -3812,6 +3857,7 @@ def capture_search_calls(
                             "count": len(matches),
                             "scanned_records": scanned,
                             "truncated": True,
+                            "arguments_decoded": decode_arguments,
                         }
             if scanned >= max_records:
                 break
@@ -3824,6 +3870,7 @@ def capture_search_calls(
         "scanned_records": scanned,
         "truncated": scan_truncated,
         "definitions_resolved": resolve_definitions,
+        "arguments_decoded": decode_arguments,
     }
 
 
@@ -4412,6 +4459,37 @@ def _self_test() -> None:
         api_search = capture_search_calls(str(path), "CreateFileW", resolve_definitions=True)
         assert api_search["count"] == 1
         assert api_search["matches"][0]["api_matches"][0]["module"] == "kernel32.dll"
+        argument_path = Path(directory) / "variants" / "arguments.apmx64"
+        argument_record = bytearray(160)
+        argument_record[2] = 1
+        struct.pack_into("<Q", argument_record, 40, 16)
+        encoded_argument = b"\x01" + struct.pack("<HH", 0, 8) + struct.pack("<I", 42)
+        struct.pack_into("<Q", argument_record, 112, 160)
+        struct.pack_into("<I", argument_record, 32, len(encoded_argument))
+        argument_definitions = bytearray(definitions)
+        argument_definitions[16 + 2] = 1
+        struct.pack_into("<Q", argument_definitions, 16 + 32, 224)
+        struct.pack_into("<Q", argument_definitions, 224, 240)
+        struct.pack_into("<Q", argument_definitions, 232, 160)
+        argument_payload = io.BytesIO()
+        with zipfile.ZipFile(argument_payload, "w", zipfile.ZIP_STORED) as archive:
+            archive.writestr("process/0/calls", struct.pack("<Q", 0))
+            archive.writestr(
+                "process/0/data", bytes(argument_record) + encoded_argument
+            )
+            archive.writestr("definitions", bytes(argument_definitions))
+        argument_path.write_bytes(
+            b"\r\nAPI Monitor 64-bit Capture\r\nRBAPM" + argument_payload.getvalue()
+        )
+        argument_search = capture_search_calls(
+            str(argument_path),
+            "42",
+            resolve_definitions=True,
+            decode_arguments=True,
+        )
+        assert argument_search["count"] == 1
+        assert argument_search["arguments_decoded"]
+        assert argument_search["matches"][0]["argument_matches"][0]["typed"]["value"] == 42
         call_window = capture_calls_around(str(path), 0, 0, before=2, after=2)
         assert call_window["window_start"] == 0
         assert call_window["records"][0]["is_target"]
