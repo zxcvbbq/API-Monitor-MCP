@@ -5942,6 +5942,64 @@ def _api_definition_documents(
     return documents
 
 
+def _api_variable_info(variable: Any, document: Path) -> dict[str, Any]:
+    return {
+        "name": variable.get("Name", ""),
+        "attributes": dict(variable.attrib),
+        "fields": [dict(field.attrib) for field in variable.findall("Field")],
+        "displays": [dict(display.attrib) for display in variable.findall("Display")],
+        "enums": [
+            {
+                "attributes": dict(enum.attrib),
+                "sets": [dict(item.attrib) for item in enum.findall("Set")],
+            }
+            for enum in variable.findall("Enum")
+        ],
+        "definition": str(document),
+    }
+
+
+@mcp.tool()
+def api_monitor_search_variables(
+    query: str,
+    limit: int = 100,
+    install_root: str | None = None,
+) -> dict[str, Any]:
+    """Search Rohitab XML variables, structures, unions, aliases, and enums."""
+    if not query.strip():
+        raise ValueError("query must not be empty")
+    limit = _limit(limit, "limit", 5000)
+    api_root = _app_root(install_root) / "API"
+    if not api_root.is_dir():
+        raise FileNotFoundError(f"API definition directory not found: {api_root}")
+    needle = query.casefold()
+    results: list[dict[str, Any]] = []
+    for xml_path in sorted(api_root.rglob("*.xml")):
+        try:
+            root = ElementTree.parse(xml_path).getroot()
+        except ElementTree.ParseError:
+            continue
+        for variable in root.iter("Variable"):
+            item = _api_variable_info(variable, xml_path)
+            searchable = json.dumps(item, ensure_ascii=False).casefold()
+            if needle not in searchable:
+                continue
+            results.append(item)
+            if len(results) >= limit:
+                return {
+                    "query": query,
+                    "variables": results,
+                    "count": len(results),
+                    "truncated": True,
+                }
+    return {
+        "query": query,
+        "variables": results,
+        "count": len(results),
+        "truncated": False,
+    }
+
+
 @mcp.tool()
 def api_monitor_parse_api_definition(
     definition_path: str,
@@ -5993,24 +6051,7 @@ def api_monitor_parse_api_definition(
             )
         if include_variables:
             for variable in root.iter("Variable"):
-                variables.append(
-                    {
-                        "name": variable.get("Name", ""),
-                        "attributes": dict(variable.attrib),
-                        "fields": [dict(field.attrib) for field in variable.findall("Field")],
-                        "displays": [
-                            dict(display.attrib) for display in variable.findall("Display")
-                        ],
-                        "enums": [
-                            {
-                                "attributes": dict(enum.attrib),
-                                "sets": [dict(item.attrib) for item in enum.findall("Set")],
-                            }
-                            for enum in variable.findall("Enum")
-                        ],
-                        "definition": str(document),
-                    }
-                )
+                variables.append(_api_variable_info(variable, document))
     returned = results[:limit]
     returned_variables = variables[:limit]
     return {
@@ -6622,6 +6663,11 @@ def _self_test() -> None:
         assert parsed_includes["variables"][0]["enums"][0]["sets"] == [
             {"Name": "One", "Value": "1"}
         ]
+        variable_search = api_monitor_search_variables(
+            "IncludedStruct", install_root=str(app_root)
+        )
+        assert variable_search["count"] == 1
+        assert variable_search["variables"][0]["name"] == "IncludedStruct"
         assert _named_gui_rows(["API", "Error"], [["OpenThing", "5"]])[0]["values"] == {
             "API": "OpenThing",
             "Error": "5",
