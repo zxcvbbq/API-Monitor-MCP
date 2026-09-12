@@ -28,6 +28,9 @@ from mcp.server.fastmcp import FastMCP
 
 DEFAULT_APP_ROOT = Path(r"C:\Program Files\rohitab.com\API Monitor")
 CAPTURE_SUFFIXES = {".apmx64", ".apmx86"}
+COMMAND_OPEN_CAPTURE = 32852
+COMMAND_SAVE_CAPTURE = 32854
+COMMAND_SAVE_CAPTURE_AS = 32954
 ZIP_SIGNATURES = (b"PK\x03\x04", b"PK\x05\x06", b"PK\x07\x08")
 ASCII_STRINGS = re.compile(rb"[\x20-\x7e]{4,}")
 UTF16_STRINGS = re.compile(rb"(?:[\x20-\x7e]\x00){4,}")
@@ -364,6 +367,73 @@ def _wait_for_api_monitor_window(predicate: Any, timeout_seconds: float) -> dict
     return None
 
 
+def _post_window_command(handle: int, command_id: int) -> None:
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+    if not user32.PostMessageW(handle, 0x0111, command_id, 0):  # WM_COMMAND
+        raise OSError(ctypes.get_last_error(), "Could not invoke API Monitor command")
+
+
+def _api_monitor_main_window(architecture: str, timeout_seconds: float) -> dict[str, Any] | None:
+    main = next(
+        (
+            window
+            for window in _find_api_monitor_windows()
+            if "api monitor v2" in window["title"].casefold()
+        ),
+        None,
+    )
+    if main is not None:
+        return main
+    api_monitor_launch(architecture)
+    return _wait_for_api_monitor_window(
+        lambda window: "api monitor v2" in window["title"].casefold(), timeout_seconds
+    )
+
+
+def _run_file_dialog(
+    main_window: dict[str, Any],
+    command_id: int,
+    dialog_title: str,
+    button_titles: tuple[str, ...],
+    filename_control_id: int,
+    file_path: Path,
+    timeout_seconds: float,
+) -> dict[str, Any]:
+    _post_window_command(main_window["handle"], command_id)
+    dialog = _wait_for_api_monitor_window(
+        lambda window: window["title"] == dialog_title, timeout_seconds
+    )
+    if dialog is None:
+        raise TimeoutError(f"API Monitor {dialog_title} dialog did not appear")
+    target = next(
+        (
+            child
+            for child in dialog.get("children", [])
+            if child.get("control_id") == filename_control_id and child.get("class") == "Edit"
+        ),
+        None,
+    )
+    if target is None:
+        raise RuntimeError(f"API Monitor {dialog_title} filename field was not found")
+    _set_control_text(target["handle"], str(file_path))
+    button = None
+    for title in button_titles:
+        button = next(
+            (
+                child
+                for child in dialog.get("children", [])
+                if child.get("title") == title and child.get("class") == "Button"
+            ),
+            None,
+        )
+        if button is not None:
+            break
+    if button is None:
+        raise RuntimeError(f"API Monitor {dialog_title} action button was not found")
+    _post_button_click(button["handle"])
+    return dialog
+
+
 def _read_payload(data: bytes) -> dict[str, Any]:
     try:
         text = data.decode("utf-8")
@@ -644,21 +714,120 @@ def api_monitor_open_capture(file_path: str, install_root: str | None = None) ->
     if sys.platform != "win32" or not hasattr(os, "startfile"):
         raise RuntimeError("Opening API Monitor captures requires Windows")
 
-    try:
-        os.startfile(str(path))
-        return {"opened": True, "method": "file-association", "file": str(path)}
-    except OSError:
-        architecture = "x86" if path.suffix.lower() == ".apmx86" else "x64"
+    architecture = "x86" if path.suffix.lower() == ".apmx86" else "x64"
+    main_window = next(
+        (
+            window
+            for window in _find_api_monitor_windows()
+            if "api monitor v2" in window["title"].casefold()
+        ),
+        None,
+    )
+    if main_window is None:
         root = _app_root(install_root)
         executable = _app_executable(root, architecture)
-        process = subprocess.Popen([str(executable), str(path)], cwd=str(root))
+        process = subprocess.Popen([str(executable)], cwd=str(root))
+        main_window = _wait_for_api_monitor_window(
+            lambda window: "api monitor v2" in window["title"].casefold(), 15
+        )
+        if main_window is None:
+            return {
+                "opened": True,
+                "method": "direct-launch-fallback",
+                "pid": process.pid,
+                "file": str(path),
+            }
+
+    try:
+        _run_file_dialog(
+            main_window,
+            COMMAND_OPEN_CAPTURE,
+            "Open",
+            ("&Open", "Open"),
+            1148,
+            path,
+            15,
+        )
         return {
             "opened": True,
-            "method": "direct-launch-fallback",
-            "pid": process.pid,
+            "method": "background-gui",
             "file": str(path),
-            "executable": str(executable),
         }
+    except (LookupError, OSError, RuntimeError, TimeoutError):
+        try:
+            os.startfile(str(path))
+            return {"opened": True, "method": "file-association-fallback", "file": str(path)}
+        except OSError:
+            raise
+
+
+@mcp.tool()
+def api_monitor_save_capture(
+    output_path: str,
+    overwrite: bool = False,
+    timeout_seconds: int = 15,
+) -> dict[str, Any]:
+    """Save the current Rohitab capture through its background GUI."""
+    if sys.platform != "win32":
+        raise RuntimeError("Saving API Monitor captures requires Windows")
+    if timeout_seconds < 1 or timeout_seconds > 60:
+        raise ValueError("timeout_seconds must be between 1 and 60")
+    path = Path(output_path).expanduser()
+    if path.suffix.lower() not in CAPTURE_SUFFIXES:
+        raise ValueError("output_path must end in .apmx64 or .apmx86")
+    if not path.parent.is_dir():
+        raise NotADirectoryError(f"Output directory not found: {path.parent}")
+    path = path.resolve()
+    existed = path.exists()
+    if existed and not overwrite:
+        raise FileExistsError(f"Capture already exists: {path}")
+
+    main_window = _api_monitor_main_window(
+        "x86" if path.suffix.lower() == ".apmx86" else "x64", timeout_seconds
+    )
+    if main_window is None:
+        raise TimeoutError("API Monitor main window did not appear")
+    _run_file_dialog(
+        main_window,
+        COMMAND_SAVE_CAPTURE_AS,
+        "Save As",
+        ("&Save", "Save"),
+        1001,
+        path,
+        timeout_seconds,
+    )
+    if existed:
+        confirmation = _wait_for_api_monitor_window(
+            lambda window: window["title"] == "Confirm Save As", timeout_seconds
+        )
+        if confirmation is not None:
+            button = None
+            for title in ("&Yes", "Yes"):
+                button = _find_ui_control(
+                    _find_api_monitor_windows(), None, title, "Button", "Confirm Save As"
+                )
+                if button is not None:
+                    break
+            if button is None:
+                raise RuntimeError("API Monitor overwrite confirmation button was not found")
+            _post_button_click(button[1]["handle"])
+
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        dialogs = [
+            window for window in _find_api_monitor_windows() if window["title"] == "Save As"
+        ]
+        if not dialogs and path.is_file():
+            stat = path.stat()
+            return {
+                "saved": True,
+                "method": "background-gui",
+                "file": str(path),
+                "size": stat.st_size,
+                "modified_utc": _file_time(path),
+            }
+        time.sleep(0.1)
+    raise TimeoutError("API Monitor did not finish saving the capture")
 
 
 @mcp.tool()
