@@ -3301,6 +3301,28 @@ def capture_call_records(
 
 
 @mcp.tool()
+def capture_read_definition(file_path: str, definition_offset: int) -> dict[str, Any]:
+    """Resolve one API definition node from an APMX definitions entry."""
+    if definition_offset < 0:
+        raise ValueError("definition_offset must be non-negative")
+    path = _capture_path(file_path)
+    pointer_size = 4 if path.suffix.lower() == ".apmx86" else 8
+    archive, _, _ = _open_capture_zip(path)
+    with archive:
+        try:
+            definitions = archive.read("definitions")
+        except KeyError as exc:
+            raise FileNotFoundError("Capture definitions entry not found") from exc
+    definition = _capture_definition_info(definitions, definition_offset, pointer_size)
+    return {
+        "file": str(path),
+        "architecture": "x86" if pointer_size == 4 else "x64",
+        "definitions_bytes": len(definitions),
+        "definition": definition,
+    }
+
+
+@mcp.tool()
 def capture_export_calls(
     file_path: str,
     output_path: str,
@@ -4436,6 +4458,7 @@ def _self_test() -> None:
         assert resolved_records["records"][0]["definition"]["name"] == "CreateFileW"
         assert resolved_records["records"][0]["definition"]["module"] == "kernel32.dll"
         assert resolved_records["records"][0]["definition"]["ordinal"] == 123
+        assert capture_read_definition(str(path), 16)["definition"]["name"] == "CreateFileW"
         decoded_call = capture_decode_call(str(path), 0, 0, resolve_definitions=True)
         assert decoded_call["record"]["data_refs"][0]["decoding"]["strings"][0]["text"] == "hello"
         assert decoded_call["record"]["definition"]["name"] == "CreateFileW"
@@ -4586,6 +4609,7 @@ def _self_test() -> None:
         assert x86_records["architecture"] == "x86"
         assert x86_records["records"][0]["definition"]["name"] == "CreateFileA"
         assert x86_records["records"][0]["data_refs"][0]["payload"]["text"] == "hello"
+        assert capture_read_definition(str(x86_path), 16)["architecture"] == "x86"
         assert capture_list_apis(str(x86_path))["apis"][0]["module"] == "kernel32.dll"
         assert capture_validate(str(x86_path), deep=True)["structural_valid"]
         assert capture_call_stats(str(x86_path))["processes"][0]["record_sizes"]["120"] == 1
