@@ -303,19 +303,23 @@ def _capture_record_size(offsets: list[int], index: int, data: bytes) -> int:
 
 def _capture_definition_info(definitions: bytes, relative: int) -> dict[str, Any]:
     result: dict[str, Any] = {"offset": relative, "valid": False}
-    if relative > len(definitions) - 64:
+    if relative < 0 or relative > len(definitions) - 64:
         result["error"] = "definition offset is outside definitions entry"
         return result
     flags = definitions[relative]
     ordinal = struct.unpack_from("<I", definitions, relative + 8)[0]
     name_relative = struct.unpack_from("<Q", definitions, relative + 24)[0]
     module_relative = struct.unpack_from("<Q", definitions, relative + 40)[0]
+    parameter_count = definitions[relative + 2]
+    parameter_table_relative = struct.unpack_from("<Q", definitions, relative + 32)[0]
     result.update(
         {
             "flags": f"0x{flags:02x}",
             "ordinal": ordinal,
             "name_offset": name_relative,
             "module_offset": module_relative,
+            "parameter_count": parameter_count,
+            "parameter_table_offset": parameter_table_relative,
         }
     )
     if name_relative >= len(definitions):
@@ -357,6 +361,52 @@ def _capture_definition_info(definitions: bytes, relative: int) -> dict[str, Any
             return result
         result["module"] = module
         result["module_name_offset"] = module_name_relative
+    if parameter_count and parameter_table_relative < len(definitions):
+        table_end = parameter_table_relative + parameter_count * 24
+        if table_end <= len(definitions):
+            parameters = []
+            for index in range(parameter_count):
+                descriptor = parameter_table_relative + index * 24
+                name_offset = struct.unpack_from("<Q", definitions, descriptor)[0]
+                type_offset = struct.unpack_from("<Q", definitions, descriptor + 8)[0]
+                parameter: dict[str, Any] = {
+                    "index": index,
+                    "offset": descriptor,
+                    "name_offset": name_offset,
+                    "type_offset": type_offset,
+                    "flags": struct.unpack_from("<H", definitions, descriptor + 16)[0],
+                }
+                if name_offset < len(definitions):
+                    name_end = definitions.find(b"\x00", name_offset)
+                    if name_end >= 0:
+                        parameter["name"] = definitions[name_offset:name_end].decode(
+                            "ascii", errors="replace"
+                        )
+                if type_offset <= len(definitions) - 48:
+                    type_name_offset = struct.unpack_from("<Q", definitions, type_offset)[0]
+                    type_alias_offset = struct.unpack_from("<Q", definitions, type_offset + 16)[0]
+                    type_info: dict[str, Any] = {
+                        "offset": type_offset,
+                        "kind": struct.unpack_from("<I", definitions, type_offset + 8)[0],
+                        "size": definitions[type_offset + 32],
+                        "flags": definitions[type_offset + 33],
+                    }
+                    for key, offset in (
+                        ("name_offset", type_name_offset),
+                        ("alias_offset", type_alias_offset),
+                    ):
+                        if offset < len(definitions):
+                            end = definitions.find(b"\x00", offset)
+                            if end >= 0:
+                                type_info[key] = offset
+                                type_info[key[:-7] if key.endswith("_offset") else key] = definitions[
+                                    offset:end
+                                ].decode("ascii", errors="replace")
+                    parameter["type"] = type_info
+                parameters.append(parameter)
+            result["parameters"] = parameters
+        else:
+            result["parameter_error"] = "parameter table exceeds definitions entry"
     result["valid"] = True
     return result
 
@@ -1247,6 +1297,118 @@ def _capture_payload_candidates(data: bytes, max_items: int) -> dict[str, Any]:
                 {"width": width, "signed": True, "values": signed}
             )
     return result
+
+
+def _payload_bytes(payload: dict[str, Any]) -> bytes:
+    if payload.get("encoding") == "base64":
+        return base64.b64decode(payload["base64"])
+    encoding = payload.get("encoding") or "utf-8"
+    return str(payload.get("text", "")).encode(encoding)
+
+
+def _capture_encoded_argument_stream(
+    data: bytes,
+    parameter_count: int | None = None,
+    max_items: int = 256,
+    max_data_bytes: int = 16 * 1024 * 1024,
+) -> dict[str, Any]:
+    """Parse API Monitor's proven slot-0 encoded-parameter table."""
+    result: dict[str, Any] = {
+        "format": "APMX encoded parameter stream",
+        "valid": False,
+        "size": len(data),
+    }
+    if not data:
+        result["error"] = "encoded parameter stream is empty"
+        return result
+    captured_count = data[0]
+    table_count = parameter_count if parameter_count is not None else captured_count
+    result.update(
+        {
+            "captured_count": captured_count,
+            "table_count": table_count,
+            "parameter_count_source": "definition"
+            if parameter_count is not None
+            else "stream_header",
+        }
+    )
+    if not 0 <= table_count <= 255:
+        result["error"] = "encoded parameter table count is invalid"
+        return result
+    table_end = 1 + table_count * 4
+    if table_end > len(data):
+        result["error"] = "encoded parameter table exceeds payload"
+        return result
+    result["table_bytes"] = table_end
+    count_mismatch = captured_count > table_count
+    if count_mismatch:
+        result["warning"] = "stream reports more parameters than the API definition"
+    arguments = []
+    available_count = min(captured_count, table_count, max_items)
+    for index in range(available_count):
+        offset, packed_length = struct.unpack_from("<HH", data, 1 + index * 4)
+        length = packed_length >> 1
+        argument: dict[str, Any] = {
+            "index": index,
+            "offset": offset,
+            "length": length,
+            "flags": packed_length & 1,
+            "valid": not (packed_length & 1),
+        }
+        start = table_end + offset
+        end = start + length
+        if packed_length & 1:
+            argument["valid"] = False
+            argument["error"] = "API Monitor marked this parameter unavailable"
+        elif end > len(data):
+            argument["valid"] = False
+            argument["error"] = "parameter bytes exceed payload"
+        elif length <= max_data_bytes:
+            raw = data[start:end]
+            argument["payload"] = _read_payload(raw)
+            argument["_raw"] = raw
+        else:
+            argument["truncated"] = True
+        arguments.append(argument)
+    result["arguments"] = arguments
+    result["available_count"] = len(arguments)
+    result["truncated"] = captured_count > available_count
+    result["valid"] = not count_mismatch
+    return result
+
+
+def _capture_exact_scalar(data: bytes, type_info: dict[str, Any]) -> dict[str, Any] | None:
+    kind = type_info.get("kind")
+    size = type_info.get("size")
+    if not isinstance(size, int) or size <= 0 or size > 16 or len(data) < size:
+        return None
+    raw = data[:size]
+    if kind == 2:
+        unsigned = int.from_bytes(raw, "little")
+        signed = not (int(type_info.get("flags", 0)) & 1)
+        return {
+            "exact": True,
+            "kind": "integer",
+            "size": size,
+            "signed": signed,
+            "value": int.from_bytes(raw, "little", signed=signed),
+            "unsigned_value": unsigned,
+        }
+    if kind == 3 and size in (4, 8):
+        return {
+            "exact": True,
+            "kind": "float",
+            "size": size,
+            "value": struct.unpack("<f" if size == 4 else "<d", raw)[0],
+        }
+    if kind == 6 and size == 8:
+        return {
+            "exact": True,
+            "kind": "handle",
+            "size": size,
+            "value": f"0x{int.from_bytes(raw, 'little'):016x}",
+        }
+    return None
 
 
 def _xml_entry_nodes(
@@ -3042,7 +3204,7 @@ def capture_decode_call(
     max_items: int = 64,
     resolve_definitions: bool = False,
 ) -> dict[str, Any]:
-    """Return one saved call with heuristic string and integer payload candidates."""
+    """Return one saved call with exact encoded args plus bounded candidates."""
     if process_index < 0 or record_index < 0:
         raise ValueError("process_index and record_index must be non-negative")
     max_data_bytes = _limit(max_data_bytes, "max_data_bytes", 16 * 1024 * 1024)
@@ -3067,18 +3229,53 @@ def capture_decode_call(
                 "skipped": "payload exceeds max_data_bytes",
             }
             continue
-        if payload.get("encoding") == "base64":
-            raw = base64.b64decode(payload["base64"])
-        else:
-            raw = payload.get("text", "").encode(payload.get("encoding") or "utf-8")
+        raw = _payload_bytes(payload)
         reference["decoding"] = _capture_payload_candidates(raw, max_items)
+    slot0 = next(
+        (
+            reference.get("payload")
+            for reference in record.get("data_refs", [])
+            if reference.get("slot") == 0
+        ),
+        None,
+    )
+    definition = record.get("definition", {})
+    parameter_count = (
+        definition.get("parameter_count") if definition.get("valid") else None
+    )
+    if slot0 is None:
+        argument_stream = {
+            "format": "APMX encoded parameter stream",
+            "valid": False,
+            "error": "call has no bounded slot-0 payload",
+        }
+    else:
+        argument_stream = _capture_encoded_argument_stream(
+            _payload_bytes(slot0),
+            parameter_count=parameter_count,
+            max_items=max_items,
+            max_data_bytes=max_data_bytes,
+        )
+        parameters = definition.get("parameters", [])
+        for argument in argument_stream.get("arguments", []):
+            raw = argument.pop("_raw", None)
+            if raw is None or argument["index"] >= len(parameters):
+                continue
+            type_info = parameters[argument["index"]].get("type")
+            if type_info:
+                exact = _capture_exact_scalar(raw, type_info)
+                if exact:
+                    argument["typed"] = exact
+            if parameters[argument["index"]].get("name"):
+                argument["name"] = parameters[argument["index"]]["name"]
     return {
         "file": result["file"],
         "process_index": process_index,
         "record_index": record_index,
         "record": record,
+        "argument_stream": argument_stream,
         "definitions_available": result["definitions_available"],
-        "format": "APMX raw payload candidates; decoding is heuristic",
+        "format": "APMX encoded parameter table; typed scalar values are exact, other values remain heuristic",
     }
 
 
@@ -3915,6 +4112,14 @@ def _self_test() -> None:
         assert binary_payload["encoding"] == "base64"
         assert binary_payload["size"] == 4
         assert binary_payload["hex_preview"] == "01 00 ff 00"
+        encoded = _capture_encoded_argument_stream(
+            b"\x01" + struct.pack("<HH", 0, 8) + struct.pack("<I", 42),
+            parameter_count=1,
+        )
+        assert encoded["valid"] and encoded["arguments"][0]["length"] == 4
+        assert _capture_exact_scalar(
+            struct.pack("<I", 42), {"kind": 2, "size": 4, "flags": 0}
+        )["value"] == 42
         extracted = Path(directory) / "calls.bin"
         exported = capture_extract_entry(str(path), "calls.bin", str(extracted))
         assert exported["size"] == len(b"CreateFileW\x00https://example.test\x00")
