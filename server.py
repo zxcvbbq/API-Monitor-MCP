@@ -275,7 +275,10 @@ def _parse_capture_info(data: bytes) -> dict[str, Any]:
 def _windows_filetime(value: int) -> str | None:
     if not value:
         return None
-    return (datetime(1601, 1, 1, tzinfo=timezone.utc) + timedelta(microseconds=value / 10)).isoformat()
+    try:
+        return (datetime(1601, 1, 1, tzinfo=timezone.utc) + timedelta(microseconds=value / 10)).isoformat()
+    except (OverflowError, ValueError):
+        return None
 
 
 def _parse_capture_process_info(data: bytes, pointer_size: int = 8) -> dict[str, Any]:
@@ -506,6 +509,30 @@ def _capture_record_size(
     minimum = layout["minimum_record_size"]
     full = layout["full_record_size"]
     return next_offset - offset if minimum <= next_offset - offset <= full else full if data[offset + 2] else minimum
+
+
+def _capture_call_context(data: bytes, offset: int, pointer_size: int = 8) -> dict[str, Any]:
+    if pointer_size == 8:
+        module_base_offset, timestamp_offset, duration_offset = 48, 72, 96
+    else:
+        module_base_offset, timestamp_offset, duration_offset = 40, 56, 80
+    context: dict[str, Any] = {
+        "thread_id": struct.unpack_from("<I", data, offset + 16)[0],
+        "thread_number": struct.unpack_from("<I", data, offset + 20)[0],
+        "module_base": f"0x{int.from_bytes(data[offset + module_base_offset : offset + module_base_offset + pointer_size], 'little'):0{pointer_size * 2}x}",
+    }
+    timestamp = int.from_bytes(
+        data[offset + timestamp_offset : offset + timestamp_offset + 8], "little"
+    )
+    context["timestamp_filetime"] = timestamp
+    context["timestamp_utc"] = _windows_filetime(timestamp)
+    duration_valid = bool(data[offset])
+    context["duration_valid"] = duration_valid
+    if duration_valid:
+        context["duration_seconds"] = struct.unpack_from(
+            "<d", data, offset + duration_offset
+        )[0]
+    return context
 
 
 def _capture_relative_text(data: bytes, relative: int) -> str | None:
@@ -799,6 +826,7 @@ def _capture_call_records(
             record["error"] = "record extends beyond process data"
             records.append(record)
             continue
+        record["context"] = _capture_call_context(data, offset, pointer_size)
         for slot, pointer_offset, length_offset in layout["pointer_refs"]:
             if pointer_offset + pointer_size > record_size or length_offset + 4 > record_size:
                 continue
@@ -5155,7 +5183,13 @@ def _self_test() -> None:
                 '<DisplayFilters><Filter Field="API" Operator="contains">CreateFile</Filter></DisplayFilters>',
             )
             record = bytearray(160)
+            record[0] = 1
             record[2] = 1
+            struct.pack_into("<I", record, 16, 0x1234)
+            struct.pack_into("<I", record, 20, 7)
+            struct.pack_into("<Q", record, 48, 0x7FF600001000)
+            struct.pack_into("<Q", record, 72, 132223104000000000)
+            struct.pack_into("<d", record, 96, 0.125)
             struct.pack_into("<Q", record, 40, 16)
             struct.pack_into("<I", record, 32, 5)
             struct.pack_into("<Q", record, 112, 160)
@@ -5269,6 +5303,12 @@ def _self_test() -> None:
         assert call_records["count"] == 1
         assert call_records["start_index"] == 0
         assert call_records["records"][0]["data_refs"][0]["payload"]["text"] == "hello"
+        call_context = call_records["records"][0]["context"]
+        assert call_context["thread_id"] == 0x1234
+        assert call_context["thread_number"] == 7
+        assert call_context["module_base"] == "0x00007ff600001000"
+        assert call_context["timestamp_utc"] == "2020-01-01T00:00:00+00:00"
+        assert call_context["duration_seconds"] == 0.125
         resolved_records = capture_call_records(str(path), resolve_definitions=True)
         assert resolved_records["definitions_available"]
         assert resolved_records["records"][0]["definition"]["name"] == "CreateFileW"
@@ -5468,7 +5508,13 @@ def _self_test() -> None:
 
         x86_path = Path(directory) / "sample.apmx86"
         x86_record = bytearray(120)
+        x86_record[0] = 1
         x86_record[2] = 1
+        struct.pack_into("<I", x86_record, 16, 0x2345)
+        struct.pack_into("<I", x86_record, 20, 8)
+        struct.pack_into("<I", x86_record, 40, 0x00401000)
+        struct.pack_into("<Q", x86_record, 56, 132223104000000000)
+        struct.pack_into("<d", x86_record, 80, 0.25)
         struct.pack_into("<I", x86_record, 36, 16)
         struct.pack_into("<I", x86_record, 32, 5)
         struct.pack_into("<I", x86_record, 96, 120)
@@ -5551,6 +5597,11 @@ def _self_test() -> None:
         assert x86_records["architecture"] == "x86"
         assert x86_records["records"][0]["definition"]["name"] == "CreateFileA"
         assert x86_records["records"][0]["data_refs"][0]["payload"]["size"] == len(x86_encoded_argument)
+        x86_context = x86_records["records"][0]["context"]
+        assert x86_context["thread_id"] == 0x2345
+        assert x86_context["thread_number"] == 8
+        assert x86_context["module_base"] == "0x00401000"
+        assert x86_context["duration_seconds"] == 0.25
         assert capture_read_definition(str(x86_path), 16)["architecture"] == "x86"
         assert capture_list_apis(str(x86_path))["apis"][0]["module"] == "kernel32.dll"
         x86_deep_validation = capture_validate(str(x86_path), deep=True)
