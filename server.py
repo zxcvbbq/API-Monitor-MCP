@@ -1889,6 +1889,60 @@ def capture_read_entry(file_path: str, entry_name: str, max_bytes: int = 1_048_5
 
 
 @mcp.tool()
+def capture_extract_entry(
+    file_path: str,
+    entry_name: str,
+    output_path: str,
+    overwrite: bool = False,
+    max_bytes: int = 64 * 1024 * 1024,
+) -> dict[str, Any]:
+    """Extract one bounded APMX ZIP entry to a caller-selected file."""
+    if not entry_name:
+        raise ValueError("entry_name must not be empty")
+    max_bytes = _limit(max_bytes, "max_bytes", 256 * 1024 * 1024)
+    path = _capture_path(file_path)
+    output = Path(output_path).expanduser()
+    if not output.parent.is_dir():
+        raise NotADirectoryError(f"Output directory not found: {output.parent}")
+    output = output.resolve()
+    archive, _, _ = _open_capture_zip(path)
+    with archive:
+        try:
+            info = archive.getinfo(entry_name)
+        except KeyError as exc:
+            raise FileNotFoundError(f"ZIP entry not found: {entry_name}") from exc
+        if info.is_dir():
+            raise IsADirectoryError(f"ZIP entry is a directory: {entry_name}")
+        if info.file_size > max_bytes:
+            raise ValueError(f"ZIP entry exceeds max_bytes: {info.file_size}")
+        if output.exists() and not overwrite:
+            raise FileExistsError(f"Output already exists: {output}")
+        digest = hashlib.sha256()
+        written = 0
+        try:
+            mode = "wb" if overwrite else "xb"
+            with archive.open(info) as member, output.open(mode) as handle:
+                while chunk := member.read(1024 * 1024):
+                    written += len(chunk)
+                    if written > max_bytes:
+                        raise ValueError("ZIP entry exceeded max_bytes while extracting")
+                    digest.update(chunk)
+                    handle.write(chunk)
+        except Exception:
+            if output.exists() and not overwrite:
+                output.unlink()
+            raise
+    return {
+        "extracted": True,
+        "file": str(path),
+        "entry": entry_name,
+        "output": str(output),
+        "size": written,
+        "sha256": digest.hexdigest(),
+    }
+
+
+@mcp.tool()
 def capture_monitoring_log(
     file_path: str,
     query: str = "",
@@ -2232,6 +2286,10 @@ def _self_test() -> None:
         searched = capture_search_entries(str(path), "CreateFile", 1)
         assert searched["entries"][0]["entry"] == "calls.bin"
         assert not searched["truncated"]
+        extracted = Path(directory) / "calls.bin"
+        exported = capture_extract_entry(str(path), "calls.bin", str(extracted))
+        assert exported["size"] == len(b"CreateFileW\x00https://example.test\x00")
+        assert extracted.read_bytes().startswith(b"CreateFileW")
         found = capture_find_bytes(str(path), "43 72 65 61 74 65", 10)
         assert found["offsets"]
         assert not found["truncated"]
