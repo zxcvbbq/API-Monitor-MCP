@@ -12,7 +12,7 @@
         "repo": "zxcvbbq/API-Monitor-MCP"
       },
       "description": "MCP bridge for Rohitab API Monitor captures and GUI.",
-        "version": "0.2.0",
+        "version": "0.3.0",
       "category": "Developer Tools"
     }
   ]
