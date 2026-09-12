@@ -449,6 +449,7 @@ def _parse_capture_process_info(data: bytes, pointer_size: int = 8) -> dict[str,
         position += 4
         if raw_length > payload_end - position:
             raise ValueError(f"Process info module record {index} has invalid raw length")
+        raw_data = data[position : position + raw_length]
         position += raw_length
         if position + 16 > payload_end:
             raise ValueError(f"Process info module record {index} is truncated")
@@ -465,6 +466,7 @@ def _parse_capture_process_info(data: bytes, pointer_size: int = 8) -> dict[str,
                 "fields": [field0, field1, field2],
                 "qwords": [qword0, qword1, qword2, qword3],
                 "raw_bytes": raw_length,
+                "raw_payload": _read_payload(raw_data),
                 "path": path,
             }
         )
@@ -6099,6 +6101,22 @@ def _self_test() -> None:
             "API": "OpenThing",
             "Error": "5",
         }
+        raw_module = b"raw-module"
+        raw_process_info = struct.pack("<IIIQ", 1, 0, 77, 0x140000000)
+        for value in ("C:\\sample.exe", "sample.exe", "Sample"):
+            raw_process_info += struct.pack("<I", len(value)) + value.encode("utf-16-le")
+        raw_process_info += struct.pack("<IQQI", 0, 0, 0, 1)
+        raw_process_info += struct.pack("<IIIQI", 1, 2, 3, 0x140001000, len(raw_module))
+        raw_process_info += raw_module
+        raw_process_info += struct.pack("<QQ", 0x1234, 0x5678)
+        raw_module_path = "C:\\sample.dll"
+        raw_process_info += struct.pack("<I", len(raw_module_path))
+        raw_process_info += raw_module_path.encode("utf-16-le")
+        raw_process_info += struct.pack("<Q", 0xABCDEF)
+        raw_process_info += struct.pack("<I", 0)
+        raw_process_info += struct.pack("<I", zlib.crc32(raw_process_info) & 0xFFFFFFFF)
+        raw_process = _parse_capture_process_info(raw_process_info, 8)
+        assert raw_process["module_records"][0]["raw_payload"]["text"] == "raw-module"
 
 
 def main() -> None:
