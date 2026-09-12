@@ -564,7 +564,7 @@ def api_monitor_ui_tree() -> dict[str, Any]:
 
 
 @mcp.tool()
-def api_monitor_summary(window_title: str = "") -> dict[str, Any]:
+def api_monitor_summary(window_title: str = "", window_handle: int | None = None) -> dict[str, Any]:
     """Read Rohitab Summary panes without foregrounding the application."""
     if sys.platform != "win32":
         return {"supported": False, "summaries": []}
@@ -573,6 +573,8 @@ def api_monitor_summary(window_title: str = "") -> dict[str, Any]:
         if "api monitor v2" not in window["title"].casefold():
             continue
         if window_title and window["title"] != window_title:
+            continue
+        if window_handle is not None and window["handle"] != window_handle:
             continue
         for control in window.get("children", []):
             match = SUMMARY_TEXT.fullmatch(control.get("title", "").strip())
@@ -695,7 +697,11 @@ def api_monitor_gui_select_option(
 
 
 @mcp.tool()
-def api_monitor_gui_lists(window_title: str = "", limit: int = 200) -> dict[str, Any]:
+def api_monitor_gui_lists(
+    window_title: str = "",
+    limit: int = 200,
+    window_handle: int | None = None,
+) -> dict[str, Any]:
     """Read Rohitab list views through background Windows UI Automation."""
     if sys.platform != "win32":
         return {"supported": False, "windows": []}
@@ -712,7 +718,11 @@ def api_monitor_gui_lists(window_title: str = "", limit: int = 200) -> dict[str,
     }
     result: list[dict[str, Any]] = []
     for window in Desktop(backend="uia").windows():
-        if window.process_id() not in pids or (window_title and window.window_text() != window_title):
+        if window.process_id() not in pids:
+            continue
+        if window_title and window.window_text() != window_title:
+            continue
+        if window_handle is not None and window.handle != window_handle:
             continue
         lists: list[dict[str, Any]] = []
         for control in window.descendants():
@@ -823,10 +833,14 @@ def api_monitor_gui_select(
 
 
 @mcp.tool()
-def api_monitor_traffic(window_title: str = "", limit: int = 500) -> dict[str, Any]:
+def api_monitor_traffic(
+    window_title: str = "",
+    limit: int = 500,
+    window_handle: int | None = None,
+) -> dict[str, Any]:
     """Read captured API-call rows from Rohitab's background traffic panes."""
     limit = _limit(limit, "limit", 2000)
-    lists = api_monitor_gui_lists(window_title, limit)
+    lists = api_monitor_gui_lists(window_title, limit, window_handle)
     traffic: list[dict[str, Any]] = []
     for window in lists.get("windows", []):
         for pane in window.get("lists", []):
@@ -851,18 +865,19 @@ def api_monitor_traffic_details(
     row_index: int | None = None,
     query: str = "",
     limit: int = 500,
+    window_handle: int | None = None,
 ) -> dict[str, Any]:
     """Select one captured API call and return its related GUI detail panes."""
     if row_index is None and not query:
         raise ValueError("row_index or query is required")
     limit = _limit(limit, "limit", 2000)
-    traffic = api_monitor_traffic(window_title, limit)
+    traffic = api_monitor_traffic(window_title, limit, window_handle)
     if len(traffic["panes"]) != 1:
         raise ValueError("window_title must identify one window with one traffic pane")
     call_pane = traffic["panes"][0]
     selected = api_monitor_gui_select(call_pane["list_handle"], row_index, query)
     time.sleep(0.2)
-    refreshed = api_monitor_gui_lists(window_title, limit)
+    refreshed = api_monitor_gui_lists(window_title, limit, window_handle)
     details = [
         {
             "handle": pane["handle"],
@@ -877,7 +892,7 @@ def api_monitor_traffic_details(
     return {
         "selected_call": selected,
         "details": details,
-        "summaries": api_monitor_summary(window_title)["summaries"],
+        "summaries": api_monitor_summary(window_title, window_handle)["summaries"],
     }
 
 
