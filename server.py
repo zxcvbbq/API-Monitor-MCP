@@ -106,13 +106,88 @@ def _zip_offset(data: bytes) -> int | None:
     return min(offsets) if offsets else None
 
 
+def _capture_zip_offset(path: Path) -> int | None:
+    tail = b""
+    consumed = 0
+    with path.open("rb") as handle:
+        while chunk := handle.read(1024 * 1024):
+            window = tail + chunk
+            offset = _zip_offset(window)
+            if offset is not None:
+                return consumed - len(tail) + offset
+            consumed += len(chunk)
+            tail = window[-3:]
+    return None
+
+
+class _CaptureZipReader(io.RawIOBase):
+    def __init__(self, path: Path, offset: int):
+        self._handle = path.open("rb")
+        self._offset = offset
+        self._size = path.stat().st_size - offset
+        self._position = 0
+
+    def readable(self) -> bool:
+        return True
+
+    def seekable(self) -> bool:
+        return True
+
+    def tell(self) -> int:
+        return self._position
+
+    def seek(self, offset: int, whence: int = io.SEEK_SET) -> int:
+        if whence == io.SEEK_CUR:
+            offset += self._position
+        elif whence == io.SEEK_END:
+            offset += self._size
+        elif whence != io.SEEK_SET:
+            raise ValueError(f"unsupported seek mode: {whence}")
+        if offset < 0:
+            raise ValueError("negative seek position")
+        self._position = offset
+        return offset
+
+    def read(self, size: int = -1) -> bytes:
+        if size is None or size < 0:
+            size = self._size - self._position
+        size = min(size, max(0, self._size - self._position))
+        if not size:
+            return b""
+        self._handle.seek(self._offset + self._position)
+        data = self._handle.read(size)
+        self._position += len(data)
+        return data
+
+    def close(self) -> None:
+        if not self.closed:
+            self._handle.close()
+        super().close()
+
+
+class _CaptureZipFile(zipfile.ZipFile):
+    def __init__(self, path: Path, offset: int):
+        self._capture_reader = _CaptureZipReader(path, offset)
+        try:
+            super().__init__(self._capture_reader)
+        except Exception:
+            self._capture_reader.close()
+            raise
+
+    def close(self) -> None:
+        try:
+            super().close()
+        finally:
+            self._capture_reader.close()
+
+
 def _open_capture_zip(path: Path) -> tuple[zipfile.ZipFile, bytes, int]:
-    # ponytail: copies the capture for ZIP access; use a streaming offset reader if multi-GB captures matter.
-    data = path.read_bytes()
-    offset = _zip_offset(data)
+    offset = _capture_zip_offset(path)
     if offset is None:
         raise ValueError("Capture does not contain a ZIP container")
-    return zipfile.ZipFile(io.BytesIO(data[offset:])), data, offset
+    with path.open("rb") as handle:
+        prefix = handle.read(offset)
+    return _CaptureZipFile(path, offset), prefix, offset
 
 
 def _zip_entries(path: Path) -> list[dict[str, Any]]:
@@ -3433,7 +3508,7 @@ def capture_validate(
         return result
     pointer_size = 4 if path.suffix.lower() == ".apmx86" else 8
     streams = []
-    archive = zipfile.ZipFile(io.BytesIO(data[offset:]))
+    archive, _, _ = _open_capture_zip(path)
     with archive:
         entries = {info.filename: info for info in archive.infolist()}
         definitions = archive.read("definitions") if "definitions" in entries else None
@@ -5120,6 +5195,7 @@ def _self_test() -> None:
         second_path.write_bytes(b"\r\nAPI Monitor 64-bit Capture\r\nRBAPM" + second_payload.getvalue())
 
         info = _capture_info(path)
+        assert _capture_zip_offset(path) == info["zip_offset"]
         assert info["extension"] == ".apmx64"
         assert info["format_marker"] == "RBAPM"
         assert info["architecture"] == "x64"
