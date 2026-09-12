@@ -5764,8 +5764,10 @@ def capture_find_bytes(
     pattern_hex: str,
     limit: int = 1000,
     start_offset: int = 0,
+    entry_name: str | None = None,
+    max_bytes: int = 256 * 1024 * 1024,
 ) -> dict[str, Any]:
-    """Find a hexadecimal byte pattern in an APMX file and return raw offsets."""
+    """Find a hexadecimal byte pattern in the raw file or a decompressed entry."""
     if not pattern_hex.strip():
         raise ValueError("pattern_hex must not be empty")
     limit = _limit(limit, "limit", 10_000)
@@ -5780,9 +5782,75 @@ def capture_find_bytes(
     path = _capture_path(file_path)
     offsets: list[int] = []
     truncated = False
+    if entry_name is not None:
+        if not entry_name:
+            raise ValueError("entry_name must not be empty")
+        max_bytes = _limit(max_bytes, "max_bytes", 256 * 1024 * 1024)
+        archive, _, _ = _open_capture_zip(path)
+        with archive:
+            try:
+                info = archive.getinfo(entry_name)
+            except KeyError as exc:
+                raise FileNotFoundError(f"ZIP entry not found: {entry_name}") from exc
+            if info.is_dir():
+                raise IsADirectoryError(f"ZIP entry is a directory: {entry_name}")
+            if start_offset >= info.file_size:
+                return {
+                    "file": str(path),
+                    "entry": entry_name,
+                    "pattern_hex": pattern.hex(" "),
+                    "start_offset": start_offset,
+                    "offsets": [],
+                    "count": 0,
+                    "truncated": False,
+                }
+            search_end = min(info.file_size, start_offset + max_bytes)
+            truncated = search_end < info.file_size
+            overlap = b""
+            consumed = start_offset
+            with archive.open(info) as member:
+                member.seek(start_offset)
+                while consumed < search_end:
+                    chunk = member.read(min(1024 * 1024, search_end - consumed))
+                    if not chunk:
+                        break
+                    window = overlap + chunk
+                    base_offset = consumed - len(overlap)
+                    position = window.find(pattern)
+                    while position >= 0:
+                        absolute = base_offset + position
+                        if (
+                            absolute >= start_offset
+                            and absolute + len(pattern) > consumed
+                            and absolute + len(pattern) <= search_end
+                        ):
+                            offsets.append(absolute)
+                            if len(offsets) >= limit:
+                                truncated = True
+                                break
+                        position = window.find(pattern, position + 1)
+                    if len(offsets) >= limit:
+                        break
+                    overlap = window[-(len(pattern) - 1) :] if len(pattern) > 1 else b""
+                    consumed += len(chunk)
+        return {
+            "file": str(path),
+            "entry": entry_name,
+            "pattern_hex": pattern.hex(" "),
+            "start_offset": start_offset,
+            "offsets": offsets,
+            "count": len(offsets),
+            "truncated": truncated,
+        }
     with path.open("rb") as handle:
         if start_offset >= path.stat().st_size:
-            return {"file": str(path), "pattern_hex": pattern.hex(" "), "offsets": [], "count": 0}
+            return {
+                "file": str(path),
+                "entry": None,
+                "pattern_hex": pattern.hex(" "),
+                "offsets": [],
+                "count": 0,
+            }
         with mmap.mmap(handle.fileno(), 0, access=mmap.ACCESS_READ) as data:
             offset = data.find(pattern, start_offset)
             while offset >= 0:
@@ -5793,6 +5861,7 @@ def capture_find_bytes(
                 offset = data.find(pattern, offset + 1)
     return {
         "file": str(path),
+        "entry": None,
         "pattern_hex": pattern.hex(" "),
         "start_offset": start_offset,
         "offsets": offsets,
@@ -6442,6 +6511,10 @@ def _self_test() -> None:
         found = capture_find_bytes(str(path), "43 72 65 61 74 65", 10)
         assert found["offsets"]
         assert not found["truncated"]
+        entry_found = capture_find_bytes(
+            str(path), "43 72 65 61 74 65", entry_name="calls.bin"
+        )
+        assert entry_found["offsets"] == [0]
         processes = capture_list_processes(str(path), 10)
         assert processes["processes"][0]["executables"] == ["C:\\sample.exe"]
         assert processes["processes"][0]["metadata"]["pid"] == 1234
