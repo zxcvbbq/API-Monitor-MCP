@@ -469,6 +469,68 @@ def _capture_type_info(
         if text:
             type_info[key] = offset
             type_info[key[:-7]] = text
+    if type_info["kind"] == 11:
+        size_field = relative + (40 if pointer_size == 8 else 20)
+        if size_field + 2 <= len(definitions):
+            structure_size = struct.unpack_from("<H", definitions, size_field)[0]
+            if structure_size:
+                type_info["structure_size"] = structure_size
+    if type_info["kind"] == 14:
+        element_field = relative + (32 if pointer_size == 8 else 16)
+        count_field = relative + (40 if pointer_size == 8 else 20)
+        flags_field = relative + (42 if pointer_size == 8 else 22)
+        if flags_field < len(definitions):
+            element_offset = struct.unpack_from(pointer_format, definitions, element_field)[0]
+            array_count = struct.unpack_from("<H", definitions, count_field)[0]
+            type_info.update(
+                {
+                    "element_type_offset": element_offset,
+                    "array_count": array_count,
+                    "array_flags": definitions[flags_field],
+                }
+            )
+            if _depth < 4:
+                element_type = _capture_type_info(
+                    definitions, element_offset, pointer_size, _depth + 1
+                )
+                if element_type:
+                    type_info["element_type"] = element_type
+    if type_info["kind"] == 2:
+        enum_field = relative + pointer_size * 3
+        if enum_field + pointer_size <= len(definitions):
+            enum_offset = struct.unpack_from(pointer_format, definitions, enum_field)[0]
+            enum_header_size = pointer_size + 3
+            if enum_offset > 0 and enum_offset + enum_header_size <= len(definitions):
+                table_offset = struct.unpack_from(pointer_format, definitions, enum_offset)[0]
+                enum_count = struct.unpack_from("<H", definitions, enum_offset + pointer_size)[0]
+                enum_flags = definitions[enum_offset + pointer_size + 2]
+                entry_size = 16
+                table_end = table_offset + enum_count * entry_size
+                if enum_count <= 4096 and table_offset > 0 and table_end <= len(definitions):
+                    entries = []
+                    for index in range(enum_count):
+                        entry = table_offset + index * entry_size
+                        name_offset = struct.unpack_from(pointer_format, definitions, entry)[0]
+                        value = struct.unpack_from("<Q", definitions, entry + 8)[0]
+                        item: dict[str, Any] = {
+                            "index": index,
+                            "offset": entry,
+                            "name_offset": name_offset,
+                            "value": value,
+                        }
+                        name = _capture_relative_text(definitions, name_offset)
+                        if name:
+                            item["name"] = name
+                        entries.append(item)
+                    type_info.update(
+                        {
+                            "enum_offset": enum_offset,
+                            "enum_table_offset": table_offset,
+                            "enum_count": enum_count,
+                            "enum_flags": enum_flags,
+                            "enum_entries": entries,
+                        }
+                    )
     if type_info["kind"] == 11 and _depth < 4:
         table_field = relative + pointer_size * 4
         count_field = relative + (44 if pointer_size == 8 else 24)
@@ -1594,6 +1656,147 @@ def _capture_encoded_argument_stream(
     return result
 
 
+def _capture_enum_annotation(value: int, type_info: dict[str, Any]) -> dict[str, Any] | None:
+    entries = [entry for entry in type_info.get("enum_entries", []) if entry.get("name")]
+    if not entries:
+        return None
+    size = type_info.get("size")
+    mask = (1 << (int(size) * 8)) - 1 if isinstance(size, int) and 0 < size <= 8 else None
+    value &= mask if mask is not None else (1 << 64) - 1
+    names: list[str] = []
+    if type_info.get("enum_flags", 0) & 2:
+        if value == 0:
+            names = [entry["name"] for entry in entries if entry["value"] == 0]
+        else:
+            remaining = value
+            for entry in entries:
+                entry_value = entry["value"] & (mask if mask is not None else (1 << 64) - 1)
+                if entry_value and remaining & entry_value == entry_value:
+                    names.append(entry["name"])
+                    remaining &= ~entry_value
+            return {"names": names, "remaining": remaining}
+    else:
+        names = [entry["name"] for entry in entries if entry["value"] == value]
+    return {"names": names, "remaining": 0 if names else value}
+
+
+def _capture_array_element_size(type_info: dict[str, Any], depth: int = 0) -> int | None:
+    if depth >= 4:
+        return None
+    kind = type_info.get("kind")
+    pointer_size = int(type_info.get("pointer_size", 8))
+    if kind in (2, 3):
+        size = type_info.get("size")
+        return size if isinstance(size, int) and 0 < size <= 16 else None
+    if kind in (4, 6):
+        return pointer_size
+    if kind == 7 or kind == 9:
+        return 1
+    if kind == 8:
+        return 2
+    if kind == 11:
+        size = type_info.get("structure_size")
+        return size if isinstance(size, int) and size > 0 else None
+    if kind == 13:
+        return 16
+    if kind == 14:
+        element_type = type_info.get("element_type")
+        count = type_info.get("array_count")
+        if not isinstance(element_type, dict) or not isinstance(count, int):
+            return None
+        element_size = _capture_array_element_size(element_type, depth + 1)
+        return element_size * count if element_size is not None else None
+    return pointer_size
+
+
+def _capture_exact_array(
+    data: bytes, type_info: dict[str, Any], depth: int
+) -> dict[str, Any] | None:
+    element_type = type_info.get("element_type")
+    if not isinstance(element_type, dict) or depth >= 4:
+        return None
+    element_size = _capture_array_element_size(element_type)
+    if element_size is None or element_size <= 0:
+        return None
+    declared_count = type_info.get("array_count")
+    array_flags = int(type_info.get("array_flags", 0))
+    elements: list[dict[str, Any]] = []
+    data_start = 0
+    if array_flags & 1:
+        if not isinstance(declared_count, int):
+            return None
+        count = declared_count
+        if count > 4096:
+            return None
+        if count and len(data) == count * element_size:
+            pass
+        elif len(data) >= 2:
+            prefixed_count = struct.unpack_from("<H", data)[0]
+            if prefixed_count > 4096 or len(data) != 2 + prefixed_count * element_size:
+                return None
+            count = prefixed_count
+            data_start = 2
+        elif count or data:
+            return None
+        representation = "contiguous"
+        table_bytes = data_start
+        if count > 4096 or data_start + count * element_size != len(data):
+            return None
+        for index in range(count):
+            offset = data_start + index * element_size
+            raw = data[offset : offset + element_size]
+            item: dict[str, Any] = {
+                "index": index,
+                "offset": offset,
+                "length": element_size,
+                "valid": True,
+                "payload": _read_payload(raw),
+            }
+            typed = _capture_exact_value(raw, element_type, depth + 1)
+            if typed:
+                item["typed"] = typed
+            elements.append(item)
+    else:
+        if len(data) < 2:
+            return None
+        count = struct.unpack_from("<H", data)[0]
+        table_bytes = 2 + count * 4
+        if count > 4096 or table_bytes > len(data):
+            return None
+        representation = "offset_table"
+        for index in range(count):
+            offset, packed_length = struct.unpack_from("<HH", data, 2 + index * 4)
+            length = packed_length >> 1
+            item = {
+                "index": index,
+                "offset": offset,
+                "length": length,
+                "valid": not (packed_length & 1),
+            }
+            if not item["valid"]:
+                item["error"] = "API Monitor marked this array element unavailable"
+            elif table_bytes + offset + length > len(data):
+                item["valid"] = False
+                item["error"] = "array element exceeds payload"
+            else:
+                raw = data[table_bytes + offset : table_bytes + offset + length]
+                item["payload"] = _read_payload(raw)
+                typed = _capture_exact_value(raw, element_type, depth + 1)
+                if typed:
+                    item["typed"] = typed
+            elements.append(item)
+    return {
+        "exact": True,
+        "kind": "array",
+        "valid": all(item["valid"] for item in elements),
+        "count": len(elements),
+        "element_size": element_size,
+        "representation": representation,
+        "serialized_table_bytes": table_bytes,
+        "elements": elements,
+    }
+
+
 def _capture_exact_scalar(data: bytes, type_info: dict[str, Any]) -> dict[str, Any] | None:
     kind = type_info.get("kind")
     size = type_info.get("size")
@@ -1670,7 +1873,7 @@ def _capture_exact_scalar(data: bytes, type_info: dict[str, Any]) -> dict[str, A
     if kind == 2:
         unsigned = int.from_bytes(raw, "little")
         signed = not (int(type_info.get("flags", 0)) & 1)
-        return {
+        result = {
             "exact": True,
             "kind": "integer",
             "size": size,
@@ -1678,6 +1881,10 @@ def _capture_exact_scalar(data: bytes, type_info: dict[str, Any]) -> dict[str, A
             "value": int.from_bytes(raw, "little", signed=signed),
             "unsigned_value": unsigned,
         }
+        enum = _capture_enum_annotation(unsigned, type_info)
+        if enum:
+            result["enum"] = enum
+        return result
     if kind == 3 and size in (4, 8):
         return {
             "exact": True,
@@ -1699,7 +1906,9 @@ def _capture_exact_value(
     data: bytes, type_info: dict[str, Any], depth: int = 0
 ) -> dict[str, Any] | None:
     scalar = _capture_exact_scalar(data, type_info)
-    if scalar or type_info.get("kind") != 11 or depth >= 4:
+    if scalar or type_info.get("kind") == 14:
+        return _capture_exact_array(data, type_info, depth) if not scalar else scalar
+    if type_info.get("kind") != 11 or depth >= 4:
         return scalar
     fields = type_info.get("fields", [])
     if not fields:
@@ -3963,7 +4172,7 @@ def capture_decode_call(
         "argument_stream": argument_stream,
         "return_value": return_value,
         "definitions_available": result["definitions_available"],
-        "format": "APMX encoded parameter table; recognized scalar, string, and structure values are exact, other values remain heuristic",
+        "format": "APMX encoded parameter table; recognized scalar, string, structure, array, and enum values are exact, other values remain heuristic",
     }
 
 
@@ -4752,7 +4961,7 @@ def _self_test() -> None:
             struct.pack_into("<Q", record, 128, 165)
             archive.writestr("process/0/calls", struct.pack("<Q", 0))
             archive.writestr("process/0/data", bytes(record) + b"hello" + struct.pack("<I", 7))
-            definitions = bytearray(512)
+            definitions = bytearray(768)
             struct.pack_into("<I", definitions, 16 + 8, 123)
             struct.pack_into("<Q", definitions, 16 + 24, 80)
             struct.pack_into("<Q", definitions, 16 + 40, 96)
@@ -4771,6 +4980,27 @@ def _self_test() -> None:
             struct.pack_into("<Q", definitions, 320, 400)
             struct.pack_into("<Q", definitions, 328, 160)
             definitions[400 : 400 + len(b"dwValue\x00")] = b"dwValue\x00"
+            array_type_offset = 448
+            struct.pack_into("<I", definitions, array_type_offset + 8, 14)
+            struct.pack_into("<Q", definitions, array_type_offset + 32, 160)
+            struct.pack_into("<H", definitions, array_type_offset + 40, 3)
+            definitions[array_type_offset + 42] = 1
+            variable_array_type_offset = 512
+            struct.pack_into("<I", definitions, variable_array_type_offset + 8, 14)
+            struct.pack_into("<Q", definitions, variable_array_type_offset + 32, 160)
+            struct.pack_into("<H", definitions, variable_array_type_offset + 40, 2)
+            enum_type_offset = 576
+            struct.pack_into("<I", definitions, enum_type_offset + 8, 2)
+            struct.pack_into("<Q", definitions, enum_type_offset + 24, 640)
+            definitions[enum_type_offset + 32] = 4
+            struct.pack_into("<Q", definitions, 640, 672)
+            struct.pack_into("<H", definitions, 648, 2)
+            struct.pack_into("<Q", definitions, 672, 704)
+            struct.pack_into("<Q", definitions, 672 + 8, 1)
+            struct.pack_into("<Q", definitions, 688, 720)
+            struct.pack_into("<Q", definitions, 688 + 8, 2)
+            definitions[704 : 704 + len(b"Red\x00")] = b"Red\x00"
+            definitions[720 : 720 + len(b"Green\x00")] = b"Green\x00"
             archive.writestr("definitions", bytes(definitions))
             archive.writestr(
                 "log/monitoring.txt",
@@ -4931,6 +5161,34 @@ def _self_test() -> None:
         assert _capture_exact_scalar(
             bytes(range(16)), {"kind": 13, "flags": 0}
         )["kind"] == "fixed_bytes"
+        array_type = _capture_type_info(bytes(definitions), array_type_offset)
+        assert array_type and array_type["array_flags"] == 1
+        array_value = _capture_exact_value(struct.pack("<III", 1, 2, 3), array_type)
+        assert array_value and array_value["elements"][1]["typed"]["value"] == 2
+        prefixed_array_value = _capture_exact_value(
+            struct.pack("<HIII", 3, 1, 2, 3), array_type
+        )
+        assert prefixed_array_value and prefixed_array_value["count"] == 3
+        variable_array_type = _capture_type_info(
+            bytes(definitions), variable_array_type_offset
+        )
+        assert variable_array_type
+        variable_array_value = _capture_exact_value(
+            struct.pack("<H", 2)
+            + struct.pack("<HHHH", 0, 8, 4, 8)
+            + struct.pack("<II", 4, 5),
+            variable_array_type,
+        )
+        assert variable_array_value and variable_array_value["elements"][1]["typed"]["value"] == 5
+        enum_type = _capture_type_info(bytes(definitions), enum_type_offset)
+        assert enum_type and enum_type["enum_entries"][1]["name"] == "Green"
+        enum_value = _capture_exact_value(struct.pack("<I", 2), enum_type)
+        assert enum_value and enum_value["enum"]["names"] == ["Green"]
+        bitmask_definitions = bytearray(definitions)
+        bitmask_definitions[650] = 2
+        bitmask_type = _capture_type_info(bytes(bitmask_definitions), enum_type_offset)
+        bitmask_value = _capture_exact_value(struct.pack("<I", 3), bitmask_type)
+        assert bitmask_value and bitmask_value["enum"]["names"] == ["Red", "Green"]
         extracted = Path(directory) / "calls.bin"
         exported = capture_extract_entry(str(path), "calls.bin", str(extracted))
         assert exported["size"] == len(b"CreateFileW\x00https://example.test\x00")
@@ -4982,7 +5240,7 @@ def _self_test() -> None:
         struct.pack_into("<I", x86_record, 36, 16)
         struct.pack_into("<I", x86_record, 32, 5)
         struct.pack_into("<I", x86_record, 96, 120)
-        x86_definitions = bytearray(512)
+        x86_definitions = bytearray(768)
         struct.pack_into("<I", x86_definitions, 16 + 8, 321)
         struct.pack_into("<I", x86_definitions, 16 + 24, 80)
         struct.pack_into("<I", x86_definitions, 16 + 32, 96)
@@ -5002,6 +5260,23 @@ def _self_test() -> None:
         x86_definitions[480 : 480 + len(b"dwValue\x00")] = b"dwValue\x00"
         struct.pack_into("<I", x86_definitions, 440, 480)
         struct.pack_into("<I", x86_definitions, 444, x86_struct_type_offset)
+        x86_array_type_offset = 512
+        struct.pack_into("<I", x86_definitions, x86_array_type_offset + 4, 14)
+        struct.pack_into("<I", x86_definitions, x86_array_type_offset + 16, 160)
+        struct.pack_into("<H", x86_definitions, x86_array_type_offset + 20, 3)
+        x86_definitions[x86_array_type_offset + 22] = 1
+        x86_enum_type_offset = 568
+        struct.pack_into("<I", x86_definitions, x86_enum_type_offset + 4, 2)
+        struct.pack_into("<I", x86_definitions, x86_enum_type_offset + 12, 600)
+        x86_definitions[x86_enum_type_offset + 16] = 4
+        struct.pack_into("<I", x86_definitions, 600, 624)
+        struct.pack_into("<H", x86_definitions, 604, 2)
+        struct.pack_into("<I", x86_definitions, 624, 656)
+        struct.pack_into("<Q", x86_definitions, 624 + 8, 1)
+        struct.pack_into("<I", x86_definitions, 640, 664)
+        struct.pack_into("<Q", x86_definitions, 640 + 8, 2)
+        x86_definitions[656 : 656 + len(b"Red\x00")] = b"Red\x00"
+        x86_definitions[664 : 664 + len(b"Green\x00")] = b"Green\x00"
         x86_struct_argument = struct.pack("<HH", 0, 8) + struct.pack("<I", 77)
         x86_encoded_argument = b"\x01" + struct.pack(
             "<HH", 0, len(x86_struct_argument) << 1
@@ -5055,6 +5330,16 @@ def _self_test() -> None:
         assert x86_metadata["loaded_modules"][0]["path"] == x86_module_path
         x86_decoded = capture_decode_call(str(x86_path), 0, 0, resolve_definitions=True)
         assert x86_decoded["argument_stream"]["arguments"][0]["typed"]["fields"][0]["typed"]["value"] == 77
+        x86_array_type = _capture_type_info(bytes(x86_definitions), x86_array_type_offset, 4)
+        assert x86_array_type and x86_array_type["array_flags"] == 1
+        x86_array_value = _capture_exact_value(
+            struct.pack("<III", 1, 2, 3), x86_array_type
+        )
+        assert x86_array_value and x86_array_value["elements"][1]["typed"]["value"] == 2
+        x86_enum_type = _capture_type_info(bytes(x86_definitions), x86_enum_type_offset, 4)
+        assert x86_enum_type and x86_enum_type["enum_entries"][1]["name"] == "Green"
+        x86_enum_value = _capture_exact_value(struct.pack("<I", 2), x86_enum_type)
+        assert x86_enum_value and x86_enum_value["enum"]["names"] == ["Green"]
 
         app_root = Path(directory) / "app"
         definition_root = app_root / "API"
