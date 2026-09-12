@@ -449,6 +449,22 @@ def _api_monitor_main_window(architecture: str, timeout_seconds: float) -> dict[
     )
 
 
+def _api_monitor_window_by_handle(handle: int, architecture: str) -> dict[str, Any] | None:
+    if handle < 1:
+        raise ValueError("window_handle must be positive")
+    bitness = "32-bit" if architecture == "x86" else "64-bit"
+    return next(
+        (
+            window
+            for window in _find_api_monitor_windows()
+            if window["handle"] == handle
+            and "api monitor v2" in window["title"].casefold()
+            and bitness in window["title"]
+        ),
+        None,
+    )
+
+
 def _run_file_dialog(
     main_window: dict[str, Any],
     command_id: int,
@@ -1217,7 +1233,11 @@ def api_monitor_launch(architecture: str = "x64", install_root: str | None = Non
 
 
 @mcp.tool()
-def api_monitor_open_capture(file_path: str, install_root: str | None = None) -> dict[str, Any]:
+def api_monitor_open_capture(
+    file_path: str,
+    install_root: str | None = None,
+    window_handle: int | None = None,
+) -> dict[str, Any]:
     """Open an APMX capture with the real Rohitab API Monitor application."""
     path = _capture_path(file_path)
     if sys.platform != "win32" or not hasattr(os, "startfile"):
@@ -1225,17 +1245,22 @@ def api_monitor_open_capture(file_path: str, install_root: str | None = None) ->
 
     architecture = "x86" if path.suffix.lower() == ".apmx86" else "x64"
     bitness = "32-bit" if architecture == "x86" else "64-bit"
-    candidates = [
-        window
-        for window in _find_api_monitor_windows()
-        if "api monitor v2" in window["title"].casefold() and bitness in window["title"]
-    ]
-    capture_candidates = [
-        window
-        for window in candidates
-        if not window["title"].casefold().startswith("monitoring")
-    ]
-    main_window = capture_candidates[0] if capture_candidates else None
+    if window_handle is not None:
+        main_window = _api_monitor_window_by_handle(window_handle, architecture)
+        if main_window is None:
+            raise LookupError(f"API Monitor window not found: {window_handle}")
+    else:
+        candidates = [
+            window
+            for window in _find_api_monitor_windows()
+            if "api monitor v2" in window["title"].casefold() and bitness in window["title"]
+        ]
+        capture_candidates = [
+            window
+            for window in candidates
+            if not window["title"].casefold().startswith("monitoring")
+        ]
+        main_window = capture_candidates[0] if capture_candidates else None
     if main_window is None:
         existing_handles = {window["handle"] for window in candidates}
         launch = api_monitor_launch(architecture, install_root)
@@ -1282,6 +1307,7 @@ def api_monitor_save_capture(
     output_path: str,
     overwrite: bool = False,
     timeout_seconds: int = 15,
+    window_handle: int | None = None,
 ) -> dict[str, Any]:
     """Save the current Rohitab capture through its background GUI."""
     if sys.platform != "win32":
@@ -1298,13 +1324,18 @@ def api_monitor_save_capture(
     if existed and not overwrite:
         raise FileExistsError(f"Capture already exists: {path}")
 
-    main_window = _api_monitor_main_window(
-        "x86" if path.suffix.lower() == ".apmx86" else "x64", timeout_seconds
+    architecture = "x86" if path.suffix.lower() == ".apmx86" else "x64"
+    main_window = (
+        _api_monitor_window_by_handle(window_handle, architecture)
+        if window_handle is not None
+        else _api_monitor_main_window(architecture, timeout_seconds)
     )
     if main_window is None:
+        if window_handle is not None:
+            raise LookupError(f"API Monitor window not found: {window_handle}")
         raise TimeoutError("API Monitor main window did not appear")
-    if main_window["title"].casefold().startswith("monitoring"):
-        bitness = "32-bit" if path.suffix.lower() == ".apmx86" else "64-bit"
+    if window_handle is None and main_window["title"].casefold().startswith("monitoring"):
+        bitness = "32-bit" if architecture == "x86" else "64-bit"
         capture_window = next(
             (
                 window
