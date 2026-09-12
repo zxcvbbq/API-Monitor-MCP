@@ -1252,6 +1252,7 @@ def capture_monitoring_log(
     text = result.get("text")
     if text is None:
         raise ValueError("Capture monitoring log is not text")
+    text = text.lstrip("\ufeff")
     needle = query.casefold()
     lines = [
         line.rstrip("\r")
