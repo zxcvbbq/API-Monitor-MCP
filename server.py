@@ -4462,6 +4462,58 @@ def capture_compare_calls(
 
 
 @mcp.tool()
+def capture_compare_all_calls(
+    first_file: str,
+    second_file: str,
+    limit: int = 200,
+    max_records: int = 10_000,
+    max_data_bytes: int = 4096,
+    resolve_definitions: bool = False,
+) -> dict[str, Any]:
+    """Compare saved call streams for every process in two APMX captures."""
+    limit = _limit(limit, "limit", 10_000)
+    max_records = _limit(max_records, "max_records", 10_000)
+    max_data_bytes = _limit(max_data_bytes, "max_data_bytes", 16 * 1024 * 1024)
+    first = _capture_path(first_file)
+    second = _capture_path(second_file)
+
+    def process_indices(path: Path) -> set[int]:
+        return {
+            int(match.group(1))
+            for entry in _zip_entries(path)
+            if (match := re.fullmatch(r"process/(\d+)/calls", entry["name"], re.I))
+        }
+
+    indices = sorted(process_indices(first) | process_indices(second))
+    comparisons = [
+        capture_compare_calls(
+            str(first),
+            str(second),
+            process_index=index,
+            limit=limit,
+            max_records=max_records,
+            max_data_bytes=max_data_bytes,
+            resolve_definitions=resolve_definitions,
+        )
+        for index in indices
+    ]
+    totals = {
+        key: sum(comparison["counts"][key] for comparison in comparisons)
+        for key in ("added", "removed", "changed")
+    }
+    return {
+        "first": str(first),
+        "second": str(second),
+        "process_indices": indices,
+        "comparisons": comparisons,
+        "counts": totals,
+        "same": not any(totals.values()),
+        "truncated": any(comparison["truncated"] for comparison in comparisons),
+        "payload_fingerprint": "sha256 when payload is within max_data_bytes",
+    }
+
+
+@mcp.tool()
 def capture_list_entries(file_path: str, limit: int = 200) -> dict[str, Any]:
     """List files stored inside an APMX capture container."""
     limit = _limit(limit, "limit", 2000)
@@ -6635,6 +6687,9 @@ def _self_test() -> None:
         )
         assert call_comparison["counts"]["removed"] == 1
         assert call_comparison["counts"]["changed"] == 0
+        all_call_comparison = capture_compare_all_calls(str(path), str(path))
+        assert all_call_comparison["process_indices"] == [0]
+        assert all_call_comparison["same"]
 
         x86_path = Path(directory) / "sample.apmx86"
         x86_record = bytearray(120)
