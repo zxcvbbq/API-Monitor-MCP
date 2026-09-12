@@ -1799,6 +1799,56 @@ def capture_info(file_path: str) -> dict[str, Any]:
 
 
 @mcp.tool()
+def capture_compare(
+    first_file: str,
+    second_file: str,
+    limit: int = 2000,
+) -> dict[str, Any]:
+    """Compare two APMX captures by their stored entry sizes and CRCs."""
+    limit = _limit(limit, "limit", 10_000)
+    first = _capture_path(first_file)
+    second = _capture_path(second_file)
+    first_entries = {entry["name"]: entry for entry in _zip_entries(first)}
+    second_entries = {entry["name"]: entry for entry in _zip_entries(second)}
+    added_names = sorted(set(second_entries) - set(first_entries))
+    removed_names = sorted(set(first_entries) - set(second_entries))
+    changed_names = sorted(
+        name
+        for name in set(first_entries) & set(second_entries)
+        if (
+            first_entries[name]["size"],
+            first_entries[name]["crc32"],
+        )
+        != (
+            second_entries[name]["size"],
+            second_entries[name]["crc32"],
+        )
+    )
+    added = [{"entry": name, "second": second_entries[name]} for name in added_names]
+    removed = [{"entry": name, "first": first_entries[name]} for name in removed_names]
+    changed = [
+        {"entry": name, "first": first_entries[name], "second": second_entries[name]}
+        for name in changed_names
+    ]
+    return {
+        "first": str(first),
+        "second": str(second),
+        "same": not added_names and not removed_names and not changed_names,
+        "counts": {
+            "added": len(added_names),
+            "removed": len(removed_names),
+            "changed": len(changed_names),
+        },
+        "added": added[:limit],
+        "removed": removed[:limit],
+        "changed": changed[:limit],
+        "truncated": any(
+            len(items) > limit for items in (added_names, removed_names, changed_names)
+        ),
+    }
+
+
+@mcp.tool()
 def capture_list_entries(file_path: str, limit: int = 200) -> dict[str, Any]:
     """List files stored inside an APMX capture container."""
     limit = _limit(limit, "limit", 2000)
@@ -2274,6 +2324,13 @@ def _self_test() -> None:
             )
             archive.writestr("process/0/info", "C:\\sample.exe".encode("utf-16-le"))
         path.write_bytes(b"APMX-BARE-BONES\x00" + payload.getvalue())
+        second_path = Path(directory) / "variants" / "second.apmx64"
+        second_path.parent.mkdir()
+        second_payload = io.BytesIO()
+        with zipfile.ZipFile(second_payload, "w", zipfile.ZIP_STORED) as archive:
+            archive.writestr("metadata.txt", "process=changed.exe\n")
+            archive.writestr("extra.bin", b"new")
+        second_path.write_bytes(b"APMX-BARE-BONES\x00" + second_payload.getvalue())
 
         info = _capture_info(path)
         assert info["extension"] == ".apmx64"
@@ -2304,6 +2361,9 @@ def _self_test() -> None:
         }
         listed = capture_list_directory(directory, recursive=False, limit=10)
         assert listed["count"] == 1
+        comparison = capture_compare(str(path), str(second_path))
+        assert comparison["counts"] == {"added": 1, "removed": 3, "changed": 1}
+        assert not comparison["same"]
 
         app_root = Path(directory) / "app"
         definition_root = app_root / "API"
