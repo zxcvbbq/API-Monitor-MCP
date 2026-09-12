@@ -4613,6 +4613,10 @@ def capture_list_apis(
                         "process_indices": [],
                         "first_record": record["index"],
                         "last_record": record["index"],
+                        "_thread_ids": set(),
+                        "_timestamps": [],
+                        "_durations": [],
+                        "_error_count": 0,
                     },
                 )
                 item["count"] += 1
@@ -4620,8 +4624,32 @@ def capture_list_apis(
                     item["process_indices"].append(index)
                 item["first_record"] = min(item["first_record"], record["index"])
                 item["last_record"] = max(item["last_record"], record["index"])
+                context = record.get("context", {})
+                item["_thread_ids"].add(context.get("thread_id", 0))
+                if context.get("timestamp_filetime"):
+                    item["_timestamps"].append(context["timestamp_filetime"])
+                if context.get("duration_valid"):
+                    item["_durations"].append(context["duration_seconds"])
+                if context.get("error_code"):
+                    item["_error_count"] += 1
             if scanned >= max_records:
                 break
+    for item in apis.values():
+        timestamps = item.pop("_timestamps")
+        durations = item.pop("_durations")
+        item["context"] = {
+            "thread_count": len(item.pop("_thread_ids")),
+            "duration_count": len(durations),
+            "error_count": item.pop("_error_count"),
+            "first_timestamp_utc": _windows_filetime(min(timestamps)) if timestamps else None,
+            "last_timestamp_utc": _windows_filetime(max(timestamps)) if timestamps else None,
+        }
+        if durations:
+            item["context"]["duration_seconds"] = {
+                "minimum": min(durations),
+                "maximum": max(durations),
+                "average": sum(durations) / len(durations),
+            }
     returned = sorted(apis.values(), key=lambda item: (-item["count"], item["name"] or ""))
     return {
         "file": str(path),
@@ -5596,6 +5624,8 @@ def _self_test() -> None:
         assert api_list["count"] == 1
         assert api_list["apis"][0]["name"] == "CreateFileW"
         assert api_list["apis"][0]["count"] == 1
+        assert api_list["apis"][0]["context"]["error_count"] == 1
+        assert api_list["apis"][0]["context"]["duration_seconds"]["average"] == 0.125
         entries = _zip_entries(path)
         assert {entry["name"] for entry in entries} == {
             "metadata.txt",
