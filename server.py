@@ -4514,6 +4514,163 @@ def capture_compare_all_calls(
 
 
 @mcp.tool()
+def capture_export_all_calls(
+    file_path: str,
+    output_path: str,
+    limit: int = 10_000,
+    output_format: str = "json",
+    include_data: bool = True,
+    max_data_bytes: int = 4096,
+    overwrite: bool = False,
+    resolve_definitions: bool = False,
+) -> dict[str, Any]:
+    """Export bounded call records for every process in an APMX capture."""
+    if output_format not in {"json", "csv"}:
+        raise ValueError("output_format must be json or csv")
+    limit = _limit(limit, "limit", 1_000_000)
+    max_data_bytes = _limit(max_data_bytes, "max_data_bytes", 16 * 1024 * 1024)
+    output = Path(output_path).expanduser()
+    if not output.parent.is_dir():
+        raise NotADirectoryError(f"Output directory not found: {output.parent}")
+    output = output.resolve()
+    if output.exists() and not overwrite:
+        raise FileExistsError(f"Output already exists: {output}")
+    path = _capture_path(file_path)
+    indices = sorted(
+        {
+            int(match.group(1))
+            for entry in _zip_entries(path)
+            if (match := re.fullmatch(r"process/(\d+)/calls", entry["name"], re.I))
+        }
+    )
+    processes = []
+    for index in indices:
+        page = capture_call_records(
+            str(path),
+            process_index=index,
+            limit=min(limit, 10_000),
+            include_data=include_data,
+            max_data_bytes=max_data_bytes,
+            resolve_definitions=resolve_definitions,
+        )
+        records = page["records"]
+        next_index = page["start_index"] + len(records)
+        while page["truncated"] and len(records) < limit:
+            page = capture_call_records(
+                str(path),
+                process_index=index,
+                start_index=next_index,
+                limit=min(limit - len(records), 10_000),
+                include_data=include_data,
+                max_data_bytes=max_data_bytes,
+                resolve_definitions=resolve_definitions,
+            )
+            records.extend(page["records"])
+            next_index = page["start_index"] + len(page["records"])
+            if not page["records"]:
+                break
+        page["records"] = records
+        page["start_index"] = 0
+        page["end_index"] = records[-1]["index"] if records else None
+        page["truncated"] = next_index < page["count"]
+        processes.append(page)
+
+    if output_format == "json":
+        content = json.dumps(
+            {
+                "file": str(path),
+                "architecture": "x86" if path.suffix.lower() == ".apmx86" else "x64",
+                "process_indices": indices,
+                "processes": processes,
+                "count": sum(len(process["records"]) for process in processes),
+                "truncated": any(process["truncated"] for process in processes),
+            },
+            indent=2,
+            ensure_ascii=False,
+        ) + "\n"
+    else:
+        stream = io.StringIO(newline="")
+        writer = csv.writer(stream)
+        writer.writerow(
+            [
+                "process_index",
+                "record_index",
+                "offset",
+                "size",
+                "valid",
+                "flags",
+                "definition_offset",
+                "api_name",
+                "api_module",
+                "thread_id",
+                "thread_number",
+                "timestamp_utc",
+                "duration_seconds",
+                "error_code",
+                "slot",
+                "data_offset",
+                "length",
+                "encoding",
+                "payload",
+            ]
+        )
+        for process in processes:
+            process_index = process["process_index"]
+            for record in process["records"]:
+                references = record.get("data_refs", []) or [{}]
+                definition = record.get("definition", {})
+                context = record.get("context", {})
+                for reference in references:
+                    payload = reference.get("payload", {})
+                    writer.writerow(
+                        [
+                            process_index,
+                            record["index"],
+                            record["offset"],
+                            record["size"],
+                            record["valid"],
+                            record["flags"],
+                            record.get("definition_offset", ""),
+                            definition.get("name", ""),
+                            definition.get("module", ""),
+                            context.get("thread_id", ""),
+                            context.get("thread_number", ""),
+                            context.get("timestamp_utc", ""),
+                            context.get("duration_seconds", ""),
+                            context.get("error_code", ""),
+                            reference.get("slot", ""),
+                            reference.get("offset", ""),
+                            reference.get("length", ""),
+                            payload.get("encoding", ""),
+                            payload.get("text", payload.get("base64", "")),
+                        ]
+                    )
+        content = stream.getvalue()
+    encoded = content.encode("utf-8")
+    digest = hashlib.sha256(encoded).hexdigest()
+    try:
+        mode = "wb" if overwrite else "xb"
+        with output.open(mode) as handle:
+            handle.write(encoded)
+    except Exception:
+        if output.exists() and not overwrite:
+            output.unlink()
+        raise
+    return {
+        "exported": True,
+        "file": str(path),
+        "output": str(output),
+        "format": output_format,
+        "process_indices": indices,
+        "count": sum(len(process["records"]) for process in processes),
+        "process_count": len(processes),
+        "truncated": any(process["truncated"] for process in processes),
+        "size": len(encoded),
+        "sha256": digest,
+    }
+
+
+@mcp.tool()
 def capture_list_entries(file_path: str, limit: int = 200) -> dict[str, Any]:
     """List files stored inside an APMX capture container."""
     limit = _limit(limit, "limit", 2000)
@@ -6690,6 +6847,35 @@ def _self_test() -> None:
         all_call_comparison = capture_compare_all_calls(str(path), str(path))
         assert all_call_comparison["process_indices"] == [0]
         assert all_call_comparison["same"]
+        all_json_path = Path(directory) / "all-calls.json"
+        all_json_export = capture_export_all_calls(str(path), str(all_json_path))
+        assert all_json_export["count"] == 1
+        assert json.loads(all_json_path.read_text())["processes"][0]["process_index"] == 0
+        all_csv_path = Path(directory) / "all-calls.csv"
+        all_csv_export = capture_export_all_calls(
+            str(path), str(all_csv_path), output_format="csv", resolve_definitions=True
+        )
+        assert all_csv_export["count"] == 1
+        assert "CreateFileW" in all_csv_path.read_text()
+        multi_path = Path(directory) / "multi.apmx64"
+        multi_payload = io.BytesIO()
+        with zipfile.ZipFile(multi_payload, "w", zipfile.ZIP_STORED) as archive:
+            for process_index in range(2):
+                archive.writestr(
+                    f"process/{process_index}/calls", struct.pack("<Q", 0)
+                )
+                archive.writestr(
+                    f"process/{process_index}/data",
+                    bytes(record) + b"hello" + struct.pack("<I", 7),
+                )
+        multi_path.write_bytes(
+            b"\r\nAPI Monitor 64-bit Capture\r\nRBAPM" + multi_payload.getvalue()
+        )
+        multi_export = capture_export_all_calls(
+            str(multi_path), str(Path(directory) / "multi.json"), include_data=False, limit=1
+        )
+        assert multi_export["process_indices"] == [0, 1]
+        assert multi_export["count"] == 2
 
         x86_path = Path(directory) / "sample.apmx86"
         x86_record = bytearray(120)
