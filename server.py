@@ -6325,6 +6325,7 @@ def capture_list_apis(
             calls = archive.read(f"process/{index}/calls")
             data_name = f"process/{index}/data"
             data = archive.read(data_name) if data_name in entries else b""
+            process_pid = _capture_process_pid(archive, entries, index, pointer_size)
             if len(calls) % pointer_size:
                 raise ValueError(
                     f"process/{index}/calls is not an array of {pointer_size * 8}-bit offsets"
@@ -6356,6 +6357,7 @@ def capture_list_apis(
                         "ordinal": definition.get("ordinal"),
                         "count": 0,
                         "process_indices": [],
+                        "_pids": set(),
                         "first_record": record["index"],
                         "last_record": record["index"],
                         "_thread_ids": set(),
@@ -6367,6 +6369,8 @@ def capture_list_apis(
                 item["count"] += 1
                 if index not in item["process_indices"]:
                     item["process_indices"].append(index)
+                if process_pid is not None:
+                    item["_pids"].add(process_pid)
                 item["first_record"] = min(item["first_record"], record["index"])
                 item["last_record"] = max(item["last_record"], record["index"])
                 context = record.get("context", {})
@@ -6380,6 +6384,7 @@ def capture_list_apis(
             if scanned >= max_records:
                 break
     for item in apis.values():
+        item["pids"] = sorted(item.pop("_pids"))
         timestamps = item.pop("_timestamps")
         durations = item.pop("_durations")
         item["context"] = {
@@ -6455,6 +6460,7 @@ def capture_list_definitions(
             data_name = f"process/{index}/data"
             calls = archive.read(calls_name)
             data = archive.read(data_name) if data_name in entries else b""
+            process_pid = _capture_process_pid(archive, entries, index, pointer_size)
             if len(calls) % pointer_size:
                 raise ValueError(
                     f"process/{index}/calls is not an array of {pointer_size * 8}-bit offsets"
@@ -6486,6 +6492,7 @@ def capture_list_definitions(
                         "offset": definition_offset,
                         "count": 0,
                         "process_indices": [],
+                        "_pids": set(),
                         "first_record": {
                             "process_index": index,
                             "index": record["index"],
@@ -6500,6 +6507,8 @@ def capture_list_definitions(
                 item["count"] += 1
                 if index not in item["process_indices"]:
                     item["process_indices"].append(index)
+                if process_pid is not None:
+                    item["_pids"].add(process_pid)
                 first = item["first_record"]
                 last = item["last_record"]
                 if (index, record["index"]) < (first["process_index"], first["index"]):
@@ -6514,6 +6523,7 @@ def capture_list_definitions(
     )
     for item in returned:
         definition = item.pop("definition")
+        item["pids"] = sorted(item.pop("_pids"))
         item.update(
             {
                 key: definition[key]
@@ -6644,6 +6654,7 @@ def capture_export_definitions(
                 "offset",
                 "count",
                 "process_indices",
+                "pids",
                 "first_record",
                 "last_record",
                 "valid",
@@ -6662,6 +6673,7 @@ def capture_export_definitions(
                     definition.get("offset", ""),
                     definition.get("count", ""),
                     json.dumps(definition.get("process_indices", [])),
+                    json.dumps(definition.get("pids", [])),
                     json.dumps(definition.get("first_record", {})),
                     json.dumps(definition.get("last_record", {})),
                     definition.get("valid", ""),
@@ -8711,12 +8723,14 @@ def _self_test() -> None:
         api_list = capture_list_apis(str(path))
         assert api_list["count"] == 1
         assert api_list["apis"][0]["name"] == "CreateFileW"
+        assert api_list["apis"][0]["pids"] == [1234]
         assert api_list["apis"][0]["count"] == 1
         assert api_list["apis"][0]["context"]["error_count"] == 1
         assert api_list["apis"][0]["context"]["duration_seconds"]["average"] == 0.125
         definitions_list = capture_list_definitions(str(path), include_details=True)
         assert definitions_list["count"] == 1
         assert definitions_list["definitions"][0]["name"] == "CreateFileW"
+        assert definitions_list["definitions"][0]["pids"] == [1234]
         assert definitions_list["definitions"][0]["details"]["module"] == "kernel32.dll"
         entries = _zip_entries(path)
         assert {entry["name"] for entry in entries} == {
@@ -8913,6 +8927,7 @@ def _self_test() -> None:
         assert x86_context["duration_seconds"] == 0.25
         assert capture_read_definition(str(x86_path), 16)["architecture"] == "x86"
         assert capture_list_apis(str(x86_path))["apis"][0]["module"] == "kernel32.dll"
+        assert capture_list_apis(str(x86_path))["apis"][0]["pids"] == [4321]
         x86_deep_validation = capture_validate(str(x86_path), deep=True)
         assert x86_deep_validation["structural_valid"]
         assert x86_deep_validation["process_infos"][0]["valid"]
