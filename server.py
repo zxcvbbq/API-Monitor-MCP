@@ -5872,6 +5872,9 @@ def capture_call_timeline(
     include_data: bool = False,
     max_data_bytes: int = 4096,
     resolve_definitions: bool = False,
+    api_name: str | None = None,
+    api_module: str | None = None,
+    definition_offset: int | None = None,
 ) -> dict[str, Any]:
     """Return saved calls as one bounded cross-process timeline."""
     if order_by not in {"timestamp", "capture"}:
@@ -5888,6 +5891,9 @@ def capture_call_timeline(
         include_data=include_data,
         max_data_bytes=max_data_bytes,
         resolve_definitions=resolve_definitions,
+        api_name=api_name,
+        api_module=api_module,
+        definition_offset=definition_offset,
     )
     events = list(filtered["matches"])
     if order_by == "capture":
@@ -5922,6 +5928,9 @@ def capture_call_timeline(
         "descending": descending,
         "start_time_utc": start_time_utc,
         "end_time_utc": end_time_utc,
+        "api_name": api_name,
+        "api_module": api_module,
+        "definition_offset": definition_offset,
         "timeline": events[:limit],
         "count": min(len(events), limit),
         "scanned_records": filtered["scanned_records"],
@@ -6742,6 +6751,11 @@ def _self_test() -> None:
         timeline = capture_call_timeline(str(path), order_by="timestamp")
         assert timeline["count"] == 1
         assert timeline["timeline"][0]["record"]["context"]["timestamp_utc"] == "2020-01-01T00:00:00+00:00"
+        api_timeline = capture_call_timeline(
+            str(path), api_name="CreateFileW", api_module="kernel32"
+        )
+        assert api_timeline["count"] == 1
+        assert api_timeline["timeline"][0]["record"]["definition"]["name"] == "CreateFileW"
         resolved_records = capture_call_records(str(path), resolve_definitions=True)
         assert resolved_records["definitions_available"]
         assert resolved_records["records"][0]["definition"]["name"] == "CreateFileW"
