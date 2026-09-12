@@ -319,12 +319,15 @@ def _find_ui_control(
     title: str,
     class_name: str,
     window_title: str,
+    handle: int | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]] | None:
     matches: list[tuple[dict[str, Any], dict[str, Any]]] = []
     for window in windows:
         if window_title and window.get("title") != window_title:
             continue
         for child in window.get("children", []):
+            if handle is not None and child.get("handle") != handle:
+                continue
             if control_id is not None and child.get("control_id") != control_id:
                 continue
             if title and child.get("title") != title:
@@ -596,6 +599,7 @@ def api_monitor_gui_action(
     class_name: str = "",
     window_title: str = "",
     text: str = "",
+    handle: int | None = None,
 ) -> dict[str, Any]:
     """Act on a Rohitab GUI control using background Win32 messages."""
     if sys.platform != "win32":
@@ -615,10 +619,10 @@ def api_monitor_gui_action(
         user32.PostMessageW(candidates[0]["handle"], 0x0010, 0, 0)  # WM_CLOSE
         return {"action": action, "window": candidates[0]}
 
-    if control_id is None and not title and not class_name:
-        raise ValueError("click and set_text require control_id, title, or class_name")
+    if control_id is None and handle is None and not title and not class_name:
+        raise ValueError("click and set_text require handle, control_id, title, or class_name")
     target = _find_ui_control(
-        _find_api_monitor_windows(), control_id, title, class_name, window_title
+        _find_api_monitor_windows(), control_id, title, class_name, window_title, handle
     )
     if target is None:
         raise LookupError("Rohitab GUI control not found")
@@ -640,15 +644,16 @@ def api_monitor_gui_read(
     class_name: str = "",
     window_title: str = "",
     max_chars: int = 20_000,
+    handle: int | None = None,
 ) -> dict[str, Any]:
     """Read one Rohitab GUI control without focusing or raising the window."""
     if sys.platform != "win32":
         raise RuntimeError("Rohitab GUI reads require Windows")
-    if control_id is None and not title and not class_name:
-        raise ValueError("control_id, title, or class_name is required")
+    if control_id is None and handle is None and not title and not class_name:
+        raise ValueError("handle, control_id, title, or class_name is required")
     max_chars = _limit(max_chars, "max_chars", 1_000_000)
     target = _find_ui_control(
-        _find_api_monitor_windows(), control_id, title, class_name, window_title
+        _find_api_monitor_windows(), control_id, title, class_name, window_title, handle
     )
     if target is None:
         raise LookupError("Rohitab GUI control not found")
