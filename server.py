@@ -5945,6 +5945,7 @@ def capture_filter_calls(
     api_name: str | None = None,
     api_module: str | None = None,
     definition_offset: int | None = None,
+    flags: int | None = None,
 ) -> dict[str, Any]:
     """Filter saved calls by API definition, thread, error, and duration context."""
     if process_index is not None and process_index < 0:
@@ -5953,6 +5954,8 @@ def capture_filter_calls(
         raise ValueError("thread_id must be between 0 and 4294967295")
     if error_code is not None and not 0 <= error_code <= 0xFFFFFFFF:
         raise ValueError("error_code must be between 0 and 4294967295")
+    if flags is not None and not 0 <= flags <= 0xFF:
+        raise ValueError("flags must be between 0 and 255")
     if api_name is not None and not api_name.strip():
         raise ValueError("api_name must be non-empty when provided")
     if api_module is not None and not api_module.strip():
@@ -5986,6 +5989,7 @@ def capture_filter_calls(
     filters = {
         "thread_id": thread_id,
         "error_code": error_code,
+        "flags": flags,
         "api_name": api_name,
         "api_module": api_module,
         "definition_offset": definition_offset,
@@ -6040,6 +6044,8 @@ def capture_filter_calls(
                 if thread_id is not None and context.get("thread_id") != thread_id:
                     continue
                 if error_code is not None and context.get("error_code") != error_code:
+                    continue
+                if flags is not None and record.get("flags") != flags:
                     continue
                 definition = record.get("definition", {})
                 if definition_offset is not None and definition.get("offset") != definition_offset:
@@ -6111,6 +6117,7 @@ def capture_call_timeline(
     api_name: str | None = None,
     api_module: str | None = None,
     definition_offset: int | None = None,
+    flags: int | None = None,
 ) -> dict[str, Any]:
     """Return saved calls as one bounded cross-process timeline."""
     if order_by not in {"timestamp", "capture"}:
@@ -6120,6 +6127,7 @@ def capture_call_timeline(
     filtered = capture_filter_calls(
         file_path,
         process_index=process_index,
+        flags=flags,
         start_time_utc=start_time_utc,
         end_time_utc=end_time_utc,
         limit=10_000,
@@ -6160,6 +6168,7 @@ def capture_call_timeline(
     return {
         "file": filtered["file"],
         "process_index": process_index,
+        "flags": flags,
         "order_by": order_by,
         "descending": descending,
         "start_time_utc": start_time_utc,
@@ -6989,7 +6998,11 @@ def _self_test() -> None:
         assert filtered["count"] == 1
         assert filtered["matches"][0]["record"]["index"] == 0
         api_filtered = capture_filter_calls(
-            str(path), api_name="CreateFileW", api_module="kernel32", definition_offset=16
+            str(path),
+            api_name="CreateFileW",
+            api_module="kernel32",
+            definition_offset=16,
+            flags=1,
         )
         assert api_filtered["count"] == 1
         assert api_filtered["definitions_resolved"]
@@ -6997,7 +7010,7 @@ def _self_test() -> None:
         assert timeline["count"] == 1
         assert timeline["timeline"][0]["record"]["context"]["timestamp_utc"] == "2020-01-01T00:00:00+00:00"
         api_timeline = capture_call_timeline(
-            str(path), api_name="CreateFileW", api_module="kernel32"
+            str(path), api_name="CreateFileW", api_module="kernel32", flags=1
         )
         assert api_timeline["count"] == 1
         assert api_timeline["timeline"][0]["record"]["definition"]["name"] == "CreateFileW"
