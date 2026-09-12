@@ -7223,6 +7223,70 @@ def capture_monitoring_log(
 
 
 @mcp.tool()
+def capture_export_monitoring_log(
+    file_path: str,
+    output_path: str,
+    query: str = "",
+    limit: int = 10_000,
+    output_format: str = "json",
+    overwrite: bool = False,
+) -> dict[str, Any]:
+    """Export parsed monitoring-log events as bounded JSON or CSV."""
+    if output_format not in {"json", "csv"}:
+        raise ValueError("output_format must be json or csv")
+    limit = _limit(limit, "limit", 100_000)
+    output = Path(output_path).expanduser()
+    if not output.parent.is_dir():
+        raise NotADirectoryError(f"Output directory not found: {output.parent}")
+    output = output.resolve()
+    if output.exists() and not overwrite:
+        raise FileExistsError(f"Output already exists: {output}")
+
+    result = capture_monitoring_log(file_path, query=query, limit=limit)
+    if output_format == "json":
+        content = json.dumps(result, indent=2, ensure_ascii=False) + "\n"
+    else:
+        stream = io.StringIO(newline="")
+        writer = csv.writer(stream)
+        writer.writerow(["line", "type", "process", "address", "module", "pid", "attach"])
+        for event in result["events"]:
+            writer.writerow(
+                [
+                    event.get("line", ""),
+                    event.get("type", ""),
+                    event.get("process", ""),
+                    event.get("address", ""),
+                    event.get("module", ""),
+                    event.get("pid", ""),
+                    event.get("attach", ""),
+                ]
+            )
+        content = stream.getvalue()
+    encoded = content.encode("utf-8")
+    digest = hashlib.sha256(encoded).hexdigest()
+    try:
+        mode = "wb" if overwrite else "xb"
+        with output.open(mode) as handle:
+            handle.write(encoded)
+    except Exception:
+        if output.exists() and not overwrite:
+            output.unlink()
+        raise
+    return {
+        "exported": True,
+        "file": result["file"],
+        "output": str(output),
+        "format": output_format,
+        "query": query,
+        "count": len(result["events"]),
+        "matched_count": result["count"],
+        "truncated": result["truncated"],
+        "size": len(encoded),
+        "sha256": digest,
+    }
+
+
+@mcp.tool()
 def capture_list_processes(file_path: str, limit: int = 200) -> dict[str, Any]:
     """List process records and executable paths recoverable from an APMX capture."""
     limit = _limit(limit, "limit", 2000)
@@ -7838,6 +7902,16 @@ def _self_test() -> None:
         log = capture_monitoring_log(str(path), "module", 10)
         assert log["lines"] == ["sample.exe: Monitoring Module 0x1234 -> C:\\sample.dll"]
         assert log["events"][0]["type"] == "module"
+        log_json = Path(directory) / "monitoring.json"
+        log_export = capture_export_monitoring_log(str(path), str(log_json), query="module")
+        assert log_export["count"] == 1
+        assert json.loads(log_json.read_text())["events"][0]["module"] == r"C:\sample.dll"
+        log_csv = Path(directory) / "monitoring.csv"
+        log_csv_export = capture_export_monitoring_log(
+            str(path), str(log_csv), query="module", output_format="csv"
+        )
+        assert log_csv_export["count"] == 1
+        assert "C:\\sample.dll" in log_csv.read_text()
         searched = capture_search_entries(str(path), "CreateFile", 10)
         assert searched["entries"][0]["entry"] == "calls.bin"
         assert not searched["truncated"]
