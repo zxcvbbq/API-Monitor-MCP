@@ -6687,6 +6687,7 @@ def capture_search_calls(
     resolve_definitions: bool = False,
     decode_arguments: bool = False,
     pattern_hex: str | None = None,
+    include_record_bytes: bool = False,
 ) -> dict[str, Any]:
     """Search saved call payloads, API definitions, and decoded arguments."""
     if not query and pattern_hex is None:
@@ -6706,6 +6707,32 @@ def capture_search_calls(
             raise ValueError("pattern_hex must contain hexadecimal bytes") from exc
         if not pattern or len(pattern) > 256:
             raise ValueError("pattern_hex must contain between 1 and 256 bytes")
+
+    def collect_byte_matches(
+        payload: bytes,
+        needle: bytes,
+        results: list[dict[str, Any]],
+        scope: str,
+        data_offset: int,
+        slot: int | None = None,
+    ) -> None:
+        position = payload.find(needle)
+        while position >= 0 and len(results) < 32:
+            context_start = max(0, position - 16)
+            context_end = min(len(payload), position + len(needle) + 16)
+            results.append(
+                {
+                    "scope": scope,
+                    "slot": slot,
+                    "data_offset": data_offset,
+                    "match_offset": position,
+                    "absolute_offset": data_offset + position,
+                    "length": len(needle),
+                    "context_hex": payload[context_start:context_end].hex(" "),
+                }
+            )
+            position = payload.find(needle, position + 1)
+
     path = _capture_path(file_path)
     pointer_size = 4 if path.suffix.lower() == ".apmx86" else 8
     archive, _, _ = _open_capture_zip(path)
@@ -6810,21 +6837,19 @@ def capture_search_calls(
                         if end > len(data):
                             continue
                         payload = data[relative:end]
-                        position = payload.find(pattern)
-                        while position >= 0 and len(byte_matches) < 32:
-                            context_start = max(0, position - 16)
-                            context_end = min(len(payload), position + len(pattern) + 16)
-                            byte_matches.append(
-                                {
-                                    "slot": reference["slot"],
-                                    "data_offset": relative,
-                                    "match_offset": position,
-                                    "absolute_offset": relative + position,
-                                    "length": len(pattern),
-                                    "context_hex": payload[context_start:context_end].hex(" "),
-                                }
-                            )
-                            position = payload.find(pattern, position + 1)
+                        collect_byte_matches(
+                            payload, pattern, byte_matches, "payload", relative, reference["slot"]
+                        )
+                    if include_record_bytes and record.get("valid") and len(byte_matches) < 32:
+                        record_offset = int(record["offset"])
+                        record_size = int(record["size"])
+                        collect_byte_matches(
+                            data[record_offset : record_offset + record_size],
+                            pattern,
+                            byte_matches,
+                            "record",
+                            record_offset,
+                        )
                 if payload_matches or api_matches or argument_matches or byte_matches:
                     match = {
                         "process_index": index,
@@ -6866,6 +6891,7 @@ def capture_search_calls(
         "truncated": scan_truncated,
         "definitions_resolved": resolve_definitions,
         "arguments_decoded": decode_arguments,
+        "record_bytes_searched": include_record_bytes,
     }
 
 
@@ -8429,6 +8455,12 @@ def _self_test() -> None:
         )
         assert binary_call_search["count"] == 1
         assert binary_call_search["matches"][0]["byte_matches"][0]["absolute_offset"] == 160
+        record_call_search = capture_search_calls(
+            str(path), pattern_hex="34 12 00 00", include_record_bytes=True
+        )
+        assert record_call_search["count"] == 1
+        assert record_call_search["record_bytes_searched"]
+        assert record_call_search["matches"][0]["byte_matches"][0]["scope"] == "record"
         api_search = capture_search_calls(str(path), "CreateFileW", resolve_definitions=True)
         assert api_search["count"] == 1
         assert api_search["matches"][0]["api_matches"][0]["module"] == "kernel32.dll"
