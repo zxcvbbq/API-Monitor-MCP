@@ -207,14 +207,98 @@ def _parse_capture_process_info(data: bytes, pointer_size: int = 8) -> dict[str,
         if len(data) < 16:
             raise ValueError("32-bit process info entry is too small")
         version, capture_index, pid, image_base = struct.unpack_from("<IIII", data)
-        return {
+        payload_end = len(data) - 4 if len(data) >= 20 else len(data)
+        result: dict[str, Any] = {
             "architecture": "x86",
             "format_version": version,
             "capture_index": capture_index,
             "pid": pid,
             "image_base": f"0x{image_base:x}",
-            "format_note": "32-bit header decoded; remaining process metadata is app-version specific",
         }
+        if payload_end < len(data):
+            checksum = struct.unpack_from("<I", data, payload_end)[0]
+            result["crc32"] = f"0x{checksum:08x}"
+            result["crc32_valid"] = checksum == zlib.crc32(data[:payload_end]) & 0xFFFFFFFF
+        if payload_end <= 16:
+            result["format_note"] = "32-bit process metadata contains only its header"
+            return result
+        position = 16
+
+        def read_dword(name: str) -> int:
+            nonlocal position
+            if position + 4 > payload_end:
+                raise ValueError(f"32-bit process info is missing {name}")
+            value = struct.unpack_from("<I", data, position)[0]
+            position += 4
+            return value
+
+        def read_utf16(name: str) -> str:
+            nonlocal position
+            char_count = read_dword(f"{name} length")
+            byte_count = char_count * 2
+            if byte_count > payload_end - position:
+                raise ValueError(f"32-bit process info {name} exceeds entry bounds")
+            value = data[position : position + byte_count].decode(
+                "utf-16-le", errors="replace"
+            )
+            position += byte_count
+            return value
+
+        def read_bytes(name: str) -> bytes:
+            nonlocal position
+            length = read_dword(f"{name} length")
+            if length > payload_end - position:
+                raise ValueError(f"32-bit process info {name} exceeds entry bounds")
+            value = data[position : position + length]
+            position += length
+            return value
+
+        result["image_path"] = read_utf16("image_path")
+        result["command_line"] = read_utf16("command_line")
+        result["description"] = read_utf16("description")
+        result["call_start_index"] = read_dword("call start index")
+        start_time = read_dword("start time low") | read_dword("start time high") << 32
+        end_time = read_dword("end time low") | read_dword("end time high") << 32
+        result.update(
+            {
+                "start_time_filetime": start_time,
+                "end_time_filetime": end_time,
+                "start_time_utc": _windows_filetime(start_time),
+                "end_time_utc": _windows_filetime(end_time),
+                "module_record_count": read_dword("module record count"),
+            }
+        )
+        module_records = []
+        for index in range(result["module_record_count"]):
+            field0 = read_dword(f"module record {index} field0")
+            ansi = read_bytes(f"module record {index} ANSI text")
+            field1 = read_dword(f"module record {index} field1")
+            field2 = read_dword(f"module record {index} field2")
+            path = read_utf16(f"module record {index} path")
+            pair = read_dword(f"module record {index} pair low") | read_dword(
+                f"module record {index} pair high"
+            ) << 32
+            module_records.append(
+                {
+                    "index": index,
+                    "fields": [field0, field1, field2],
+                    "ansi_text": ansi.decode("cp1252", errors="replace"),
+                    "ansi_bytes": _read_payload(ansi),
+                    "path": path,
+                    "qwords": [pair],
+                }
+            )
+        result["module_records"] = module_records
+        result["loaded_module_count"] = read_dword("loaded module count")
+        result["loaded_modules"] = [
+            {
+                "index": index,
+                "field": read_dword(f"loaded module {index} field"),
+                "path": read_utf16(f"loaded module {index} path"),
+            }
+            for index in range(result["loaded_module_count"])
+        ]
+        return result
     if len(data) < 24:
         raise ValueError("Process info entry is too small")
     payload_end = len(data) - 4
@@ -4923,12 +5007,29 @@ def _self_test() -> None:
             "<HH", 0, len(x86_struct_argument) << 1
         ) + x86_struct_argument
         struct.pack_into("<I", x86_record, 32, len(x86_encoded_argument))
+        x86_process_info = struct.pack("<IIII", 1, 0, 4321, 0x400000)
+        for value in ("C:\\sample32.exe", '"C:\\sample32.exe" /test', "Sample 32-bit Process"):
+            x86_process_info += struct.pack("<I", len(value)) + value.encode("utf-16-le")
+        x86_process_info += struct.pack(
+            "<IQQI", 0, 132223104000000000, 132223104010000000, 1
+        )
+        x86_module_path = "C:\\Windows\\System32\\kernel32.dll"
+        x86_module_name = b"kernel32.dll"
+        x86_process_info += struct.pack("<I", 0x400000)
+        x86_process_info += struct.pack("<I", len(x86_module_name)) + x86_module_name
+        x86_process_info += struct.pack("<II", 1, 2)
+        x86_process_info += struct.pack("<I", len(x86_module_path)) + x86_module_path.encode("utf-16-le")
+        x86_process_info += struct.pack("<II", 3, 4)
+        x86_process_info += struct.pack("<I", 1)
+        x86_process_info += struct.pack("<I", 0x400000)
+        x86_process_info += struct.pack("<I", len(x86_module_path)) + x86_module_path.encode("utf-16-le")
+        x86_process_info += struct.pack("<I", zlib.crc32(x86_process_info) & 0xFFFFFFFF)
         x86_payload = io.BytesIO()
         with zipfile.ZipFile(x86_payload, "w", zipfile.ZIP_STORED) as archive:
             archive.writestr("process/0/calls", struct.pack("<I", 0))
             archive.writestr("process/0/data", bytes(x86_record) + x86_encoded_argument)
             archive.writestr("definitions", bytes(x86_definitions))
-            archive.writestr("process/0/info", struct.pack("<IIII", 1, 0, 4321, 0x400000))
+            archive.writestr("process/0/info", x86_process_info)
         x86_path.write_bytes(b"\r\nAPI Monitor 32-bit Capture\r\nRBAPM" + x86_payload.getvalue())
         x86_records = capture_call_records(
             str(x86_path), include_data=True, resolve_definitions=True
@@ -4945,7 +5046,13 @@ def _self_test() -> None:
         assert capture_call_stats(str(x86_path))["processes"][0]["record_sizes"]["120"] == 1
         x86_processes = capture_list_processes(str(x86_path))
         assert x86_processes["processes"][0]["call_count"] == 1
-        assert x86_processes["processes"][0]["metadata"]["pid"] == 4321
+        x86_metadata = x86_processes["processes"][0]["metadata"]
+        assert x86_metadata["pid"] == 4321
+        assert x86_metadata["crc32_valid"]
+        assert x86_metadata["image_path"] == "C:\\sample32.exe"
+        assert x86_metadata["module_records"][0]["ansi_text"] == "kernel32.dll"
+        assert x86_metadata["module_records"][0]["path"] == x86_module_path
+        assert x86_metadata["loaded_modules"][0]["path"] == x86_module_path
         x86_decoded = capture_decode_call(str(x86_path), 0, 0, resolve_definitions=True)
         assert x86_decoded["argument_stream"]["arguments"][0]["typed"]["fields"][0]["typed"]["value"] == 77
 
