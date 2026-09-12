@@ -81,6 +81,18 @@ def _capture_directory(directory: str) -> Path:
     return path.resolve()
 
 
+def _capture_output_path(output_path: str, architecture: str) -> Path:
+    if architecture not in {"x86", "x64"}:
+        raise ValueError("architecture must be x86 or x64")
+    path = Path(output_path).expanduser()
+    expected_suffix = f".apm{architecture}"
+    if path.suffix.lower() != expected_suffix:
+        raise ValueError(f"output_path must end in {expected_suffix}")
+    if not path.parent.is_dir():
+        raise NotADirectoryError(f"Output directory not found: {path.parent}")
+    return path.resolve()
+
+
 def _limit(value: int, name: str, maximum: int) -> int:
     if not 1 <= value <= maximum:
         raise ValueError(f"{name} must be between 1 and {maximum}")
@@ -2000,7 +2012,85 @@ def api_monitor_monitor_process(
         "architecture": architecture,
         "arguments": arguments,
         "start_in": start_in,
+        "window": {"handle": main_window["handle"], "title": main_window["title"]},
     }
+
+
+@mcp.tool()
+def api_monitor_capture_process(
+    process_path: str,
+    output_path: str,
+    architecture: str = "x64",
+    arguments: str = "",
+    start_in: str = "",
+    duration_seconds: int = 10,
+    minimum_calls: int = 0,
+    timeout_seconds: int = 10,
+    overwrite: bool = False,
+) -> dict[str, Any]:
+    """Capture one executable in the background and save the resulting APMX file."""
+    if sys.platform != "win32":
+        raise RuntimeError("Live API Monitor captures require Windows")
+    if duration_seconds < 1 or duration_seconds > 300:
+        raise ValueError("duration_seconds must be between 1 and 300")
+    if minimum_calls < 0:
+        raise ValueError("minimum_calls must be non-negative")
+    if timeout_seconds < 1 or timeout_seconds > 60:
+        raise ValueError("timeout_seconds must be between 1 and 60")
+    path = _capture_output_path(output_path, architecture)
+    if path.exists() and not overwrite:
+        raise FileExistsError(f"Capture already exists: {path}")
+
+    started = api_monitor_monitor_process(
+        process_path,
+        architecture=architecture,
+        arguments=arguments,
+        start_in=start_in,
+        timeout_seconds=timeout_seconds,
+    )
+    started_at = time.monotonic()
+    summaries: list[dict[str, Any]] = []
+    ready = minimum_calls == 0
+    wait_error = None
+    try:
+        deadline = started_at + duration_seconds
+        while True:
+            summaries = api_monitor_summary(window_handle=started["window"]["handle"])["summaries"]
+            if minimum_calls and any(item["calls"] >= minimum_calls for item in summaries):
+                ready = True
+                break
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            time.sleep(min(0.25, remaining))
+    except Exception as exc:
+        wait_error = str(exc)
+    waited_seconds = round(time.monotonic() - started_at, 3)
+    stopped = api_monitor_monitoring_control(
+        "stop",
+        architecture=architecture,
+        timeout_seconds=timeout_seconds,
+        window_handle=started["window"]["handle"],
+    )
+    saved = api_monitor_save_capture(
+        str(path),
+        overwrite=overwrite,
+        timeout_seconds=timeout_seconds,
+        window_handle=started["window"]["handle"],
+    )
+    result: dict[str, Any] = {
+        "captured": True,
+        "ready": ready,
+        "minimum_calls": minimum_calls,
+        "waited_seconds": waited_seconds,
+        "summaries": summaries,
+        "started": started,
+        "stopped": stopped,
+        "saved": saved,
+    }
+    if wait_error:
+        result["wait_error"] = wait_error
+    return result
 
 
 @mcp.tool()
@@ -2279,17 +2369,15 @@ def api_monitor_save_capture(
         raise RuntimeError("Saving API Monitor captures requires Windows")
     if timeout_seconds < 1 or timeout_seconds > 60:
         raise ValueError("timeout_seconds must be between 1 and 60")
-    path = Path(output_path).expanduser()
-    if path.suffix.lower() not in CAPTURE_SUFFIXES:
+    suffix = Path(output_path).expanduser().suffix.lower()
+    if suffix not in CAPTURE_SUFFIXES:
         raise ValueError("output_path must end in .apmx64 or .apmx86")
-    if not path.parent.is_dir():
-        raise NotADirectoryError(f"Output directory not found: {path.parent}")
-    path = path.resolve()
+    architecture = "x86" if suffix == ".apmx86" else "x64"
+    path = _capture_output_path(output_path, architecture)
     existed = path.exists()
     if existed and not overwrite:
         raise FileExistsError(f"Capture already exists: {path}")
 
-    architecture = "x86" if path.suffix.lower() == ".apmx86" else "x64"
     main_window = (
         _api_monitor_window_by_handle(window_handle, architecture)
         if window_handle is not None
@@ -3330,6 +3418,7 @@ def api_monitor_read_api_definition(
 
 def _self_test() -> None:
     with TemporaryDirectory() as directory:
+        assert _capture_output_path(str(Path(directory) / "out.apmx64"), "x64").suffix == ".apmx64"
         path = Path(directory) / "sample.apmx64"
         payload = io.BytesIO()
         with zipfile.ZipFile(payload, "w", zipfile.ZIP_STORED) as archive:

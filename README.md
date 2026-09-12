@@ -4,7 +4,7 @@ MCP bridge for the installed Rohitab API Monitor app.
 
 Features:
 
-- Launch/status, process attach, native filter-tree inspection, and background GUI actions
+- Launch/status, live background capture, process attach, native filter-tree inspection, and GUI actions
 - Open, validate, decode, search, inspect, and export `.apmx86`/`.apmx64` captures
 - Inspect/search capture ZIPs, XML filters, logs, process metadata/modules, strings, and raw hex
 - Search Rohitab XML API definitions
