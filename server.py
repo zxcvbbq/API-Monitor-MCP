@@ -4544,6 +4544,82 @@ def capture_compare_all_calls(
 
 
 @mcp.tool()
+def capture_compare_apis(
+    first_file: str,
+    second_file: str,
+    limit: int = 500,
+    max_records: int = 1_000_000,
+) -> dict[str, Any]:
+    """Compare resolved API call frequencies across two APMX captures."""
+    limit = _limit(limit, "limit", 10_000)
+    max_records = _limit(max_records, "max_records", 1_000_000)
+    first = capture_list_apis(first_file, limit=10_000, max_records=max_records)
+    second = capture_list_apis(second_file, limit=10_000, max_records=max_records)
+
+    def key(item: dict[str, Any]) -> tuple[str, str, Any]:
+        return (
+            str(item.get("name") or "").casefold(),
+            str(item.get("module") or "").casefold(),
+            item.get("ordinal"),
+        )
+
+    first_apis = {key(item): item for item in first["apis"]}
+    second_apis = {key(item): item for item in second["apis"]}
+    sort_key = lambda api_key: (api_key[0], api_key[1], str(api_key[2]))
+    added_keys = sorted(set(second_apis) - set(first_apis), key=sort_key)
+    removed_keys = sorted(set(first_apis) - set(second_apis), key=sort_key)
+    changed_keys = sorted(
+        (
+            api_key
+            for api_key in set(first_apis) & set(second_apis)
+            if (
+                first_apis[api_key].get("count"),
+                first_apis[api_key].get("process_indices"),
+            )
+            != (
+                second_apis[api_key].get("count"),
+                second_apis[api_key].get("process_indices"),
+            )
+        ),
+        key=sort_key,
+    )
+    added = [second_apis[api_key] for api_key in added_keys]
+    removed = [first_apis[api_key] for api_key in removed_keys]
+    changed = [
+        {
+            "api": {
+                "name": api_key[0],
+                "module": api_key[1],
+                "ordinal": api_key[2],
+            },
+            "first": first_apis[api_key],
+            "second": second_apis[api_key],
+        }
+        for api_key in changed_keys
+    ]
+    return {
+        "first": first["file"],
+        "second": second["file"],
+        "definitions_available": {
+            "first": first["definitions_available"],
+            "second": second["definitions_available"],
+        },
+        "counts": {
+            "added": len(added),
+            "removed": len(removed),
+            "changed": len(changed),
+        },
+        "added": added[:limit],
+        "removed": removed[:limit],
+        "changed": changed[:limit],
+        "same": not added_keys and not removed_keys and not changed_keys,
+        "truncated": any(
+            len(items) > limit for items in (added, removed, changed)
+        ) or first["truncated"] or second["truncated"],
+    }
+
+
+@mcp.tool()
 def capture_export_all_calls(
     file_path: str,
     output_path: str,
@@ -6904,6 +6980,9 @@ def _self_test() -> None:
         )
         assert call_comparison["counts"]["removed"] == 1
         assert call_comparison["counts"]["changed"] == 0
+        api_comparison = capture_compare_apis(str(path), str(path))
+        assert api_comparison["same"]
+        assert api_comparison["counts"] == {"added": 0, "removed": 0, "changed": 0}
         all_call_comparison = capture_compare_all_calls(str(path), str(path))
         assert all_call_comparison["process_indices"] == [0]
         assert all_call_comparison["same"]
