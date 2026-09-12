@@ -7,6 +7,7 @@ import csv
 import ctypes
 import hashlib
 import io
+import math
 import json
 import mmap
 import os
@@ -4874,6 +4875,135 @@ def capture_search_calls(
 
 
 @mcp.tool()
+def capture_filter_calls(
+    file_path: str,
+    process_index: int | None = None,
+    thread_id: int | None = None,
+    error_code: int | None = None,
+    min_duration_seconds: float | None = None,
+    max_duration_seconds: float | None = None,
+    limit: int = 500,
+    max_records: int = 100_000,
+    include_data: bool = False,
+    max_data_bytes: int = 4096,
+    resolve_definitions: bool = False,
+) -> dict[str, Any]:
+    """Filter saved calls by verified thread, error, and duration context."""
+    if process_index is not None and process_index < 0:
+        raise ValueError("process_index must be non-negative")
+    if thread_id is not None and not 0 <= thread_id <= 0xFFFFFFFF:
+        raise ValueError("thread_id must be between 0 and 4294967295")
+    if error_code is not None and not 0 <= error_code <= 0xFFFFFFFF:
+        raise ValueError("error_code must be between 0 and 4294967295")
+    if min_duration_seconds is not None and (
+        not math.isfinite(min_duration_seconds) or min_duration_seconds < 0
+    ):
+        raise ValueError("min_duration_seconds must be finite and non-negative")
+    if max_duration_seconds is not None and (
+        not math.isfinite(max_duration_seconds) or max_duration_seconds < 0
+    ):
+        raise ValueError("max_duration_seconds must be finite and non-negative")
+    if (
+        min_duration_seconds is not None
+        and max_duration_seconds is not None
+        and min_duration_seconds > max_duration_seconds
+    ):
+        raise ValueError("min_duration_seconds must not exceed max_duration_seconds")
+    limit = _limit(limit, "limit", 10_000)
+    max_records = _limit(max_records, "max_records", 1_000_000)
+    max_data_bytes = _limit(max_data_bytes, "max_data_bytes", 16 * 1024 * 1024)
+    path = _capture_path(file_path)
+    pointer_size = 4 if path.suffix.lower() == ".apmx86" else 8
+    archive, _, _ = _open_capture_zip(path)
+    matches: list[dict[str, Any]] = []
+    scanned = 0
+    scan_truncated = False
+    with archive:
+        entries = {info.filename for info in archive.infolist()}
+        definitions = archive.read("definitions") if resolve_definitions and "definitions" in entries else None
+        process_indices = sorted(
+            int(match.group(1))
+            for name in entries
+            if (match := re.fullmatch(r"process/(\d+)/calls", name, re.I))
+            and (process_index is None or int(match.group(1)) == process_index)
+        )
+        for index in process_indices:
+            calls = archive.read(f"process/{index}/calls")
+            data_name = f"process/{index}/data"
+            data = archive.read(data_name) if data_name in entries else b""
+            if len(calls) % pointer_size:
+                raise ValueError(
+                    f"process/{index}/calls is not an array of {pointer_size * 8}-bit offsets"
+                )
+            record_count = len(calls) // pointer_size
+            page_count = min(record_count, max_records - scanned)
+            scan_truncated |= page_count < record_count
+            records = _capture_call_records(
+                calls,
+                data,
+                page_count,
+                include_data,
+                max_data_bytes,
+                definitions=definitions,
+                pointer_size=pointer_size,
+            )
+            scanned += len(records)
+            for record in records:
+                context = record.get("context")
+                if context is None:
+                    continue
+                duration = context.get("duration_seconds") if context.get("duration_valid") else None
+                if duration is not None and not math.isfinite(duration):
+                    duration = None
+                if thread_id is not None and context.get("thread_id") != thread_id:
+                    continue
+                if error_code is not None and context.get("error_code") != error_code:
+                    continue
+                if min_duration_seconds is not None and (
+                    duration is None or duration < min_duration_seconds
+                ):
+                    continue
+                if max_duration_seconds is not None and (
+                    duration is None or duration > max_duration_seconds
+                ):
+                    continue
+                matches.append({"process_index": index, "record": record})
+                if len(matches) >= limit:
+                    return {
+                        "file": str(path),
+                        "process_index": process_index,
+                        "filters": {
+                            "thread_id": thread_id,
+                            "error_code": error_code,
+                            "min_duration_seconds": min_duration_seconds,
+                            "max_duration_seconds": max_duration_seconds,
+                        },
+                        "matches": matches,
+                        "count": len(matches),
+                        "scanned_records": scanned,
+                        "truncated": True,
+                        "definitions_resolved": resolve_definitions,
+                    }
+            if scanned >= max_records:
+                break
+    return {
+        "file": str(path),
+        "process_index": process_index,
+        "filters": {
+            "thread_id": thread_id,
+            "error_code": error_code,
+            "min_duration_seconds": min_duration_seconds,
+            "max_duration_seconds": max_duration_seconds,
+        },
+        "matches": matches,
+        "count": len(matches),
+        "scanned_records": scanned,
+        "truncated": scan_truncated,
+        "definitions_resolved": resolve_definitions,
+    }
+
+
+@mcp.tool()
 def capture_calls_around(
     file_path: str,
     process_index: int,
@@ -5488,6 +5618,15 @@ def _self_test() -> None:
         bounded_stats = _capture_call_stats(bounded_calls, bytes(bounded_records), 1000)
         assert bounded_stats["context"]["error_count"] == 257
         assert bounded_stats["context"]["error_codes_truncated"]
+        filtered = capture_filter_calls(
+            str(path),
+            thread_id=0x1234,
+            error_code=5,
+            min_duration_seconds=0.1,
+            max_duration_seconds=0.2,
+        )
+        assert filtered["count"] == 1
+        assert filtered["matches"][0]["record"]["index"] == 0
         resolved_records = capture_call_records(str(path), resolve_definitions=True)
         assert resolved_records["definitions_available"]
         assert resolved_records["records"][0]["definition"]["name"] == "CreateFileW"
