@@ -487,11 +487,7 @@ def _read_payload(data: bytes) -> dict[str, Any]:
     return {"encoding": "base64", "base64": base64.b64encode(data).decode("ascii")}
 
 
-@mcp.tool()
-def api_monitor_status() -> dict[str, Any]:
-    """List running Rohitab API Monitor x86/x64 processes."""
-    if sys.platform != "win32":
-        return {"supported": False, "processes": []}
+def _tasklist_rows() -> tuple[list[list[str]], str | None]:
     try:
         completed = subprocess.run(
             ["tasklist", "/FO", "CSV", "/NH"],
@@ -502,10 +498,21 @@ def api_monitor_status() -> dict[str, Any]:
             check=True,
         )
     except (OSError, subprocess.CalledProcessError) as exc:
-        return {"supported": True, "error": str(exc), "processes": []}
+        return [], str(exc)
+    return list(csv.reader(io.StringIO(completed.stdout))), None
+
+
+@mcp.tool()
+def api_monitor_status() -> dict[str, Any]:
+    """List running Rohitab API Monitor x86/x64 processes."""
+    if sys.platform != "win32":
+        return {"supported": False, "processes": []}
+    rows, error = _tasklist_rows()
+    if error:
+        return {"supported": True, "error": error, "processes": []}
 
     processes = []
-    for row in csv.reader(io.StringIO(completed.stdout)):
+    for row in rows:
         if len(row) < 5 or row[0].casefold() not in {"apimonitor-x86.exe", "apimonitor-x64.exe"}:
             continue
         try:
@@ -514,6 +521,35 @@ def api_monitor_status() -> dict[str, Any]:
             pid = row[1]
         processes.append({"image": row[0], "pid": pid, "session": row[2], "memory": row[4]})
     return {"supported": True, "processes": processes}
+
+
+@mcp.tool()
+def api_monitor_target_processes(query: str = "", limit: int = 500) -> dict[str, Any]:
+    """List current Windows processes that can be selected for API Monitor attach."""
+    if sys.platform != "win32":
+        return {"supported": False, "processes": []}
+    limit = _limit(limit, "limit", 5000)
+    rows, error = _tasklist_rows()
+    if error:
+        return {"supported": True, "error": error, "processes": []}
+
+    needle = query.casefold()
+    processes = []
+    for row in rows:
+        if len(row) < 5 or (needle and needle not in row[0].casefold()):
+            continue
+        try:
+            pid: int | str = int(row[1])
+        except ValueError:
+            pid = row[1]
+        processes.append({"image": row[0], "pid": pid, "session": row[2], "memory": row[4]})
+    return {
+        "supported": True,
+        "query": query,
+        "processes": processes[:limit],
+        "count": len(processes),
+        "truncated": len(processes) > limit,
+    }
 
 
 @mcp.tool()
