@@ -6992,6 +6992,10 @@ def capture_call_timeline(
     pid: int | None = None,
     thread_number: int | None = None,
     module_base: int | None = None,
+    thread_id: int | None = None,
+    error_code: int | None = None,
+    min_duration_seconds: float | None = None,
+    max_duration_seconds: float | None = None,
 ) -> dict[str, Any]:
     """Return saved calls as one bounded cross-process timeline."""
     if order_by not in {"timestamp", "capture"}:
@@ -7001,6 +7005,10 @@ def capture_call_timeline(
     filtered = capture_filter_calls(
         file_path,
         process_index=process_index,
+        thread_id=thread_id,
+        error_code=error_code,
+        min_duration_seconds=min_duration_seconds,
+        max_duration_seconds=max_duration_seconds,
         flags=flags,
         start_time_utc=start_time_utc,
         end_time_utc=end_time_utc,
@@ -7045,6 +7053,10 @@ def capture_call_timeline(
     return {
         "file": filtered["file"],
         "process_index": process_index,
+        "thread_id": thread_id,
+        "error_code": error_code,
+        "min_duration_seconds": min_duration_seconds,
+        "max_duration_seconds": max_duration_seconds,
         "thread_number": thread_number,
         "module_base": module_base,
         "flags": flags,
@@ -7974,6 +7986,10 @@ def _self_test() -> None:
             pid=1234,
             thread_number=7,
             module_base=0x7FF600001000,
+            thread_id=0x1234,
+            error_code=5,
+            min_duration_seconds=0.1,
+            max_duration_seconds=0.2,
         )
         assert api_timeline["count"] == 1
         assert api_timeline["timeline"][0]["record"]["definition"]["name"] == "CreateFileW"
