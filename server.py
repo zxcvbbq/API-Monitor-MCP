@@ -2475,10 +2475,11 @@ def capture_validate(file_path: str) -> dict[str, Any]:
             error = str(exc)
         entry_count = len(archive.infolist())
     prefix = data[:offset]
+    prefix_valid = prefix.endswith(b"RBAPM")
     return {
         "file": str(path),
-        "valid": error is None and bad_entry is None,
-        "prefix_valid": prefix.endswith(b"RBAPM"),
+        "valid": prefix_valid and error is None and bad_entry is None,
+        "prefix_valid": prefix_valid,
         "zip_offset": offset,
         "entries": entry_count,
         "first_bad_entry": bad_entry,
@@ -2815,6 +2816,84 @@ def capture_export_calls(
         "count": len(result["records"]),
         "truncated": result["truncated"],
         "size": len(encoded),
+        "sha256": digest,
+    }
+
+
+@mcp.tool()
+def capture_extract_call_payload(
+    file_path: str,
+    process_index: int,
+    record_index: int,
+    slot: int,
+    output_path: str,
+    overwrite: bool = False,
+    max_bytes: int = 64 * 1024 * 1024,
+) -> dict[str, Any]:
+    """Extract one bounded raw payload referenced by a saved call record."""
+    if process_index < 0 or record_index < 0:
+        raise ValueError("process_index and record_index must be non-negative")
+    if slot not in range(5):
+        raise ValueError("slot must be between 0 and 4")
+    max_bytes = _limit(max_bytes, "max_bytes", 256 * 1024 * 1024)
+    output = Path(output_path).expanduser()
+    if not output.parent.is_dir():
+        raise NotADirectoryError(f"Output directory not found: {output.parent}")
+    output = output.resolve()
+    if output.exists() and not overwrite:
+        raise FileExistsError(f"Output already exists: {output}")
+
+    path = _capture_path(file_path)
+    calls_name = f"process/{process_index}/calls"
+    data_name = f"process/{process_index}/data"
+    archive, _, _ = _open_capture_zip(path)
+    with archive:
+        try:
+            calls = archive.read(calls_name)
+        except KeyError as exc:
+            raise FileNotFoundError(f"Capture call entry not found: {calls_name}") from exc
+        try:
+            data = archive.read(data_name)
+        except KeyError as exc:
+            raise FileNotFoundError(f"Capture call entry not found: {data_name}") from exc
+    if len(calls) % 8:
+        raise ValueError("process calls entry is not an array of 64-bit offsets")
+    count = len(calls) // 8
+    if record_index >= count:
+        raise IndexError(f"record_index {record_index} is outside {count} saved calls")
+    record = _capture_call_records(
+        calls, data, 1, False, max_bytes, start_index=record_index
+    )[0]
+    if not record["valid"]:
+        raise ValueError(record.get("error", "saved call record is invalid"))
+    reference = next(
+        (item for item in record["data_refs"] if item["slot"] == slot), None
+    )
+    if not reference or not reference["length"]:
+        raise ValueError(f"call record {record_index} has no payload in slot {slot}")
+    if not reference["valid"]:
+        raise ValueError(reference.get("error", "saved call payload is invalid"))
+    if reference["length"] > max_bytes:
+        raise ValueError(f"call payload exceeds max_bytes: {reference['length']}")
+    payload = data[reference["offset"] : reference["offset"] + reference["length"]]
+    digest = hashlib.sha256(payload).hexdigest()
+    try:
+        mode = "wb" if overwrite else "xb"
+        with output.open(mode) as handle:
+            handle.write(payload)
+    except Exception:
+        if output.exists() and not overwrite:
+            output.unlink()
+        raise
+    return {
+        "extracted": True,
+        "file": str(path),
+        "process_index": process_index,
+        "record_index": record_index,
+        "slot": slot,
+        "data_offset": reference["offset"],
+        "size": len(payload),
+        "output": str(output),
         "sha256": digest,
     }
 
@@ -3466,6 +3545,10 @@ def _self_test() -> None:
         assert info["metadata"]["application"] == "API Monitor v2 Alpha-r13 64-bit"
         assert info["metadata"]["crc32_valid"]
         assert capture_validate(str(path))["valid"]
+        invalid_prefix = Path(directory) / "invalid-prefix.apmx64"
+        invalid_prefix.write_bytes(b"not-an-apmx" + path.read_bytes()[info["zip_offset"] :])
+        assert not capture_validate(str(invalid_prefix))["valid"]
+        invalid_prefix.unlink()
         assert info["entries"][0]["name"] == "metadata.txt"
         strings = _capture_strings(path, "CreateFile", 10, 4)
         assert strings and "CreateFileW" in strings[0]["text"]
@@ -3482,6 +3565,10 @@ def _self_test() -> None:
         assert call_records["count"] == 1
         assert call_records["start_index"] == 0
         assert call_records["records"][0]["data_refs"][0]["payload"]["text"] == "hello"
+        extracted_payload = Path(directory) / "payload.bin"
+        payload_export = capture_extract_call_payload(str(path), 0, 0, 0, str(extracted_payload))
+        assert payload_export["size"] == 5
+        assert extracted_payload.read_bytes() == b"hello"
         json_export = capture_export_calls(str(path), str(Path(directory) / "calls.json"))
         assert json_export["count"] == 1
         assert json.loads((Path(directory) / "calls.json").read_text())["records"][0]["index"] == 0
