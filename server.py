@@ -1885,6 +1885,8 @@ def _capture_exact_fixed_structure(
         return None
     fields = type_info.get("fields", [])
     offset = 0
+    extent = 0
+    union = bool(int(type_info.get("struct_flags", 0)) & 1)
     decoded_fields = []
     for index, field in enumerate(fields):
         field_type = field.get("type")
@@ -1892,20 +1894,21 @@ def _capture_exact_fixed_structure(
             return None
         size = _capture_array_element_size(field_type, depth + 1, machine_flag)
         alignment = _capture_type_alignment(field_type, depth + 1, machine_flag) or 1
-        if offset % alignment:
+        if not union and offset % alignment:
             offset += alignment - offset % alignment
+        field_offset = 0 if union else offset
         item: dict[str, Any] = {
             "index": index,
-            "offset": offset,
+            "offset": field_offset,
             "length": size,
-            "valid": size is not None and offset + size <= len(data),
+            "valid": size is not None and field_offset + size <= len(data),
         }
         if field.get("name"):
             item["name"] = field["name"]
         if not item["valid"]:
             item["error"] = "fixed structure field exceeds payload"
         else:
-            raw = data[offset : offset + size]
+            raw = data[field_offset : field_offset + size]
             item["payload"] = _read_payload(raw)
             typed = _capture_exact_value(
                 raw, field_type, depth + 1, machine_flag, inline_pointer=True
@@ -1913,15 +1916,17 @@ def _capture_exact_fixed_structure(
             if typed:
                 item["typed"] = typed
         decoded_fields.append(item)
-        offset += size or 0
+        extent = max(extent, field_offset + (size or 0))
+        if not union:
+            offset += size or 0
     return {
         "exact": True,
         "kind": "structure",
         "valid": all(field["valid"] for field in decoded_fields),
         "field_count": len(decoded_fields),
-        "representation": "fixed",
+        "representation": "fixed_union" if union else "fixed",
         "serialized_table_bytes": 0,
-        "size": offset,
+        "size": extent,
         "fields": decoded_fields,
     }
 
@@ -5507,6 +5512,19 @@ def _self_test() -> None:
         fixed_struct_value = _capture_exact_value(struct.pack("<I", 99), fixed_struct_type)
         assert fixed_struct_value and fixed_struct_value["representation"] == "fixed"
         assert fixed_struct_value["fields"][0]["typed"]["value"] == 99
+        union_value = _capture_exact_value(
+            struct.pack("<I", 0x12345678),
+            {
+                "kind": 11,
+                "struct_flags": 3,
+                "fields": [
+                    {"type": {"kind": 2, "size": 4}},
+                    {"type": {"kind": 2, "size": 2}},
+                ],
+            },
+        )
+        assert union_value and union_value["representation"] == "fixed_union"
+        assert union_value["fields"][1]["offset"] == 0
         variable_array_type = _capture_type_info(
             bytes(definitions), variable_array_type_offset
         )
