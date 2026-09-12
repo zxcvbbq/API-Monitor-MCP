@@ -566,7 +566,11 @@ def _capture_call_stats(
         "truncated": scanned < len(offsets),
         "valid_records": 0,
         "invalid_records": 0,
-        "record_sizes": {"144": 0, "160": 0, "other": 0},
+        "record_sizes": {
+            str(layout["minimum_record_size"]): 0,
+            str(layout["full_record_size"]): 0,
+            "other": 0,
+        },
         "flags": {},
         "payload_slots": {
             str(slot): {"references": 0, "bytes": 0, "invalid_references": 0}
@@ -585,7 +589,11 @@ def _capture_call_stats(
             stats["valid_records"] -= 1
             stats["invalid_records"] += 1
             continue
-        size_key = str(record_size) if record_size in (144, 160) else "other"
+        size_key = (
+            str(record_size)
+            if record_size in (layout["minimum_record_size"], layout["full_record_size"])
+            else "other"
+        )
         stats["record_sizes"][size_key] += 1
         flags = data[offset + 2]
         flag_key = f"0x{flags:02x}"
@@ -4580,6 +4588,7 @@ def _self_test() -> None:
         assert x86_records["records"][0]["data_refs"][0]["payload"]["text"] == "hello"
         assert capture_list_apis(str(x86_path))["apis"][0]["module"] == "kernel32.dll"
         assert capture_validate(str(x86_path), deep=True)["structural_valid"]
+        assert capture_call_stats(str(x86_path))["processes"][0]["record_sizes"]["120"] == 1
         x86_processes = capture_list_processes(str(x86_path))
         assert x86_processes["processes"][0]["call_count"] == 1
         assert x86_processes["processes"][0]["metadata"]["pid"] == 4321
