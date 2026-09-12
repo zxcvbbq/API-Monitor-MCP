@@ -4130,6 +4130,36 @@ def capture_info(file_path: str) -> dict[str, Any]:
 
 
 @mcp.tool()
+def capture_overview(
+    file_path: str,
+    process_limit: int = 200,
+    api_limit: int = 1000,
+    max_records: int = 100_000,
+    include_log: bool = False,
+    log_limit: int = 1000,
+) -> dict[str, Any]:
+    """Return one bounded triage report for an APMX capture."""
+    process_limit = _limit(process_limit, "process_limit", 2000)
+    api_limit = _limit(api_limit, "api_limit", 10_000)
+    max_records = _limit(max_records, "max_records", 1_000_000)
+    log_limit = _limit(log_limit, "log_limit", 10_000)
+    path = _capture_path(file_path)
+    result: dict[str, Any] = {
+        "file": str(path),
+        "info": capture_info(str(path)),
+        "validation": capture_validate(str(path)),
+        "processes": capture_list_processes(str(path), process_limit),
+        "stats": capture_call_stats(str(path), max_records=max_records),
+        "apis": capture_list_apis(
+            str(path), limit=api_limit, max_records=max_records
+        ),
+    }
+    if include_log:
+        result["log"] = capture_monitoring_log(str(path), limit=log_limit)
+    return result
+
+
+@mcp.tool()
 def capture_validate(
     file_path: str, deep: bool = False, max_records: int = 1_000_000
 ) -> dict[str, Any]:
@@ -6573,6 +6603,11 @@ def _self_test() -> None:
         assert deep_validation["info"]["valid"]
         assert deep_validation["architecture_match"]
         assert deep_validation["streams"][0]["definitions"]["resolved"] == 1
+        overview = capture_overview(str(path), include_log=True, log_limit=10)
+        assert overview["validation"]["valid"]
+        assert overview["stats"]["totals"]["count"] == 1
+        assert overview["apis"]["apis"][0]["name"] == "CreateFileW"
+        assert overview["log"]["events"][0]["type"] == "module"
         assert capture_read_type(str(path), 160)["type"]["kind"] == 2
         invalid_prefix = Path(directory) / "invalid-prefix.apmx64"
         invalid_prefix.write_bytes(b"not-an-apmx" + path.read_bytes()[info["zip_offset"] :])
