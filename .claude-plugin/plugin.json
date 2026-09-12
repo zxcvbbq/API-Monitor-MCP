@@ -1,6 +1,6 @@
 {
   "name": "api-monitor-mcp",
-  "version": "0.10.88",
+  "version": "0.10.89",
   "description": "MCP bridge for Rohitab API Monitor captures and GUI.",
   "mcpServers": {
     "api-monitor": {

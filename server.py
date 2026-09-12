@@ -5730,32 +5730,9 @@ def capture_read_process_data(
     }
 
 
-@mcp.tool()
-def capture_decode_call(
-    file_path: str,
-    process_index: int,
-    record_index: int,
-    max_data_bytes: int = 4096,
-    max_items: int = 64,
-    resolve_definitions: bool = False,
-) -> dict[str, Any]:
-    """Return one saved call with exact encoded args plus bounded candidates."""
-    if process_index < 0 or record_index < 0:
-        raise ValueError("process_index and record_index must be non-negative")
-    max_data_bytes = _limit(max_data_bytes, "max_data_bytes", 16 * 1024 * 1024)
-    max_items = _limit(max_items, "max_items", 256)
-    result = capture_call_records(
-        file_path,
-        process_index=process_index,
-        start_index=record_index,
-        limit=1,
-        include_data=True,
-        max_data_bytes=max_data_bytes,
-        resolve_definitions=resolve_definitions,
-    )
-    if not result["records"]:
-        raise IndexError(f"record_index {record_index} is outside saved calls")
-    record = result["records"][0]
+def _capture_decode_record(
+    record: dict[str, Any], max_data_bytes: int, max_items: int
+) -> tuple[dict[str, Any], dict[str, Any]]:
     for reference in record.get("data_refs", []):
         payload = reference.get("payload")
         if payload is None:
@@ -5815,6 +5792,38 @@ def capture_decode_call(
             if exact:
                 return_value["typed"] = exact
             return_value["type"] = return_type
+    return argument_stream, return_value
+
+
+@mcp.tool()
+def capture_decode_call(
+    file_path: str,
+    process_index: int,
+    record_index: int,
+    max_data_bytes: int = 4096,
+    max_items: int = 64,
+    resolve_definitions: bool = False,
+) -> dict[str, Any]:
+    """Return one saved call with exact encoded args plus bounded candidates."""
+    if process_index < 0 or record_index < 0:
+        raise ValueError("process_index and record_index must be non-negative")
+    max_data_bytes = _limit(max_data_bytes, "max_data_bytes", 16 * 1024 * 1024)
+    max_items = _limit(max_items, "max_items", 256)
+    result = capture_call_records(
+        file_path,
+        process_index=process_index,
+        start_index=record_index,
+        limit=1,
+        include_data=True,
+        max_data_bytes=max_data_bytes,
+        resolve_definitions=resolve_definitions,
+    )
+    if not result["records"]:
+        raise IndexError(f"record_index {record_index} is outside saved calls")
+    record = result["records"][0]
+    argument_stream, return_value = _capture_decode_record(
+        record, max_data_bytes, max_items
+    )
     return {
         "file": result["file"],
         "process_index": process_index,
@@ -5824,6 +5833,57 @@ def capture_decode_call(
         "return_value": return_value,
         "definitions_available": result["definitions_available"],
         "format": "APMX encoded parameter table; recognized scalar, string, structure, array, and enum values are exact, other values remain heuristic",
+    }
+
+
+@mcp.tool()
+def capture_decode_calls(
+    file_path: str,
+    process_index: int = 0,
+    start_index: int = 0,
+    limit: int = 100,
+    max_data_bytes: int = 4096,
+    max_items: int = 64,
+    resolve_definitions: bool = False,
+) -> dict[str, Any]:
+    """Decode a bounded page of saved calls with arguments and return values."""
+    if process_index < 0 or start_index < 0:
+        raise ValueError("process_index and start_index must be non-negative")
+    limit = _limit(limit, "limit", 10_000)
+    max_data_bytes = _limit(max_data_bytes, "max_data_bytes", 16 * 1024 * 1024)
+    max_items = _limit(max_items, "max_items", 256)
+    result = capture_call_records(
+        file_path,
+        process_index=process_index,
+        start_index=start_index,
+        limit=limit,
+        include_data=True,
+        max_data_bytes=max_data_bytes,
+        resolve_definitions=resolve_definitions,
+    )
+    decoded = []
+    for record in result["records"]:
+        argument_stream, return_value = _capture_decode_record(
+            record, max_data_bytes, max_items
+        )
+        decoded.append(
+            {
+                "index": record["index"],
+                "record": record,
+                "argument_stream": argument_stream,
+                "return_value": return_value,
+            }
+        )
+    return {
+        "file": result["file"],
+        "process_index": process_index,
+        "architecture": result["architecture"],
+        "count": result["count"],
+        "start_index": result["start_index"],
+        "end_index": decoded[-1]["index"] if decoded else None,
+        "definitions_available": result["definitions_available"],
+        "records": decoded,
+        "truncated": result["truncated"],
     }
 
 
@@ -7639,6 +7699,9 @@ def _self_test() -> None:
         assert decoded_call["record"]["data_refs"][0]["decoding"]["strings"][0]["text"] == "hello"
         assert decoded_call["record"]["definition"]["name"] == "CreateFileW"
         assert decoded_call["return_value"]["typed"]["value"] == 7
+        decoded_calls = capture_decode_calls(str(path), resolve_definitions=True)
+        assert decoded_calls["count"] == 1
+        assert decoded_calls["records"][0]["return_value"]["typed"]["value"] == 7
         extracted_payload = Path(directory) / "payload.bin"
         payload_export = capture_extract_call_payload(str(path), 0, 0, 0, str(extracted_payload))
         assert payload_export["size"] == 5
