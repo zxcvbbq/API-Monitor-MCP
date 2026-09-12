@@ -1031,6 +1031,33 @@ def capture_read_entry(file_path: str, entry_name: str, max_bytes: int = 1_048_5
 
 
 @mcp.tool()
+def capture_monitoring_log(
+    file_path: str,
+    query: str = "",
+    limit: int = 1000,
+) -> dict[str, Any]:
+    """Read and search the monitoring log stored in an APMX capture."""
+    limit = _limit(limit, "limit", 10_000)
+    result = capture_read_entry(file_path, "log/monitoring.txt", 16 * 1024 * 1024)
+    text = result.get("text")
+    if text is None:
+        raise ValueError("Capture monitoring log is not text")
+    needle = query.casefold()
+    lines = [
+        line.rstrip("\r")
+        for line in text.splitlines()
+        if not needle or needle in line.casefold()
+    ]
+    return {
+        "file": str(_capture_path(file_path)),
+        "query": query,
+        "lines": lines[:limit],
+        "count": len(lines),
+        "truncated": len(lines) > limit,
+    }
+
+
+@mcp.tool()
 def capture_hex(file_path: str, offset: int = 0, length: int = 256) -> dict[str, Any]:
     """Return a bounded hex/ASCII view of raw bytes from an APMX capture."""
     if offset < 0:
@@ -1150,6 +1177,7 @@ def _self_test() -> None:
         with zipfile.ZipFile(payload, "w", zipfile.ZIP_STORED) as archive:
             archive.writestr("metadata.txt", "process=sample.exe\n")
             archive.writestr("calls.bin", b"CreateFileW\x00https://example.test\x00")
+            archive.writestr("log/monitoring.txt", "sample.exe: Monitoring Module\n")
         path.write_bytes(b"APMX-BARE-BONES\x00" + payload.getvalue())
 
         info = _capture_info(path)
@@ -1157,8 +1185,14 @@ def _self_test() -> None:
         assert info["entries"][0]["name"] == "metadata.txt"
         strings = _capture_strings(path, "CreateFile", 10, 4)
         assert strings and "CreateFileW" in strings[0]["text"]
+        log = capture_monitoring_log(str(path), "module", 10)
+        assert log["lines"] == ["sample.exe: Monitoring Module"]
         entries = _zip_entries(path)
-        assert {entry["name"] for entry in entries} == {"metadata.txt", "calls.bin"}
+        assert {entry["name"] for entry in entries} == {
+            "metadata.txt",
+            "calls.bin",
+            "log/monitoring.txt",
+        }
         listed = capture_list_directory(directory, recursive=False, limit=10)
         assert listed["count"] == 1
 
