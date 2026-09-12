@@ -5971,6 +5971,71 @@ def capture_list_definitions(
 
 
 @mcp.tool()
+def capture_search_definitions(
+    file_path: str,
+    query: str,
+    process_index: int | None = None,
+    limit: int = 100,
+    max_records: int = 1_000_000,
+    include_details: bool = False,
+) -> dict[str, Any]:
+    """Search referenced API definitions, parameters, and nested types in a saved capture."""
+    if not query:
+        raise ValueError("query must not be empty")
+    if process_index is not None and process_index < 0:
+        raise ValueError("process_index must be non-negative")
+    limit = _limit(limit, "limit", 10_000)
+    max_records = _limit(max_records, "max_records", 1_000_000)
+    source = capture_list_definitions(
+        file_path,
+        process_index=process_index,
+        limit=10_000,
+        max_records=max_records,
+        include_details=True,
+    )
+    wanted = query.casefold()
+
+    def matching_paths(value: Any, path: str = "$") -> list[dict[str, str]]:
+        matches: list[dict[str, str]] = []
+        if isinstance(value, dict):
+            for key, child in value.items():
+                matches.extend(matching_paths(child, f"{path}.{key}"))
+                if len(matches) >= 32:
+                    break
+        elif isinstance(value, list):
+            for index, child in enumerate(value):
+                matches.extend(matching_paths(child, f"{path}[{index}]"))
+                if len(matches) >= 32:
+                    break
+        elif isinstance(value, str) and wanted in value.casefold():
+            matches.append({"path": path, "value": value})
+        return matches[:32]
+
+    matches = []
+    for item in source["definitions"]:
+        paths = matching_paths(item.get("details", {}))
+        if not paths:
+            continue
+        result = {key: value for key, value in item.items() if key != "details"}
+        result["matches"] = paths
+        if include_details:
+            result["details"] = item["details"]
+        matches.append(result)
+    return {
+        "file": source["file"],
+        "process_index": process_index,
+        "query": query,
+        "definitions_available": source["definitions_available"],
+        "matches": matches[:limit],
+        "count": len(matches),
+        "scanned_records": source["scanned_records"],
+        "unknown_records": source["unknown_records"],
+        "invalid_records": source["invalid_records"],
+        "truncated": source["truncated"] or len(matches) > limit,
+    }
+
+
+@mcp.tool()
 def capture_search_calls(
     file_path: str,
     query: str,
@@ -7313,6 +7378,14 @@ def _self_test() -> None:
         typed_structure = argument_search["matches"][0]["argument_matches"][0]["typed"]
         assert typed_structure["kind"] == "structure"
         assert typed_structure["fields"][0]["typed"]["value"] == 99
+        definition_search = capture_search_definitions(
+            str(argument_path), "dwValue", include_details=True
+        )
+        assert definition_search["count"] == 1
+        assert any(
+            match["path"].endswith(".name")
+            for match in definition_search["matches"][0]["matches"]
+        )
         call_window = capture_calls_around(str(path), 0, 0, before=2, after=2)
         assert call_window["window_start"] == 0
         assert call_window["records"][0]["is_target"]
