@@ -301,6 +301,29 @@ def _capture_record_size(offsets: list[int], index: int, data: bytes) -> int:
     return next_offset - offset if 144 <= next_offset - offset <= 160 else 160 if data[offset + 2] else 144
 
 
+def _capture_type_info(definitions: bytes, relative: int) -> dict[str, Any] | None:
+    if relative <= 0 or relative > len(definitions) - 48:
+        return None
+    type_info: dict[str, Any] = {
+        "offset": relative,
+        "kind": struct.unpack_from("<I", definitions, relative + 8)[0],
+        "size": definitions[relative + 32],
+        "flags": definitions[relative + 33],
+    }
+    for key, offset in (
+        ("name_offset", struct.unpack_from("<Q", definitions, relative)[0]),
+        ("alias_offset", struct.unpack_from("<Q", definitions, relative + 16)[0]),
+    ):
+        if offset < len(definitions):
+            end = definitions.find(b"\x00", offset)
+            if end >= 0:
+                type_info[key] = offset
+                type_info[key[:-7]] = definitions[offset:end].decode(
+                    "ascii", errors="replace"
+                )
+    return type_info
+
+
 def _capture_definition_info(definitions: bytes, relative: int) -> dict[str, Any]:
     result: dict[str, Any] = {"offset": relative, "valid": False}
     if relative < 0 or relative > len(definitions) - 64:
@@ -312,6 +335,7 @@ def _capture_definition_info(definitions: bytes, relative: int) -> dict[str, Any
     module_relative = struct.unpack_from("<Q", definitions, relative + 40)[0]
     parameter_count = definitions[relative + 2]
     parameter_table_relative = struct.unpack_from("<Q", definitions, relative + 32)[0]
+    return_descriptor_relative = struct.unpack_from("<Q", definitions, relative + 56)[0]
     result.update(
         {
             "flags": f"0x{flags:02x}",
@@ -320,6 +344,7 @@ def _capture_definition_info(definitions: bytes, relative: int) -> dict[str, Any
             "module_offset": module_relative,
             "parameter_count": parameter_count,
             "parameter_table_offset": parameter_table_relative,
+            "return_descriptor_offset": return_descriptor_relative,
         }
     )
     if name_relative >= len(definitions):
@@ -382,31 +407,21 @@ def _capture_definition_info(definitions: bytes, relative: int) -> dict[str, Any
                         parameter["name"] = definitions[name_offset:name_end].decode(
                             "ascii", errors="replace"
                         )
-                if type_offset <= len(definitions) - 48:
-                    type_name_offset = struct.unpack_from("<Q", definitions, type_offset)[0]
-                    type_alias_offset = struct.unpack_from("<Q", definitions, type_offset + 16)[0]
-                    type_info: dict[str, Any] = {
-                        "offset": type_offset,
-                        "kind": struct.unpack_from("<I", definitions, type_offset + 8)[0],
-                        "size": definitions[type_offset + 32],
-                        "flags": definitions[type_offset + 33],
-                    }
-                    for key, offset in (
-                        ("name_offset", type_name_offset),
-                        ("alias_offset", type_alias_offset),
-                    ):
-                        if offset < len(definitions):
-                            end = definitions.find(b"\x00", offset)
-                            if end >= 0:
-                                type_info[key] = offset
-                                type_info[key[:-7] if key.endswith("_offset") else key] = definitions[
-                                    offset:end
-                                ].decode("ascii", errors="replace")
+                type_info = _capture_type_info(definitions, type_offset)
+                if type_info:
                     parameter["type"] = type_info
                 parameters.append(parameter)
             result["parameters"] = parameters
         else:
             result["parameter_error"] = "parameter table exceeds definitions entry"
+    if return_descriptor_relative and return_descriptor_relative <= len(definitions) - 16:
+        return_type_relative = struct.unpack_from(
+            "<Q", definitions, return_descriptor_relative
+        )[0]
+        result["return_type_offset"] = return_type_relative
+        return_type = _capture_type_info(definitions, return_type_relative)
+        if return_type:
+            result["return_type"] = return_type
     result["valid"] = True
     return result
 
@@ -3268,12 +3283,37 @@ def capture_decode_call(
                     argument["typed"] = exact
             if parameters[argument["index"]].get("name"):
                 argument["name"] = parameters[argument["index"]]["name"]
+    return_reference = next(
+        (
+            reference
+            for reference in record.get("data_refs", [])
+            if reference.get("slot") == 2
+        ),
+        None,
+    )
+    return_value: dict[str, Any]
+    if not return_reference or return_reference.get("payload") is None:
+        return_value = {
+            "available": False,
+            "reason": "call has no bounded slot-2 return payload",
+        }
+    else:
+        return_payload = return_reference["payload"]
+        return_value = {"available": True, "payload": return_payload}
+        return_raw = _payload_bytes(return_payload)
+        return_type = definition.get("return_type")
+        if return_type:
+            exact = _capture_exact_scalar(return_raw, return_type)
+            if exact:
+                return_value["typed"] = exact
+            return_value["type"] = return_type
     return {
         "file": result["file"],
         "process_index": process_index,
         "record_index": record_index,
         "record": record,
         "argument_stream": argument_stream,
+        "return_value": return_value,
         "definitions_available": result["definitions_available"],
         "format": "APMX encoded parameter table; typed scalar values are exact, other values remain heuristic",
     }
@@ -4006,15 +4046,22 @@ def _self_test() -> None:
             struct.pack_into("<Q", record, 40, 16)
             struct.pack_into("<I", record, 32, 5)
             struct.pack_into("<Q", record, 112, 160)
+            struct.pack_into("<I", record, 92, 4)
+            struct.pack_into("<Q", record, 128, 165)
             archive.writestr("process/0/calls", struct.pack("<Q", 0))
-            archive.writestr("process/0/data", bytes(record) + b"hello")
-            definitions = bytearray(160)
+            archive.writestr("process/0/data", bytes(record) + b"hello" + struct.pack("<I", 7))
+            definitions = bytearray(256)
             struct.pack_into("<I", definitions, 16 + 8, 123)
             struct.pack_into("<Q", definitions, 16 + 24, 80)
             struct.pack_into("<Q", definitions, 16 + 40, 96)
+            struct.pack_into("<Q", definitions, 16 + 56, 208)
             definitions[80 : 80 + len(b"CreateFileW\x00")] = b"CreateFileW\x00"
             struct.pack_into("<Q", definitions, 96 + 16, 128)
             definitions[128 : 128 + len(b"kernel32.dll\x00")] = b"kernel32.dll\x00"
+            struct.pack_into("<Q", definitions, 208, 160)
+            struct.pack_into("<I", definitions, 160 + 8, 2)
+            definitions[160 + 32] = 4
+            definitions[240 : 240 + len(b"DWORD\x00")] = b"DWORD\x00"
             archive.writestr("definitions", bytes(definitions))
             archive.writestr(
                 "log/monitoring.txt",
@@ -4076,6 +4123,7 @@ def _self_test() -> None:
         decoded_call = capture_decode_call(str(path), 0, 0, resolve_definitions=True)
         assert decoded_call["record"]["data_refs"][0]["decoding"]["strings"][0]["text"] == "hello"
         assert decoded_call["record"]["definition"]["name"] == "CreateFileW"
+        assert decoded_call["return_value"]["typed"]["value"] == 7
         extracted_payload = Path(directory) / "payload.bin"
         payload_export = capture_extract_call_payload(str(path), 0, 0, 0, str(extracted_payload))
         assert payload_export["size"] == 5
@@ -4135,7 +4183,7 @@ def _self_test() -> None:
         assert processes["processes"][0]["call_count"] == 1
         call_stats = capture_call_stats(str(path), process_index=0)
         assert call_stats["processes"][0]["record_sizes"]["160"] == 1
-        assert call_stats["totals"]["referenced_data_bytes"] == 5
+        assert call_stats["totals"]["referenced_data_bytes"] == 9
         api_list = capture_list_apis(str(path))
         assert api_list["count"] == 1
         assert api_list["apis"][0]["name"] == "CreateFileW"
