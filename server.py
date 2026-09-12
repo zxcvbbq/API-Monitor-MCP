@@ -6860,6 +6860,16 @@ def capture_search_calls(
     include_record_bytes: bool = False,
     pid: int | None = None,
     query_regex: bool = False,
+    thread_id: int | None = None,
+    error_code: int | None = None,
+    flags: int | None = None,
+    api_name: str | None = None,
+    api_module: str | None = None,
+    definition_offset: int | None = None,
+    min_duration_seconds: float | None = None,
+    max_duration_seconds: float | None = None,
+    start_time_utc: str | None = None,
+    end_time_utc: str | None = None,
 ) -> dict[str, Any]:
     """Search saved call payloads, API definitions, and decoded arguments."""
     if not query and pattern_hex is None:
@@ -6868,6 +6878,36 @@ def capture_search_calls(
         raise ValueError("process_index must be non-negative")
     if pid is not None and not 1 <= pid <= 0xFFFFFFFF:
         raise ValueError("pid must be between 1 and 4294967295")
+    if thread_id is not None and not 0 <= thread_id <= 0xFFFFFFFF:
+        raise ValueError("thread_id must be between 0 and 4294967295")
+    if error_code is not None and not 0 <= error_code <= 0xFFFFFFFF:
+        raise ValueError("error_code must be between 0 and 4294967295")
+    if flags is not None and not 0 <= flags <= 0xFF:
+        raise ValueError("flags must be between 0 and 255")
+    if api_name is not None and not api_name.strip():
+        raise ValueError("api_name must be non-empty when provided")
+    if api_module is not None and not api_module.strip():
+        raise ValueError("api_module must be non-empty when provided")
+    if definition_offset is not None and definition_offset < 0:
+        raise ValueError("definition_offset must be non-negative")
+    if min_duration_seconds is not None and (
+        not math.isfinite(min_duration_seconds) or min_duration_seconds < 0
+    ):
+        raise ValueError("min_duration_seconds must be finite and non-negative")
+    if max_duration_seconds is not None and (
+        not math.isfinite(max_duration_seconds) or max_duration_seconds < 0
+    ):
+        raise ValueError("max_duration_seconds must be finite and non-negative")
+    if (
+        min_duration_seconds is not None
+        and max_duration_seconds is not None
+        and min_duration_seconds > max_duration_seconds
+    ):
+        raise ValueError("min_duration_seconds must not exceed max_duration_seconds")
+    start_filetime = _parse_utc_timestamp(start_time_utc)
+    end_filetime = _parse_utc_timestamp(end_time_utc)
+    if start_filetime is not None and end_filetime is not None and start_filetime > end_filetime:
+        raise ValueError("start_time_utc must not be after end_time_utc")
     if len(query) > 4096:
         raise ValueError("query must not exceed 4096 characters")
     limit = _limit(limit, "limit", 10_000)
@@ -6889,6 +6929,22 @@ def capture_search_calls(
             query_expression = re.compile(query, re.IGNORECASE)
         except re.error as exc:
             raise ValueError(f"invalid query regular expression: {exc}") from exc
+    resolve_definitions = resolve_definitions or any(
+        value is not None for value in (api_name, api_module, definition_offset)
+    )
+    filters = {
+        "pid": pid,
+        "thread_id": thread_id,
+        "error_code": error_code,
+        "flags": flags,
+        "api_name": api_name,
+        "api_module": api_module,
+        "definition_offset": definition_offset,
+        "min_duration_seconds": min_duration_seconds,
+        "max_duration_seconds": max_duration_seconds,
+        "start_time_utc": start_time_utc,
+        "end_time_utc": end_time_utc,
+    }
 
     def collect_byte_matches(
         payload: bytes,
@@ -6954,6 +7010,40 @@ def capture_search_calls(
             )
             for record in records:
                 scanned += 1
+                context = record.get("context", {})
+                duration = context.get("duration_seconds") if context.get("duration_valid") else None
+                if duration is not None and not math.isfinite(duration):
+                    duration = None
+                if thread_id is not None and context.get("thread_id") != thread_id:
+                    continue
+                if error_code is not None and context.get("error_code") != error_code:
+                    continue
+                if flags is not None and record.get("flags") != flags:
+                    continue
+                definition = record.get("definition", {})
+                if definition_offset is not None and definition.get("offset") != definition_offset:
+                    continue
+                if api_name is not None and api_name.casefold() not in str(
+                    definition.get("name", "")
+                ).casefold():
+                    continue
+                if api_module is not None and api_module.casefold() not in str(
+                    definition.get("module", "")
+                ).casefold():
+                    continue
+                timestamp = context.get("timestamp_filetime", 0)
+                if start_filetime is not None and (not timestamp or timestamp < start_filetime):
+                    continue
+                if end_filetime is not None and (not timestamp or timestamp > end_filetime):
+                    continue
+                if min_duration_seconds is not None and (
+                    duration is None or duration < min_duration_seconds
+                ):
+                    continue
+                if max_duration_seconds is not None and (
+                    duration is None or duration > max_duration_seconds
+                ):
+                    continue
                 payload_matches = []
                 for reference in record.get("data_refs", []):
                     text = reference.get("payload", {}).get("text")
@@ -6980,7 +7070,6 @@ def capture_search_calls(
                             "snippet": text[start:end],
                         }
                     )
-                definition = record.get("definition", {})
                 api_matches = []
                 api_text = f"{definition.get('name', '')} {definition.get('module', '')}"
                 api_matches_query = (
@@ -7081,6 +7170,7 @@ def capture_search_calls(
                             "query_regex": query_regex,
                             "process_index": process_index,
                             "pid": pid,
+                            "filters": filters,
                             "matches": matches,
                             "count": len(matches),
                             "scanned_records": scanned,
@@ -7097,6 +7187,7 @@ def capture_search_calls(
         "query_regex": query_regex,
         "process_index": process_index,
         "pid": pid,
+        "filters": filters,
         "matches": matches,
         "count": len(matches),
         "scanned_records": scanned,
@@ -8711,6 +8802,16 @@ def _self_test() -> None:
         api_search = capture_search_calls(str(path), "CreateFileW", resolve_definitions=True)
         assert api_search["count"] == 1
         assert api_search["matches"][0]["api_matches"][0]["module"] == "kernel32.dll"
+        filtered_search = capture_search_calls(
+            str(path),
+            "ell",
+            thread_id=0x1234,
+            error_code=5,
+            api_name="CreateFile",
+            min_duration_seconds=0.1,
+        )
+        assert filtered_search["count"] == 1
+        assert filtered_search["filters"]["api_name"] == "CreateFile"
         limited_api_search = capture_search_calls(
             str(path), "CreateFileW", limit=1, resolve_definitions=True
         )
