@@ -3355,6 +3355,171 @@ def api_monitor_gui_read(
 
 
 @mcp.tool()
+def api_monitor_gui_uia(
+    action: str = "read",
+    window_title: str = "",
+    window_handle: int | None = None,
+    control_name: str = "",
+    control_type: str = "",
+    control_handle: int | None = None,
+    text: str = "",
+    limit: int = 2000,
+    max_depth: int = 8,
+) -> dict[str, Any]:
+    """Read or invoke Rohitab controls through background Windows UI Automation."""
+    if sys.platform != "win32":
+        return {"supported": False, "windows": []}
+    if action not in {"read", "click", "set_text", "select"}:
+        raise ValueError("action must be read, click, set_text, or select")
+    if action != "read" and not control_name and control_handle is None:
+        raise ValueError("an action requires control_name or control_handle")
+    if control_handle is not None and control_handle < 1:
+        raise ValueError("control_handle must be positive")
+    limit = _limit(limit, "limit", 20_000)
+    if not 0 <= max_depth <= 32:
+        raise ValueError("max_depth must be between 0 and 32")
+    try:
+        from pywinauto import Desktop
+    except ImportError as exc:
+        raise RuntimeError("Install pywinauto for Rohitab UI Automation") from exc
+
+    pids = {
+        int(process["pid"])
+        for process in api_monitor_status().get("processes", [])
+        if isinstance(process.get("pid"), int)
+    }
+    windows = []
+    for window in Desktop(backend="uia").windows():
+        try:
+            if window.process_id() not in pids:
+                continue
+            if window_title and window.window_text() != window_title:
+                continue
+            if window_handle is not None and window.handle != window_handle:
+                continue
+            windows.append(window)
+        except (OSError, RuntimeError):
+            continue
+    if not windows:
+        raise LookupError("Rohitab UI Automation window was not found")
+
+    def control_info(control: Any, depth: int) -> dict[str, Any]:
+        try:
+            kind = control.element_info.control_type or ""
+        except (AttributeError, OSError, RuntimeError):
+            kind = ""
+        try:
+            name = _uia_text(control)
+        except (AttributeError, OSError, RuntimeError):
+            name = ""
+        try:
+            handle = int(control.handle) if control.handle is not None else None
+        except (AttributeError, TypeError, ValueError):
+            handle = None
+        try:
+            rectangle = _uia_rect(control)
+        except (OSError, RuntimeError):
+            rectangle = {}
+        try:
+            visible = bool(control.is_visible())
+        except (AttributeError, OSError, RuntimeError):
+            visible = None
+        try:
+            enabled = bool(control.is_enabled())
+        except (AttributeError, OSError, RuntimeError):
+            enabled = None
+        return {
+            "handle": handle,
+            "control_type": kind,
+            "name": name,
+            "rectangle": rectangle,
+            "visible": visible,
+            "enabled": enabled,
+            "depth": depth,
+        }
+
+    if action == "read":
+        returned_windows = []
+        item_count = 0
+        truncated = False
+
+        def walk(control: Any, depth: int, items: list[dict[str, Any]]) -> None:
+            nonlocal item_count, truncated
+            if item_count >= limit:
+                truncated = True
+                return
+            items.append(control_info(control, depth))
+            item_count += 1
+            if depth >= max_depth or item_count >= limit:
+                return
+            try:
+                children = control.children()
+            except (OSError, RuntimeError):
+                return
+            for child in children:
+                walk(child, depth + 1, items)
+                if item_count >= limit:
+                    truncated = True
+                    return
+
+        for window in windows:
+            items: list[dict[str, Any]] = []
+            walk(window, 0, items)
+            returned_windows.append(
+                {
+                    "handle": window.handle,
+                    "title": window.window_text(),
+                    "items": items,
+                }
+            )
+            if item_count >= limit:
+                break
+        return {
+            "supported": True,
+            "method": "background-ui-automation",
+            "windows": returned_windows,
+            "count": item_count,
+            "truncated": truncated,
+        }
+
+    matches = []
+    for window in windows:
+        try:
+            controls = [window, *window.descendants()]
+        except (OSError, RuntimeError):
+            continue
+        for control in controls:
+            info = control_info(control, 0)
+            if control_handle is not None and info["handle"] != control_handle:
+                continue
+            if control_name and info["name"] != control_name:
+                continue
+            if control_type and info["control_type"] != control_type:
+                continue
+            matches.append((window, control, info))
+    if len(matches) != 1:
+        raise ValueError("UIA action must identify exactly one control")
+    window, control, info = matches[0]
+    try:
+        if action == "click":
+            control.invoke()
+        elif action == "set_text":
+            control.set_edit_text(text)
+        else:
+            control.select()
+    except Exception as exc:
+        raise RuntimeError(f"Could not {action} Rohitab UIA control: {exc}") from exc
+    return {
+        "updated": True,
+        "method": "background-ui-automation",
+        "action": action,
+        "window": {"handle": window.handle, "title": window.window_text()},
+        "control": info,
+        "text": text if action == "set_text" else None,
+    }
+
+
+@mcp.tool()
 def api_monitor_gui_select_option(
     control_id: int,
     option: str,
@@ -7442,6 +7607,10 @@ def _self_test() -> None:
         api_search = capture_search_calls(str(path), "CreateFileW", resolve_definitions=True)
         assert api_search["count"] == 1
         assert api_search["matches"][0]["api_matches"][0]["module"] == "kernel32.dll"
+        limited_api_search = capture_search_calls(
+            str(path), "CreateFileW", limit=1, resolve_definitions=True
+        )
+        assert limited_api_search["definitions_resolved"]
         argument_path = Path(directory) / "variants" / "arguments.apmx64"
         argument_record = bytearray(160)
         argument_record[2] = 1
