@@ -3137,6 +3137,92 @@ def capture_call_stats(
 
 
 @mcp.tool()
+def capture_list_apis(
+    file_path: str,
+    process_index: int | None = None,
+    limit: int = 1000,
+    max_records: int = 1_000_000,
+) -> dict[str, Any]:
+    """List resolved API definitions ordered by saved call frequency."""
+    if process_index is not None and process_index < 0:
+        raise ValueError("process_index must be non-negative")
+    limit = _limit(limit, "limit", 10_000)
+    max_records = _limit(max_records, "max_records", 1_000_000)
+    path = _capture_path(file_path)
+    archive, _, _ = _open_capture_zip(path)
+    apis: dict[int, dict[str, Any]] = {}
+    scanned = 0
+    truncated = False
+    with archive:
+        entries = {info.filename for info in archive.infolist()}
+        if "definitions" not in entries:
+            return {
+                "file": str(path),
+                "process_index": process_index,
+                "definitions_available": False,
+                "apis": [],
+                "count": 0,
+                "scanned_records": 0,
+                "truncated": False,
+            }
+        definitions = archive.read("definitions")
+        process_indices = sorted(
+            int(match.group(1))
+            for name in entries
+            if (match := re.fullmatch(r"process/(\d+)/calls", name, re.I))
+            and (process_index is None or int(match.group(1)) == process_index)
+        )
+        for index in process_indices:
+            calls = archive.read(f"process/{index}/calls")
+            data_name = f"process/{index}/data"
+            data = archive.read(data_name) if data_name in entries else b""
+            if len(calls) % 8:
+                raise ValueError(f"process/{index}/calls is not an array of 64-bit offsets")
+            record_count = len(calls) // 8
+            page_count = min(record_count, max_records - scanned)
+            truncated |= page_count < record_count
+            records = _capture_call_records(
+                calls, data, page_count, False, 0, definitions=definitions
+            )
+            for record in records:
+                scanned += 1
+                definition = record.get("definition", {})
+                if not definition.get("valid"):
+                    continue
+                offset = definition["offset"]
+                item = apis.setdefault(
+                    offset,
+                    {
+                        "offset": offset,
+                        "name": definition.get("name"),
+                        "module": definition.get("module"),
+                        "ordinal": definition.get("ordinal"),
+                        "count": 0,
+                        "process_indices": [],
+                        "first_record": record["index"],
+                        "last_record": record["index"],
+                    },
+                )
+                item["count"] += 1
+                if index not in item["process_indices"]:
+                    item["process_indices"].append(index)
+                item["first_record"] = min(item["first_record"], record["index"])
+                item["last_record"] = max(item["last_record"], record["index"])
+            if scanned >= max_records:
+                break
+    returned = sorted(apis.values(), key=lambda item: (-item["count"], item["name"] or ""))
+    return {
+        "file": str(path),
+        "process_index": process_index,
+        "definitions_available": True,
+        "apis": returned[:limit],
+        "count": len(returned),
+        "scanned_records": scanned,
+        "truncated": truncated or len(returned) > limit,
+    }
+
+
+@mcp.tool()
 def capture_search_calls(
     file_path: str,
     query: str,
@@ -3845,6 +3931,10 @@ def _self_test() -> None:
         call_stats = capture_call_stats(str(path), process_index=0)
         assert call_stats["processes"][0]["record_sizes"]["160"] == 1
         assert call_stats["totals"]["referenced_data_bytes"] == 5
+        api_list = capture_list_apis(str(path))
+        assert api_list["count"] == 1
+        assert api_list["apis"][0]["name"] == "CreateFileW"
+        assert api_list["apis"][0]["count"] == 1
         entries = _zip_entries(path)
         assert {entry["name"] for entry in entries} == {
             "metadata.txt",
