@@ -1439,6 +1439,49 @@ def capture_hex(file_path: str, offset: int = 0, length: int = 256) -> dict[str,
 
 
 @mcp.tool()
+def capture_find_bytes(
+    file_path: str,
+    pattern_hex: str,
+    limit: int = 1000,
+    start_offset: int = 0,
+) -> dict[str, Any]:
+    """Find a hexadecimal byte pattern in an APMX file and return raw offsets."""
+    if not pattern_hex.strip():
+        raise ValueError("pattern_hex must not be empty")
+    limit = _limit(limit, "limit", 10_000)
+    if start_offset < 0:
+        raise ValueError("start_offset must be non-negative")
+    try:
+        pattern = bytes.fromhex(pattern_hex)
+    except ValueError as exc:
+        raise ValueError("pattern_hex must contain hexadecimal bytes") from exc
+    if not pattern or len(pattern) > 256:
+        raise ValueError("pattern_hex must contain between 1 and 256 bytes")
+    path = _capture_path(file_path)
+    offsets: list[int] = []
+    truncated = False
+    with path.open("rb") as handle:
+        if start_offset >= path.stat().st_size:
+            return {"file": str(path), "pattern_hex": pattern.hex(" "), "offsets": [], "count": 0}
+        with mmap.mmap(handle.fileno(), 0, access=mmap.ACCESS_READ) as data:
+            offset = data.find(pattern, start_offset)
+            while offset >= 0:
+                if len(offsets) >= limit:
+                    truncated = True
+                    break
+                offsets.append(offset)
+                offset = data.find(pattern, offset + 1)
+    return {
+        "file": str(path),
+        "pattern_hex": pattern.hex(" "),
+        "start_offset": start_offset,
+        "offsets": offsets,
+        "count": len(offsets),
+        "truncated": truncated,
+    }
+
+
+@mcp.tool()
 def capture_list_directory(
     directory: str,
     recursive: bool = True,
@@ -1579,6 +1622,9 @@ def _self_test() -> None:
         searched = capture_search_entries(str(path), "CreateFile", 1)
         assert searched["entries"][0]["entry"] == "calls.bin"
         assert not searched["truncated"]
+        found = capture_find_bytes(str(path), "43 72 65 61 74 65", 10)
+        assert found["offsets"]
+        assert not found["truncated"]
         processes = capture_list_processes(str(path), 10)
         assert processes["processes"][0]["executables"] == ["C:\\sample.exe"]
         entries = _zip_entries(path)
