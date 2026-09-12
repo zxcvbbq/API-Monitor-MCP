@@ -5888,6 +5888,64 @@ def capture_decode_calls(
 
 
 @mcp.tool()
+def capture_decode_all_calls(
+    file_path: str,
+    limit: int = 10_000,
+    max_data_bytes: int = 4096,
+    max_items: int = 64,
+    resolve_definitions: bool = False,
+) -> dict[str, Any]:
+    """Decode a bounded page of saved calls across every captured process."""
+    limit = _limit(limit, "limit", 10_000)
+    max_data_bytes = _limit(max_data_bytes, "max_data_bytes", 16 * 1024 * 1024)
+    max_items = _limit(max_items, "max_items", 256)
+    path = _capture_path(file_path)
+    pointer_size = 4 if path.suffix.lower() == ".apmx86" else 8
+    call_entries = [
+        (int(match.group(1)), entry["size"])
+        for entry in _zip_entries(path)
+        if (match := re.fullmatch(r"process/(\d+)/calls", entry["name"], re.IGNORECASE))
+    ]
+    if any(size % pointer_size for _, size in call_entries):
+        raise ValueError("process calls entry is not an array of saved offsets")
+    indices = sorted(index for index, _ in call_entries)
+    total_count = sum(size // pointer_size for _, size in call_entries)
+    processes = []
+    remaining = limit
+    truncated = False
+    for index in indices:
+        if remaining <= 0:
+            truncated = True
+            break
+        page = capture_decode_calls(
+            str(path),
+            process_index=index,
+            limit=remaining,
+            max_data_bytes=max_data_bytes,
+            max_items=max_items,
+            resolve_definitions=resolve_definitions,
+        )
+        processes.append(page)
+        remaining -= len(page["records"])
+        if page["truncated"]:
+            truncated = True
+            break
+    return {
+        "file": str(path),
+        "architecture": "x86" if path.suffix.lower() == ".apmx86" else "x64",
+        "process_indices": indices,
+        "processes": processes,
+        "count": sum(len(process["records"]) for process in processes),
+        "total_count": total_count,
+        "definitions_available": {
+            str(process["process_index"]): process["definitions_available"]
+            for process in processes
+        },
+        "truncated": truncated,
+    }
+
+
+@mcp.tool()
 def capture_call_stats(
     file_path: str,
     process_index: int | None = None,
@@ -8004,6 +8062,11 @@ def _self_test() -> None:
         )
         assert multi_export["process_indices"] == [0, 1]
         assert multi_export["count"] == 2
+        decoded_all = capture_decode_all_calls(str(multi_path), limit=2)
+        assert decoded_all["process_indices"] == [0, 1]
+        assert decoded_all["count"] == 2
+        assert decoded_all["total_count"] == 2
+        assert len(decoded_all["processes"]) == 2
 
         x86_path = Path(directory) / "sample.apmx86"
         x86_record = bytearray(120)
