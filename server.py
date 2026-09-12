@@ -2867,6 +2867,7 @@ def api_monitor_gui_lists(
                     "rectangle": _uia_rect(control),
                     "headers": headers,
                     "rows": rows[:limit],
+                    "records": _named_gui_rows(headers, rows[:limit]),
                     "truncated": truncated,
                 }
             )
