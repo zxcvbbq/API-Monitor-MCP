@@ -1761,7 +1761,9 @@ def _capture_enum_annotation(value: int, type_info: dict[str, Any]) -> dict[str,
     return {"names": names, "remaining": 0 if names else value}
 
 
-def _capture_array_element_size(type_info: dict[str, Any], depth: int = 0) -> int | None:
+def _capture_array_element_size(
+    type_info: dict[str, Any], depth: int = 0, machine_flag: bool = False
+) -> int | None:
     if depth >= 4:
         return None
     kind = type_info.get("kind")
@@ -1772,7 +1774,7 @@ def _capture_array_element_size(type_info: dict[str, Any], depth: int = 0) -> in
     if kind in (4, 6):
         return pointer_size
     if kind == 7 or kind == 9:
-        return 1
+        return 2 if kind == 9 and machine_flag else 1
     if kind == 8:
         return 2
     if kind == 11:
@@ -1785,19 +1787,21 @@ def _capture_array_element_size(type_info: dict[str, Any], depth: int = 0) -> in
         count = type_info.get("array_count")
         if not isinstance(element_type, dict) or not isinstance(count, int):
             return None
-        element_size = _capture_array_element_size(element_type, depth + 1)
+        element_size = _capture_array_element_size(element_type, depth + 1, machine_flag)
         return element_size * count if element_size is not None else None
     return pointer_size
 
 
-def _capture_type_alignment(type_info: dict[str, Any], depth: int = 0) -> int | None:
+def _capture_type_alignment(
+    type_info: dict[str, Any], depth: int = 0, machine_flag: bool = False
+) -> int | None:
     if depth >= 4:
         return None
     kind = type_info.get("kind")
     if kind == 14:
         element_type = type_info.get("element_type")
         return (
-            _capture_type_alignment(element_type, depth + 1)
+            _capture_type_alignment(element_type, depth + 1, machine_flag)
             if isinstance(element_type, dict)
             else None
         )
@@ -1806,16 +1810,16 @@ def _capture_type_alignment(type_info: dict[str, Any], depth: int = 0) -> int | 
         if isinstance(alignment, int) and alignment > 0:
             return alignment
         alignments = [
-            _capture_type_alignment(field["type"], depth + 1)
+            _capture_type_alignment(field["type"], depth + 1, machine_flag)
             for field in type_info.get("fields", [])
             if isinstance(field.get("type"), dict)
         ]
         return max(alignments, default=None)
-    return _capture_array_element_size(type_info, depth)
+    return _capture_array_element_size(type_info, depth, machine_flag)
 
 
 def _capture_exact_fixed_structure(
-    data: bytes, type_info: dict[str, Any], depth: int
+    data: bytes, type_info: dict[str, Any], depth: int, machine_flag: bool
 ) -> dict[str, Any] | None:
     if depth >= 4:
         return None
@@ -1826,8 +1830,8 @@ def _capture_exact_fixed_structure(
         field_type = field.get("type")
         if not isinstance(field_type, dict):
             return None
-        size = _capture_array_element_size(field_type, depth + 1)
-        alignment = _capture_type_alignment(field_type, depth + 1) or 1
+        size = _capture_array_element_size(field_type, depth + 1, machine_flag)
+        alignment = _capture_type_alignment(field_type, depth + 1, machine_flag) or 1
         if offset % alignment:
             offset += alignment - offset % alignment
         item: dict[str, Any] = {
@@ -1843,7 +1847,7 @@ def _capture_exact_fixed_structure(
         else:
             raw = data[offset : offset + size]
             item["payload"] = _read_payload(raw)
-            typed = _capture_exact_value(raw, field_type, depth + 1)
+            typed = _capture_exact_value(raw, field_type, depth + 1, machine_flag)
             if typed:
                 item["typed"] = typed
         decoded_fields.append(item)
@@ -1861,12 +1865,12 @@ def _capture_exact_fixed_structure(
 
 
 def _capture_exact_array(
-    data: bytes, type_info: dict[str, Any], depth: int
+    data: bytes, type_info: dict[str, Any], depth: int, machine_flag: bool
 ) -> dict[str, Any] | None:
     element_type = type_info.get("element_type")
     if not isinstance(element_type, dict) or depth >= 4:
         return None
-    element_size = _capture_array_element_size(element_type)
+    element_size = _capture_array_element_size(element_type, machine_flag=machine_flag)
     if element_size is None or element_size <= 0:
         return None
     declared_count = type_info.get("array_count")
@@ -1903,7 +1907,7 @@ def _capture_exact_array(
                 "valid": True,
                 "payload": _read_payload(raw),
             }
-            typed = _capture_exact_value(raw, element_type, depth + 1)
+            typed = _capture_exact_value(raw, element_type, depth + 1, machine_flag)
             if typed:
                 item["typed"] = typed
             elements.append(item)
@@ -1932,7 +1936,7 @@ def _capture_exact_array(
             else:
                 raw = data[table_bytes + offset : table_bytes + offset + length]
                 item["payload"] = _read_payload(raw)
-                typed = _capture_exact_value(raw, element_type, depth + 1)
+                typed = _capture_exact_value(raw, element_type, depth + 1, machine_flag)
                 if typed:
                     item["typed"] = typed
             elements.append(item)
@@ -1948,7 +1952,9 @@ def _capture_exact_array(
     }
 
 
-def _capture_exact_scalar(data: bytes, type_info: dict[str, Any]) -> dict[str, Any] | None:
+def _capture_exact_scalar(
+    data: bytes, type_info: dict[str, Any], machine_flag: bool = False
+) -> dict[str, Any] | None:
     kind = type_info.get("kind")
     size = type_info.get("size")
     if kind == 13:
@@ -2002,6 +2008,8 @@ def _capture_exact_scalar(data: bytes, type_info: dict[str, Any]) -> dict[str, A
             8: ("utf-16-le",),
             9: ("utf-8", "utf-16-le"),
         }[kind]
+        if kind == 9:
+            encodings = ("utf-16-le",) if machine_flag else ("utf-8",)
         for encoding in encodings:
             try:
                 value = raw.decode(encoding).rstrip("\x00")
@@ -2061,15 +2069,22 @@ def _capture_exact_scalar(data: bytes, type_info: dict[str, Any]) -> dict[str, A
 
 
 def _capture_exact_value(
-    data: bytes, type_info: dict[str, Any], depth: int = 0
+    data: bytes,
+    type_info: dict[str, Any],
+    depth: int = 0,
+    machine_flag: bool = False,
 ) -> dict[str, Any] | None:
-    scalar = _capture_exact_scalar(data, type_info)
+    scalar = _capture_exact_scalar(data, type_info, machine_flag)
     if scalar or type_info.get("kind") == 14:
-        return _capture_exact_array(data, type_info, depth) if not scalar else scalar
+        return (
+            _capture_exact_array(data, type_info, depth, machine_flag)
+            if not scalar
+            else scalar
+        )
     if type_info.get("kind") != 11 or depth >= 4:
         return scalar
     if int(type_info.get("struct_flags", 0)) & 2:
-        return _capture_exact_fixed_structure(data, type_info, depth)
+        return _capture_exact_fixed_structure(data, type_info, depth, machine_flag)
     fields = type_info.get("fields", [])
     if not fields:
         return None
@@ -2098,7 +2113,7 @@ def _capture_exact_value(
             item["payload"] = _read_payload(raw)
             field_type = field.get("type")
             if field_type:
-                typed = _capture_exact_value(raw, field_type, depth + 1)
+                typed = _capture_exact_value(raw, field_type, depth + 1, machine_flag)
                 if typed:
                     item["typed"] = typed
         decoded_fields.append(item)
@@ -2128,6 +2143,11 @@ def _capture_decoded_argument_stream(
         max_data_bytes=max_data_bytes,
     )
     parameters = definition.get("parameters", [])
+    try:
+        definition_flags = int(definition.get("flags", "0"), 0)
+    except (TypeError, ValueError):
+        definition_flags = 0
+    machine_flag = bool(definition_flags & 8)
     for argument in stream.get("arguments", []):
         raw = argument.pop("_raw", None)
         if raw is None or argument["index"] >= len(parameters):
@@ -2135,7 +2155,7 @@ def _capture_decoded_argument_stream(
         parameter = parameters[argument["index"]]
         type_info = parameter.get("type")
         if type_info:
-            exact = _capture_exact_value(raw, type_info)
+            exact = _capture_exact_value(raw, type_info, machine_flag=machine_flag)
             if exact:
                 argument["typed"] = exact
         if parameter.get("name"):
@@ -4320,7 +4340,13 @@ def capture_decode_call(
         return_raw = _payload_bytes(return_payload)
         return_type = definition.get("return_type")
         if return_type:
-            exact = _capture_exact_value(return_raw, return_type)
+            try:
+                definition_flags = int(definition.get("flags", "0"), 0)
+            except (TypeError, ValueError):
+                definition_flags = 0
+            exact = _capture_exact_value(
+                return_raw, return_type, machine_flag=bool(definition_flags & 8)
+            )
             if exact:
                 return_value["typed"] = exact
             return_value["type"] = return_type
@@ -5326,6 +5352,11 @@ def _self_test() -> None:
         assert _capture_exact_scalar(
             struct.pack("<HH", 1, 5) + b"hello", {"kind": 7, "flags": 0}
         )["value"] == "hello"
+        assert _capture_exact_scalar(
+            struct.pack("<HH", 1, 8) + "wide".encode("utf-16-le"),
+            {"kind": 9, "flags": 0},
+            machine_flag=True,
+        )["value"] == "wide"
         assert _capture_exact_scalar(
             bytes(range(16)), {"kind": 13, "flags": 0}
         )["value"] == "{03020100-0504-0706-0809-0a0b0c0d0e0f}"
