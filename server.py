@@ -706,6 +706,29 @@ def api_monitor_gui_select(
 
 
 @mcp.tool()
+def api_monitor_traffic(window_title: str = "", limit: int = 500) -> dict[str, Any]:
+    """Read captured API-call rows from Rohitab's background traffic panes."""
+    limit = _limit(limit, "limit", 2000)
+    lists = api_monitor_gui_lists(window_title, limit)
+    traffic: list[dict[str, Any]] = []
+    for window in lists.get("windows", []):
+        for pane in window.get("lists", []):
+            headers = pane.get("headers", [])
+            if "API" not in headers or "Module" not in headers:
+                continue
+            traffic.append(
+                {
+                    "window": {"handle": window["handle"], "title": window["title"]},
+                    "list_handle": pane["handle"],
+                    "headers": headers,
+                    "rows": pane["rows"],
+                    "truncated": pane["truncated"],
+                }
+            )
+    return {"supported": lists.get("supported", False), "panes": traffic}
+
+
+@mcp.tool()
 def api_monitor_add_display_filter(
     field: str,
     operator: str,
