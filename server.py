@@ -677,7 +677,13 @@ def _tree_items(handle: int, limit: int, max_depth: int) -> list[dict[str, Any]]
         raise OSError(ctypes.get_last_error(), "Could not inspect API Monitor tree")
     process = kernel32.OpenProcess(0x438, False, process_id.value)  # query/read/write/allocate
     if not process:
-        raise OSError(ctypes.get_last_error(), "Could not open API Monitor tree process")
+        error = ctypes.get_last_error()
+        if error == 5:
+            raise PermissionError(
+                error,
+                "API Monitor tree requires the MCP client to run at the same elevation level",
+            )
+        raise OSError(error, "Could not open API Monitor tree process")
 
     class TreeItem(ctypes.Structure):
         _fields_ = [
