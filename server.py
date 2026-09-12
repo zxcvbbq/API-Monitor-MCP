@@ -16,6 +16,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
@@ -243,6 +244,11 @@ def _find_api_monitor_windows() -> list[dict[str, Any]]:
     ]
     enum_children.restype = ctypes.c_bool
 
+    api_monitor_pids = {
+        int(process["pid"])
+        for process in api_monitor_status().get("processes", [])
+        if isinstance(process.get("pid"), int)
+    }
     windows: list[dict[str, Any]] = []
     child_callback_type = ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)
     window_callback_type = ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)
@@ -263,11 +269,11 @@ def _find_api_monitor_windows() -> list[dict[str, Any]]:
     @window_callback_type
     def window_callback(handle: Any, _param: Any) -> bool:
         title = _window_text(user32, handle)
-        if "api monitor" not in title.casefold():
-            return True
-        window = _ui_window(handle, user32)
         process_id = wintypes.DWORD()
         get_pid(handle, ctypes.byref(process_id))
+        if process_id.value not in api_monitor_pids:
+            return True
+        window = _ui_window(handle, user32)
         window["pid"] = int(process_id.value)
         add_children(window)
         windows.append(window)
@@ -275,6 +281,36 @@ def _find_api_monitor_windows() -> list[dict[str, Any]]:
 
     enum_windows(window_callback, 0)
     return windows
+
+
+def _find_control(windows: list[dict[str, Any]], control_id: int) -> dict[str, Any] | None:
+    for window in windows:
+        for child in window.get("children", []):
+            if child.get("control_id") == control_id:
+                return child
+    return None
+
+
+def _post_button_click(handle: int) -> None:
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+    if not user32.PostMessageW(handle, 0x00F5, 0, 0):  # BM_CLICK
+        raise OSError(ctypes.get_last_error(), "Could not click API Monitor control")
+
+
+def _set_control_text(handle: int, text: str) -> None:
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+    if user32.SendMessageW(handle, 0x000C, 0, ctypes.c_wchar_p(text)) == 0:  # WM_SETTEXT
+        raise OSError(ctypes.get_last_error(), "Could not set API Monitor control text")
+
+
+def _wait_for_api_monitor_window(predicate: Any, timeout_seconds: float) -> dict[str, Any] | None:
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        for window in _find_api_monitor_windows():
+            if predicate(window):
+                return window
+        time.sleep(0.1)
+    return None
 
 
 def _read_payload(data: bytes) -> dict[str, Any]:
@@ -329,6 +365,83 @@ def api_monitor_ui_tree() -> dict[str, Any]:
     if sys.platform != "win32":
         return {"supported": False, "windows": []}
     return {"supported": True, "windows": _find_api_monitor_windows()}
+
+
+@mcp.tool()
+def api_monitor_monitor_process(
+    process_path: str,
+    architecture: str = "x64",
+    arguments: str = "",
+    start_in: str = "",
+    timeout_seconds: int = 10,
+) -> dict[str, Any]:
+    """Start monitoring an executable through Rohitab's native Monitor Process dialog."""
+    if sys.platform != "win32":
+        raise RuntimeError("Starting API Monitor sessions requires Windows")
+    if timeout_seconds < 1 or timeout_seconds > 60:
+        raise ValueError("timeout_seconds must be between 1 and 60")
+    target = Path(process_path).expanduser()
+    if not target.is_file():
+        raise FileNotFoundError(f"Target process not found: {target}")
+    target = target.resolve()
+    if start_in:
+        start_directory = Path(start_in).expanduser()
+        if not start_directory.is_dir():
+            raise NotADirectoryError(f"Start directory not found: {start_directory}")
+        start_in = str(start_directory.resolve())
+
+    windows = _find_api_monitor_windows()
+    main_window = next(
+        (window for window in windows if "api monitor v2" in window["title"].casefold()),
+        None,
+    )
+    if main_window is None:
+        api_monitor_launch(architecture)
+        main_window = _wait_for_api_monitor_window(
+            lambda window: "api monitor v2" in window["title"].casefold(), timeout_seconds
+        )
+    if main_window is None:
+        raise TimeoutError("API Monitor main window did not appear")
+
+    dialog = next((window for window in windows if window["title"] == "Monitor Process"), None)
+    if dialog is None:
+        button = next(
+            (
+                child
+                for child in main_window.get("children", [])
+                if child.get("title") == "Monitor New Process"
+            ),
+            None,
+        )
+        if button is None:
+            raise RuntimeError("Monitor New Process button not found")
+        _post_button_click(button["handle"])
+        dialog = _wait_for_api_monitor_window(
+            lambda window: window["title"] == "Monitor Process", timeout_seconds
+        )
+    if dialog is None:
+        raise TimeoutError("Monitor Process dialog did not appear")
+
+    controls = {child.get("control_id"): child for child in dialog.get("children", [])}
+    process_edit = controls.get(2081)
+    arguments_edit = controls.get(2007)
+    start_edit = controls.get(2022)
+    ok_button = controls.get(1)
+    if not process_edit or not ok_button:
+        raise RuntimeError("Monitor Process dialog controls were not found")
+    _set_control_text(process_edit["handle"], str(target))
+    if arguments and arguments_edit:
+        _set_control_text(arguments_edit["handle"], arguments)
+    if start_in and start_edit:
+        _set_control_text(start_edit["handle"], start_in)
+    _post_button_click(ok_button["handle"])
+    return {
+        "submitted": True,
+        "process": str(target),
+        "architecture": architecture,
+        "arguments": arguments,
+        "start_in": start_in,
+    }
 
 
 @mcp.tool()
