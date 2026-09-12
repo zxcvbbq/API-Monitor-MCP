@@ -5444,6 +5444,77 @@ def capture_filter_calls(
 
 
 @mcp.tool()
+def capture_call_timeline(
+    file_path: str,
+    process_index: int | None = None,
+    start_time_utc: str | None = None,
+    end_time_utc: str | None = None,
+    order_by: str = "timestamp",
+    descending: bool = False,
+    limit: int = 500,
+    max_records: int = 100_000,
+    include_data: bool = False,
+    max_data_bytes: int = 4096,
+    resolve_definitions: bool = False,
+) -> dict[str, Any]:
+    """Return saved calls as one bounded cross-process timeline."""
+    if order_by not in {"timestamp", "capture"}:
+        raise ValueError("order_by must be timestamp or capture")
+    limit = _limit(limit, "limit", 10_000)
+    max_records = _limit(max_records, "max_records", 1_000_000)
+    filtered = capture_filter_calls(
+        file_path,
+        process_index=process_index,
+        start_time_utc=start_time_utc,
+        end_time_utc=end_time_utc,
+        limit=10_000,
+        max_records=max_records,
+        include_data=include_data,
+        max_data_bytes=max_data_bytes,
+        resolve_definitions=resolve_definitions,
+    )
+    events = list(filtered["matches"])
+    if order_by == "capture":
+        events.sort(
+            key=lambda item: (item["process_index"], item["record"].get("index", 0)),
+            reverse=descending,
+        )
+    else:
+        with_timestamps = [
+            item
+            for item in events
+            if item["record"].get("context", {}).get("timestamp_filetime")
+        ]
+        without_timestamps = [
+            item
+            for item in events
+            if not item["record"].get("context", {}).get("timestamp_filetime")
+        ]
+        with_timestamps.sort(
+            key=lambda item: (
+                item["record"]["context"]["timestamp_filetime"],
+                item["process_index"],
+                item["record"].get("index", 0),
+            ),
+            reverse=descending,
+        )
+        events = with_timestamps + without_timestamps
+    return {
+        "file": filtered["file"],
+        "process_index": process_index,
+        "order_by": order_by,
+        "descending": descending,
+        "start_time_utc": start_time_utc,
+        "end_time_utc": end_time_utc,
+        "timeline": events[:limit],
+        "count": min(len(events), limit),
+        "scanned_records": filtered["scanned_records"],
+        "truncated": filtered["truncated"] or len(events) > limit,
+        "definitions_resolved": resolve_definitions,
+    }
+
+
+@mcp.tool()
 def capture_calls_around(
     file_path: str,
     process_index: int,
@@ -6071,6 +6142,9 @@ def _self_test() -> None:
         )
         assert filtered["count"] == 1
         assert filtered["matches"][0]["record"]["index"] == 0
+        timeline = capture_call_timeline(str(path), order_by="timestamp")
+        assert timeline["count"] == 1
+        assert timeline["timeline"][0]["record"]["context"]["timestamp_utc"] == "2020-01-01T00:00:00+00:00"
         resolved_records = capture_call_records(str(path), resolve_definitions=True)
         assert resolved_records["definitions_available"]
         assert resolved_records["records"][0]["definition"]["name"] == "CreateFileW"
