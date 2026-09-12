@@ -6290,10 +6290,13 @@ def capture_list_apis(
     process_index: int | None = None,
     limit: int = 1000,
     max_records: int = 1_000_000,
+    pid: int | None = None,
 ) -> dict[str, Any]:
     """List resolved API definitions ordered by saved call frequency."""
     if process_index is not None and process_index < 0:
         raise ValueError("process_index must be non-negative")
+    if pid is not None and not 1 <= pid <= 0xFFFFFFFF:
+        raise ValueError("pid must be between 1 and 4294967295")
     limit = _limit(limit, "limit", 10_000)
     max_records = _limit(max_records, "max_records", 1_000_000)
     path = _capture_path(file_path)
@@ -6308,6 +6311,7 @@ def capture_list_apis(
             return {
                 "file": str(path),
                 "process_index": process_index,
+                "pid": pid,
                 "definitions_available": False,
                 "apis": [],
                 "count": 0,
@@ -6326,6 +6330,8 @@ def capture_list_apis(
             data_name = f"process/{index}/data"
             data = archive.read(data_name) if data_name in entries else b""
             process_pid = _capture_process_pid(archive, entries, index, pointer_size)
+            if pid is not None and process_pid != pid:
+                continue
             if len(calls) % pointer_size:
                 raise ValueError(
                     f"process/{index}/calls is not an array of {pointer_size * 8}-bit offsets"
@@ -6404,6 +6410,7 @@ def capture_list_apis(
     return {
         "file": str(path),
         "process_index": process_index,
+        "pid": pid,
         "definitions_available": True,
         "apis": returned[:limit],
         "count": len(returned),
@@ -6419,10 +6426,13 @@ def capture_list_definitions(
     limit: int = 1000,
     max_records: int = 1_000_000,
     include_details: bool = False,
+    pid: int | None = None,
 ) -> dict[str, Any]:
     """List API definitions referenced by saved calls, including unresolved offsets."""
     if process_index is not None and process_index < 0:
         raise ValueError("process_index must be non-negative")
+    if pid is not None and not 1 <= pid <= 0xFFFFFFFF:
+        raise ValueError("pid must be between 1 and 4294967295")
     limit = _limit(limit, "limit", 10_000)
     max_records = _limit(max_records, "max_records", 1_000_000)
     path = _capture_path(file_path)
@@ -6439,6 +6449,7 @@ def capture_list_definitions(
             return {
                 "file": str(path),
                 "process_index": process_index,
+                "pid": pid,
                 "definitions_available": False,
                 "definitions": [],
                 "count": 0,
@@ -6461,6 +6472,8 @@ def capture_list_definitions(
             calls = archive.read(calls_name)
             data = archive.read(data_name) if data_name in entries else b""
             process_pid = _capture_process_pid(archive, entries, index, pointer_size)
+            if pid is not None and process_pid != pid:
+                continue
             if len(calls) % pointer_size:
                 raise ValueError(
                     f"process/{index}/calls is not an array of {pointer_size * 8}-bit offsets"
@@ -6536,6 +6549,7 @@ def capture_list_definitions(
     return {
         "file": str(path),
         "process_index": process_index,
+        "pid": pid,
         "definitions_available": True,
         "definitions": returned[:limit],
         "count": len(returned),
@@ -6555,12 +6569,15 @@ def capture_search_definitions(
     limit: int = 100,
     max_records: int = 1_000_000,
     include_details: bool = False,
+    pid: int | None = None,
 ) -> dict[str, Any]:
     """Search referenced API definitions, parameters, and nested types in a saved capture."""
     if not query:
         raise ValueError("query must not be empty")
     if process_index is not None and process_index < 0:
         raise ValueError("process_index must be non-negative")
+    if pid is not None and not 1 <= pid <= 0xFFFFFFFF:
+        raise ValueError("pid must be between 1 and 4294967295")
     limit = _limit(limit, "limit", 10_000)
     max_records = _limit(max_records, "max_records", 1_000_000)
     source = capture_list_definitions(
@@ -6569,6 +6586,7 @@ def capture_search_definitions(
         limit=10_000,
         max_records=max_records,
         include_details=True,
+        pid=pid,
     )
     wanted = query.casefold()
 
@@ -6601,6 +6619,7 @@ def capture_search_definitions(
     return {
         "file": source["file"],
         "process_index": process_index,
+        "pid": pid,
         "query": query,
         "definitions_available": source["definitions_available"],
         "matches": matches[:limit],
@@ -6622,12 +6641,15 @@ def capture_export_definitions(
     output_format: str = "json",
     include_details: bool = True,
     overwrite: bool = False,
+    pid: int | None = None,
 ) -> dict[str, Any]:
     """Export referenced API definitions as bounded JSON or CSV."""
     if output_format not in {"json", "csv"}:
         raise ValueError("output_format must be json or csv")
     if process_index is not None and process_index < 0:
         raise ValueError("process_index must be non-negative")
+    if pid is not None and not 1 <= pid <= 0xFFFFFFFF:
+        raise ValueError("pid must be between 1 and 4294967295")
     limit = _limit(limit, "limit", 10_000)
     max_records = _limit(max_records, "max_records", 1_000_000)
     output = Path(output_path).expanduser()
@@ -6643,6 +6665,7 @@ def capture_export_definitions(
         limit=limit,
         max_records=max_records,
         include_details=include_details,
+        pid=pid,
     )
     if output_format == "json":
         content = json.dumps(result, indent=2, ensure_ascii=False) + "\n"
@@ -8724,6 +8747,7 @@ def _self_test() -> None:
         assert api_list["count"] == 1
         assert api_list["apis"][0]["name"] == "CreateFileW"
         assert api_list["apis"][0]["pids"] == [1234]
+        assert capture_list_apis(str(path), pid=1234)["count"] == 1
         assert api_list["apis"][0]["count"] == 1
         assert api_list["apis"][0]["context"]["error_count"] == 1
         assert api_list["apis"][0]["context"]["duration_seconds"]["average"] == 0.125
@@ -8732,6 +8756,7 @@ def _self_test() -> None:
         assert definitions_list["definitions"][0]["name"] == "CreateFileW"
         assert definitions_list["definitions"][0]["pids"] == [1234]
         assert definitions_list["definitions"][0]["details"]["module"] == "kernel32.dll"
+        assert capture_list_definitions(str(path), pid=1234)["count"] == 1
         entries = _zip_entries(path)
         assert {entry["name"] for entry in entries} == {
             "metadata.txt",
