@@ -184,6 +184,40 @@ def _parse_capture_info(data: bytes) -> dict[str, Any]:
     }
 
 
+def _parse_capture_process_info(data: bytes) -> dict[str, Any]:
+    if len(data) < 24:
+        raise ValueError("Process info entry is too small")
+    payload_end = len(data) - 4
+    checksum = struct.unpack_from("<I", data, payload_end)[0]
+    result: dict[str, Any] = {
+        "format_version": struct.unpack_from("<I", data)[0],
+        "capture_index": struct.unpack_from("<I", data, 4)[0],
+        "pid": struct.unpack_from("<I", data, 8)[0],
+        "image_base": f"0x{struct.unpack_from('<Q', data, 12)[0]:x}",
+        "crc32": f"0x{checksum:08x}",
+        "crc32_valid": checksum == zlib.crc32(data[:payload_end]) & 0xFFFFFFFF,
+    }
+    position = 20
+    for name in ("image_path", "command_line", "description"):
+        if position + 4 > payload_end:
+            raise ValueError(f"Process info is missing {name} length")
+        char_count = struct.unpack_from("<I", data, position)[0]
+        position += 4
+        byte_count = char_count * 2
+        if byte_count > payload_end - position:
+            raise ValueError(f"Process info {name} exceeds entry bounds")
+        result[name] = data[position : position + byte_count].decode("utf-16-le", errors="replace")
+        position += byte_count
+    if position + 24 > payload_end:
+        return result
+    result["call_start_index"], result["field_qword_0"], result["field_qword_1"] = struct.unpack_from(
+        "<IQQ", data, position
+    )
+    position += 20
+    result["module_record_count"] = struct.unpack_from("<I", data, position)[0]
+    return result
+
+
 def _capture_record_size(offsets: list[int], index: int, data: bytes) -> int:
     offset = offsets[index]
     next_offset = offsets[index + 1] if index + 1 < len(offsets) else len(data)
@@ -2869,6 +2903,10 @@ def capture_list_processes(file_path: str, limit: int = 200) -> dict[str, Any]:
                     modules.append(value)
                 if value.casefold().endswith(".exe") and value not in executables:
                     executables.append(value)
+            try:
+                metadata = _parse_capture_process_info(data)
+            except ValueError as exc:
+                metadata = {"parse_error": str(exc)}
             processes.append(
                 {
                     "index": index,
@@ -2885,6 +2923,7 @@ def capture_list_processes(file_path: str, limit: int = 200) -> dict[str, Any]:
                     "data_size": entries[f"process/{index}/data"].file_size
                     if f"process/{index}/data" in entries
                     else 0,
+                    "metadata": metadata,
                 }
             )
     processes.sort(key=lambda item: item["index"])
@@ -3158,7 +3197,14 @@ def _self_test() -> None:
                 "log/monitoring.txt",
                 "sample.exe: Monitoring Module 0x1234 -> C:\\sample.dll\n",
             )
-            archive.writestr("process/0/info", "C:\\sample.exe".encode("utf-16-le"))
+            process_info = struct.pack("<IIIQ", 1, 0, 1234, 0x7FF600000000)
+            for value in ("C:\\sample.exe", '"C:\\sample.exe" /test', "Sample Process"):
+                process_info += struct.pack("<I", len(value)) + value.encode("utf-16-le")
+            process_info += struct.pack("<IQQI", 0, 0, 0, 0)
+            archive.writestr(
+                "process/0/info",
+                process_info + struct.pack("<I", zlib.crc32(process_info) & 0xFFFFFFFF),
+            )
             title = "API Monitor v2 Alpha-r13 64-bit"
             info = struct.pack("<II", 2, len(title)) + title.encode("utf-16-le")
             info += struct.pack("<7I", 64, 0, 6, 2, 1, 1, 0x409)
@@ -3216,6 +3262,8 @@ def _self_test() -> None:
         assert not found["truncated"]
         processes = capture_list_processes(str(path), 10)
         assert processes["processes"][0]["executables"] == ["C:\\sample.exe"]
+        assert processes["processes"][0]["metadata"]["pid"] == 1234
+        assert processes["processes"][0]["metadata"]["crc32_valid"]
         assert processes["processes"][0]["call_count"] == 1
         call_stats = capture_call_stats(str(path), process_index=0)
         assert call_stats["processes"][0]["record_sizes"]["160"] == 1
