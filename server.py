@@ -1174,6 +1174,49 @@ def capture_strings(
 
 
 @mcp.tool()
+def capture_search_entries(
+    file_path: str,
+    query: str,
+    limit: int = 100,
+    max_entry_bytes: int = 4 * 1024 * 1024,
+) -> dict[str, Any]:
+    """Search printable strings inside each APMX ZIP entry."""
+    if not query:
+        raise ValueError("query must not be empty")
+    limit = _limit(limit, "limit", 2000)
+    max_entry_bytes = _limit(max_entry_bytes, "max_entry_bytes", 64 * 1024 * 1024)
+    path = _capture_path(file_path)
+    archive, _, _ = _open_capture_zip(path)
+    matches: list[dict[str, Any]] = []
+    truncated = False
+    with archive:
+        for info in archive.infolist():
+            if info.is_dir():
+                continue
+            with archive.open(info) as member:
+                data = member.read(max_entry_bytes + 1)
+            entry_matches = _scan_strings(data[:max_entry_bytes], query, min(20, limit), 4)
+            if entry_matches:
+                matches.append(
+                    {
+                        "entry": info.filename,
+                        "matches": entry_matches,
+                        "entry_truncated": len(data) > max_entry_bytes,
+                    }
+                )
+                if len(matches) >= limit:
+                    truncated = True
+                    break
+    return {
+        "file": str(path),
+        "query": query,
+        "entries": matches,
+        "count": len(matches),
+        "truncated": truncated,
+    }
+
+
+@mcp.tool()
 def capture_read_entry(file_path: str, entry_name: str, max_bytes: int = 1_048_576) -> dict[str, Any]:
     """Read one APMX ZIP entry, returning text when printable or base64 otherwise."""
     max_bytes = _limit(max_bytes, "max_bytes", 16 * 1024 * 1024)
@@ -1391,6 +1434,8 @@ def _self_test() -> None:
         assert strings and "CreateFileW" in strings[0]["text"]
         log = capture_monitoring_log(str(path), "module", 10)
         assert log["lines"] == ["sample.exe: Monitoring Module"]
+        searched = capture_search_entries(str(path), "CreateFile", 10)
+        assert searched["entries"][0]["entry"] == "calls.bin"
         processes = capture_list_processes(str(path), 10)
         assert processes["processes"][0]["executables"] == ["C:\\sample.exe"]
         entries = _zip_entries(path)
