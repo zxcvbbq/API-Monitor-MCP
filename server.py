@@ -211,14 +211,22 @@ def _file_time(path: Path) -> str:
     return datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc).isoformat()
 
 
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        while chunk := handle.read(1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def _capture_info(path: Path) -> dict[str, Any]:
-    data = path.read_bytes()
-    offset = _zip_offset(data)
+    size = path.stat().st_size
+    offset = _capture_zip_offset(path)
     result: dict[str, Any] = {
         "file": str(path),
         "extension": path.suffix.lower(),
-        "size": len(data),
-        "sha256": hashlib.sha256(data).hexdigest(),
+        "size": size,
+        "sha256": _file_sha256(path),
         "modified_utc": _file_time(path),
         "zip_offset": offset,
         "container": "zip-with-prefix" if offset is not None and offset else "zip",
@@ -227,7 +235,8 @@ def _capture_info(path: Path) -> dict[str, Any]:
         result["zip_error"] = "No ZIP signature found"
         result["entries"] = []
         return result
-    prefix = data[:offset]
+    with path.open("rb") as handle:
+        prefix = handle.read(offset)
     result["prefix_size"] = offset
     result["format_marker"] = "RBAPM" if prefix.endswith(b"RBAPM") else None
     result["format_header"] = prefix.decode("ascii", errors="replace").rstrip("\x00")
