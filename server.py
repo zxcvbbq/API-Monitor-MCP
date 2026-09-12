@@ -1,8 +1,4 @@
-"""MCP bridge for the real Rohitab API Monitor application.
-
-This version intentionally does not reverse engineer live IPC or the APMX call
-record format. It exposes capture triage plus background GUI operations.
-"""
+"""MCP bridge for the real Rohitab API Monitor application."""
 
 from __future__ import annotations
 
@@ -62,8 +58,8 @@ mcp = FastMCP(
     instructions=(
         "Read Rohitab API Monitor .apmx captures, search their raw contents, "
         "launch the installed API Monitor application, and automate its GUI "
-        "without bringing it to the foreground. This server does not decode "
-        "live API calls yet."
+        "without bringing it to the foreground. Decode saved call streams "
+        "when their process call/data entries are present."
     ),
 )
 
@@ -159,6 +155,59 @@ def _capture_info(path: Path) -> dict[str, Any]:
         result["zip_error"] = str(exc)
         result["entries"] = []
     return result
+
+
+def _capture_call_records(
+    calls: bytes,
+    data: bytes,
+    limit: int,
+    include_data: bool,
+    max_data_bytes: int,
+) -> list[dict[str, Any]]:
+    if len(calls) % 8:
+        raise ValueError("process calls entry is not an array of 64-bit offsets")
+    offsets = [struct.unpack_from("<Q", calls, index)[0] for index in range(0, len(calls), 8)]
+    records: list[dict[str, Any]] = []
+    for index, offset in enumerate(offsets[:limit]):
+        if offset > len(data) - 144:
+            records.append({"index": index, "offset": offset, "valid": False, "error": "record offset is outside process data"})
+            continue
+        next_offset = offsets[index + 1] if index + 1 < len(offsets) else len(data)
+        record_size = next_offset - offset if 144 <= next_offset - offset <= 160 else 160 if data[offset + 2] else 144
+        record = {
+            "index": index,
+            "offset": offset,
+            "size": record_size,
+            "valid": offset + record_size <= len(data),
+            "flags": data[offset + 2],
+            "header_hex": data[offset : offset + min(record_size, 112)].hex(" "),
+            "data_refs": [],
+        }
+        for slot, pointer_offset, length_offset in (
+            (0, 112, 32),
+            (1, 120, 88),
+            (2, 128, 92),
+            (3, 136, 108),
+            (4, 152, 144),
+        ):
+            if pointer_offset + 8 > record_size or length_offset + 4 > record_size:
+                continue
+            relative = struct.unpack_from("<Q", data, offset + pointer_offset)[0]
+            length = struct.unpack_from("<I", data, offset + length_offset)[0]
+            reference: dict[str, Any] = {"slot": slot, "offset": relative, "length": length}
+            end = relative + length
+            if end > len(data):
+                reference["valid"] = False
+                reference["error"] = "data reference is outside process data"
+            else:
+                reference["valid"] = True
+                if include_data and length <= max_data_bytes:
+                    reference["payload"] = _read_payload(data[relative:end])
+                elif include_data:
+                    reference["truncated"] = True
+            record["data_refs"].append(reference)
+        records.append(record)
+    return records
 
 
 def _scan_strings(data: bytes | mmap.mmap, query: str, limit: int, minimum: int) -> list[dict[str, Any]]:
@@ -1952,6 +2001,48 @@ def capture_read_entry(file_path: str, entry_name: str, max_bytes: int = 1_048_5
 
 
 @mcp.tool()
+def capture_call_records(
+    file_path: str,
+    process_index: int = 0,
+    limit: int = 500,
+    include_data: bool = False,
+    max_data_bytes: int = 4096,
+) -> dict[str, Any]:
+    """Decode saved process call offsets and their raw data references."""
+    if process_index < 0:
+        raise ValueError("process_index must be non-negative")
+    limit = _limit(limit, "limit", 10_000)
+    max_data_bytes = _limit(max_data_bytes, "max_data_bytes", 16 * 1024 * 1024)
+    path = _capture_path(file_path)
+    calls_name = f"process/{process_index}/calls"
+    data_name = f"process/{process_index}/data"
+    archive, _, _ = _open_capture_zip(path)
+    with archive:
+        try:
+            calls = archive.read(calls_name)
+        except KeyError as exc:
+            raise FileNotFoundError(f"Capture call entry not found: {calls_name}") from exc
+        try:
+            data = archive.read(data_name)
+        except KeyError:
+            data = b""
+    records = _capture_call_records(calls, data, limit, include_data, max_data_bytes)
+    count = len(calls) // 8
+    return {
+        "file": str(path),
+        "process_index": process_index,
+        "calls_entry": calls_name,
+        "data_entry": data_name if data else None,
+        "call_entry_bytes": len(calls),
+        "data_entry_bytes": len(data),
+        "count": count,
+        "records": records,
+        "truncated": count > limit,
+        "format": "APMX process call offset stream; record fields remain raw until API definition correlation is added",
+    }
+
+
+@mcp.tool()
 def capture_extract_entry(
     file_path: str,
     entry_name: str,
@@ -2331,6 +2422,12 @@ def _self_test() -> None:
         with zipfile.ZipFile(payload, "w", zipfile.ZIP_STORED) as archive:
             archive.writestr("metadata.txt", "process=sample.exe\n")
             archive.writestr("calls.bin", b"CreateFileW\x00https://example.test\x00")
+            record = bytearray(160)
+            record[2] = 1
+            struct.pack_into("<I", record, 32, 5)
+            struct.pack_into("<Q", record, 112, 160)
+            archive.writestr("process/0/calls", struct.pack("<Q", 0))
+            archive.writestr("process/0/data", bytes(record) + b"hello")
             archive.writestr(
                 "log/monitoring.txt",
                 "sample.exe: Monitoring Module 0x1234 -> C:\\sample.dll\n",
@@ -2358,6 +2455,9 @@ def _self_test() -> None:
         searched = capture_search_entries(str(path), "CreateFile", 1)
         assert searched["entries"][0]["entry"] == "calls.bin"
         assert not searched["truncated"]
+        call_records = capture_call_records(str(path), include_data=True)
+        assert call_records["count"] == 1
+        assert call_records["records"][0]["data_refs"][0]["payload"]["text"] == "hello"
         extracted = Path(directory) / "calls.bin"
         exported = capture_extract_entry(str(path), "calls.bin", str(extracted))
         assert exported["size"] == len(b"CreateFileW\x00https://example.test\x00")
@@ -2371,13 +2471,15 @@ def _self_test() -> None:
         assert {entry["name"] for entry in entries} == {
             "metadata.txt",
             "calls.bin",
+            "process/0/calls",
+            "process/0/data",
             "log/monitoring.txt",
             "process/0/info",
         }
         listed = capture_list_directory(directory, recursive=False, limit=10)
         assert listed["count"] == 1
         comparison = capture_compare(str(path), str(second_path))
-        assert comparison["counts"] == {"added": 1, "removed": 3, "changed": 1}
+        assert comparison["counts"] == {"added": 1, "removed": 5, "changed": 1}
         assert not comparison["same"]
 
         app_root = Path(directory) / "app"
