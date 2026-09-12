@@ -1460,6 +1460,31 @@ def api_monitor_search_apis(
     return {"query": query, "results": results, "count": len(results), "truncated": False}
 
 
+@mcp.tool()
+def api_monitor_read_api_definition(
+    definition_path: str,
+    max_chars: int = 100_000,
+    install_root: str | None = None,
+) -> dict[str, Any]:
+    """Read a bounded Rohitab XML API definition returned by the API search tool."""
+    max_chars = _limit(max_chars, "max_chars", 2_000_000)
+    api_root = (_app_root(install_root) / "API").resolve()
+    path = Path(definition_path).expanduser().resolve()
+    try:
+        path.relative_to(api_root)
+    except ValueError as exc:
+        raise ValueError("definition_path must be inside Rohitab's API directory") from exc
+    if path.suffix.lower() != ".xml" or not path.is_file():
+        raise FileNotFoundError(f"API definition not found: {path}")
+    text = path.read_text(encoding="utf-8-sig", errors="replace")
+    return {
+        "definition": str(path),
+        "text": text[:max_chars],
+        "size_chars": len(text),
+        "truncated": len(text) > max_chars,
+    }
+
+
 def _self_test() -> None:
     with TemporaryDirectory() as directory:
         path = Path(directory) / "sample.apmx64"
