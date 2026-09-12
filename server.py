@@ -977,6 +977,7 @@ def api_monitor_add_display_filter(
     ignore_case: bool = True,
     architecture: str = "x64",
     timeout_seconds: int = 10,
+    window_handle: int | None = None,
 ) -> dict[str, Any]:
     """Add a Rohitab Display Filter through its background GUI dialog."""
     if sys.platform != "win32":
@@ -990,8 +991,14 @@ def api_monitor_add_display_filter(
     if timeout_seconds < 1 or timeout_seconds > 60:
         raise ValueError("timeout_seconds must be between 1 and 60")
 
-    main_window = _api_monitor_main_window(architecture, timeout_seconds)
+    main_window = (
+        _api_monitor_window_by_handle(window_handle, architecture)
+        if window_handle is not None
+        else _api_monitor_main_window(architecture, timeout_seconds)
+    )
     if main_window is None:
+        if window_handle is not None:
+            raise LookupError(f"API Monitor window not found: {window_handle}")
         raise TimeoutError("API Monitor main window did not appear")
     dialog = next(
         (window for window in _find_api_monitor_windows() if window["title"] == "Display Filter"),
@@ -1195,6 +1202,7 @@ def api_monitor_monitoring_control(
     action: str,
     architecture: str = "x64",
     timeout_seconds: int = 10,
+    window_handle: int | None = None,
 ) -> dict[str, Any]:
     """Start or stop the selected Rohitab monitoring session in the background."""
     if sys.platform != "win32":
@@ -1205,8 +1213,14 @@ def api_monitor_monitoring_control(
         raise ValueError("architecture must be x86 or x64")
     if timeout_seconds < 1 or timeout_seconds > 60:
         raise ValueError("timeout_seconds must be between 1 and 60")
-    main_window = _api_monitor_main_window(architecture, timeout_seconds)
+    main_window = (
+        _api_monitor_window_by_handle(window_handle, architecture)
+        if window_handle is not None
+        else _api_monitor_main_window(architecture, timeout_seconds)
+    )
     if main_window is None:
+        if window_handle is not None:
+            raise LookupError(f"API Monitor window not found: {window_handle}")
         raise TimeoutError("API Monitor main window did not appear")
     command = COMMAND_START_MONITORING if action == "start" else COMMAND_STOP_MONITORING
     _post_window_command(main_window["handle"], command)
