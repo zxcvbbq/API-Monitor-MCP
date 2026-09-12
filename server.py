@@ -2349,6 +2349,21 @@ def _tasklist_rows() -> tuple[list[list[str]], str | None]:
     return list(csv.reader(io.StringIO(completed.stdout))), None
 
 
+def _named_gui_rows(headers: list[str], rows: list[list[str]]) -> list[dict[str, Any]]:
+    return [
+        {
+            "row_index": row_index,
+            "values": {
+                header or f"column_{column_index}": value
+                for column_index, value in enumerate(row)
+                if column_index < len(headers)
+                for header in [headers[column_index]]
+            },
+        }
+        for row_index, row in enumerate(rows)
+    ]
+
+
 @mcp.tool()
 def api_monitor_status() -> dict[str, Any]:
     """List running Rohitab API Monitor x86/x64 processes."""
@@ -2953,6 +2968,7 @@ def api_monitor_traffic(
                     "list_handle": pane["handle"],
                     "headers": headers,
                     "rows": pane["rows"],
+                    "records": _named_gui_rows(headers, pane["rows"]),
                     "truncated": pane["truncated"],
                 }
             )
@@ -2983,6 +2999,7 @@ def api_monitor_traffic_details(
             "handle": pane["handle"],
             "headers": pane["headers"],
             "rows": pane["rows"],
+            "records": _named_gui_rows(pane["headers"], pane["rows"]),
             "truncated": pane["truncated"],
         }
         for window in refreshed.get("windows", [])
@@ -6047,6 +6064,10 @@ def _self_test() -> None:
         parsed = api_monitor_parse_api_definition(str(definition), install_root=str(app_root))
         assert parsed["apis"][0]["module"] == "sample.dll"
         assert parsed["apis"][0]["params"] == [{"Type": "HANDLE", "Name": "hThing"}]
+        assert _named_gui_rows(["API", "Error"], [["OpenThing", "5"]])[0]["values"] == {
+            "API": "OpenThing",
+            "Error": "5",
+        }
 
 
 def main() -> None:
