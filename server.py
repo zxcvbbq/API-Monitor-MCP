@@ -2851,7 +2851,7 @@ def capture_info(file_path: str) -> dict[str, Any]:
 def capture_validate(
     file_path: str, deep: bool = False, max_records: int = 1_000_000
 ) -> dict[str, Any]:
-    """Validate an APMX prefix, ZIP container, and every stored entry CRC."""
+    """Validate an APMX prefix, ZIP entries, process metadata, and call streams."""
     max_records = _limit(max_records, "max_records", 1_000_000)
     path = _capture_path(file_path)
     try:
@@ -2894,6 +2894,28 @@ def capture_validate(
     archive = zipfile.ZipFile(io.BytesIO(data[offset:]))
     with archive:
         entries = {info.filename: info for info in archive.infolist()}
+        process_infos = []
+        for name in sorted(entries):
+            match = PROCESS_INFO.fullmatch(name)
+            if not match:
+                continue
+            process_index = int(match.group(1))
+            process_data = archive.read(name)
+            try:
+                metadata = _parse_capture_process_info(process_data, pointer_size)
+                valid = metadata.get("crc32_valid", True)
+            except ValueError as exc:
+                metadata = {"parse_error": str(exc)}
+                valid = False
+            process_infos.append(
+                {
+                    "process_index": process_index,
+                    "entry": name,
+                    "size": len(process_data),
+                    "valid": valid,
+                    "metadata": metadata,
+                }
+            )
         for name in sorted(entries):
             match = re.fullmatch(r"process/(\d+)/calls", name, re.I)
             if not match:
@@ -2917,7 +2939,10 @@ def capture_validate(
                 stream["error"] = str(exc)
             streams.append(stream)
     result["streams"] = streams
-    result["structural_valid"] = all(stream["valid"] for stream in streams)
+    result["process_infos"] = process_infos
+    result["structural_valid"] = all(stream["valid"] for stream in streams) and all(
+        process["valid"] for process in process_infos
+    )
     result["valid"] = result["valid"] and result["structural_valid"]
     return result
 
@@ -4432,7 +4457,9 @@ def _self_test() -> None:
         assert info["metadata"]["application"] == "API Monitor v2 Alpha-r13 64-bit"
         assert info["metadata"]["crc32_valid"]
         assert capture_validate(str(path))["valid"]
-        assert capture_validate(str(path), deep=True)["structural_valid"]
+        deep_validation = capture_validate(str(path), deep=True)
+        assert deep_validation["structural_valid"]
+        assert deep_validation["process_infos"][0]["valid"]
         invalid_prefix = Path(directory) / "invalid-prefix.apmx64"
         invalid_prefix.write_bytes(b"not-an-apmx" + path.read_bytes()[info["zip_offset"] :])
         assert not capture_validate(str(invalid_prefix))["valid"]
@@ -4611,7 +4638,9 @@ def _self_test() -> None:
         assert x86_records["records"][0]["data_refs"][0]["payload"]["text"] == "hello"
         assert capture_read_definition(str(x86_path), 16)["architecture"] == "x86"
         assert capture_list_apis(str(x86_path))["apis"][0]["module"] == "kernel32.dll"
-        assert capture_validate(str(x86_path), deep=True)["structural_valid"]
+        x86_deep_validation = capture_validate(str(x86_path), deep=True)
+        assert x86_deep_validation["structural_valid"]
+        assert x86_deep_validation["process_infos"][0]["valid"]
         assert capture_call_stats(str(x86_path))["processes"][0]["record_sizes"]["120"] == 1
         x86_processes = capture_list_processes(str(x86_path))
         assert x86_processes["processes"][0]["call_count"] == 1
