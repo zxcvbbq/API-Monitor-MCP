@@ -6,6 +6,7 @@ import argparse
 import base64
 import csv
 import ctypes
+import difflib
 import hashlib
 import io
 import json
@@ -4891,8 +4892,11 @@ def capture_compare_calls(
     max_records: int = 10_000,
     max_data_bytes: int = 4096,
     resolve_definitions: bool = False,
+    match_mode: str = "index",
 ) -> dict[str, Any]:
-    """Compare saved call traffic by index and bounded payload fingerprints."""
+    """Compare saved calls by index or sequence alignment and bounded fingerprints."""
+    if match_mode not in {"index", "sequence"}:
+        raise ValueError("match_mode must be index or sequence")
     if process_index < 0:
         raise ValueError("process_index must be non-negative")
     limit = _limit(limit, "limit", 10_000)
@@ -4968,19 +4972,45 @@ def capture_compare_calls(
     added = []
     removed = []
     changed = []
-    for index in range(min(len(first_records), len(second_records))):
-        if signature(first_records[index]) != signature(second_records[index]):
-            changed.append(
-                {
-                    "index": index,
-                    "first": summary(first_records[index]),
-                    "second": summary(second_records[index]),
-                }
-            )
-    for index in range(len(first_records), len(second_records)):
-        added.append(summary(second_records[index]))
-    for index in range(len(second_records), len(first_records)):
-        removed.append(summary(first_records[index]))
+    if match_mode == "index":
+        for index in range(min(len(first_records), len(second_records))):
+            if signature(first_records[index]) != signature(second_records[index]):
+                changed.append(
+                    {
+                        "index": index,
+                        "first": summary(first_records[index]),
+                        "second": summary(second_records[index]),
+                    }
+                )
+        for index in range(len(first_records), len(second_records)):
+            added.append(summary(second_records[index]))
+        for index in range(len(second_records), len(first_records)):
+            removed.append(summary(first_records[index]))
+    else:
+        first_signatures = [signature(record) for record in first_records]
+        second_signatures = [signature(record) for record in second_records]
+        matcher = difflib.SequenceMatcher(
+            None, first_signatures, second_signatures, autojunk=False
+        )
+        for tag, first_start, first_end, second_start, second_end in matcher.get_opcodes():
+            if tag == "equal":
+                continue
+            pair_count = min(first_end - first_start, second_end - second_start)
+            for offset in range(pair_count):
+                first_record = first_records[first_start + offset]
+                second_record = second_records[second_start + offset]
+                changed.append(
+                    {
+                        "first_index": first_record.get("index"),
+                        "second_index": second_record.get("index"),
+                        "first": summary(first_record),
+                        "second": summary(second_record),
+                    }
+                )
+            for index in range(first_start + pair_count, first_end):
+                removed.append(summary(first_records[index]))
+            for index in range(second_start + pair_count, second_end):
+                added.append(summary(second_records[index]))
     truncated = any(
         len(items) > limit for items in (added, removed, changed)
     ) or first.get("truncated", False) or second.get("truncated", False)
@@ -4988,6 +5018,7 @@ def capture_compare_calls(
         "first": first.get("file"),
         "second": second.get("file"),
         "process_index": process_index,
+        "match_mode": match_mode,
         "architectures": {
             "first": first.get("architecture"),
             "second": second.get("architecture"),
@@ -5016,8 +5047,11 @@ def capture_compare_all_calls(
     max_records: int = 10_000,
     max_data_bytes: int = 4096,
     resolve_definitions: bool = False,
+    match_mode: str = "index",
 ) -> dict[str, Any]:
     """Compare saved call streams for every process in two APMX captures."""
+    if match_mode not in {"index", "sequence"}:
+        raise ValueError("match_mode must be index or sequence")
     limit = _limit(limit, "limit", 10_000)
     max_records = _limit(max_records, "max_records", 10_000)
     max_data_bytes = _limit(max_data_bytes, "max_data_bytes", 16 * 1024 * 1024)
@@ -5041,6 +5075,7 @@ def capture_compare_all_calls(
             max_records=max_records,
             max_data_bytes=max_data_bytes,
             resolve_definitions=resolve_definitions,
+            match_mode=match_mode,
         )
         for index in indices
     ]
@@ -5052,6 +5087,7 @@ def capture_compare_all_calls(
     return {
         "first": str(first),
         "second": str(second),
+        "match_mode": match_mode,
         "process_indices": indices,
         "comparisons": comparisons,
         "counts": totals,
@@ -8540,6 +8576,11 @@ def _self_test() -> None:
         )
         assert call_comparison["counts"]["removed"] == 1
         assert call_comparison["counts"]["changed"] == 0
+        sequence_comparison = capture_compare_calls(
+            str(path), str(second_path), match_mode="sequence", resolve_definitions=True
+        )
+        assert sequence_comparison["match_mode"] == "sequence"
+        assert sequence_comparison["counts"]["removed"] == 1
         api_comparison = capture_compare_apis(str(path), str(path))
         assert api_comparison["same"]
         assert api_comparison["counts"] == {"added": 0, "removed": 0, "changed": 0}
