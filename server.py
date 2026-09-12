@@ -389,13 +389,17 @@ def _post_window_command(handle: int, command_id: int) -> None:
 
 
 def _api_monitor_main_window(architecture: str, timeout_seconds: float) -> dict[str, Any] | None:
+    if architecture not in {"x86", "x64"}:
+        raise ValueError("architecture must be x86 or x64")
+    bitness = "32-bit" if architecture == "x86" else "64-bit"
+    candidates = [
+        window
+        for window in _find_api_monitor_windows()
+        if "api monitor v2" in window["title"].casefold() and bitness in window["title"]
+    ]
     main = next(
-        (
-            window
-            for window in _find_api_monitor_windows()
-            if "api monitor v2" in window["title"].casefold()
-        ),
-        None,
+        (window for window in candidates if window["title"].casefold().startswith("monitoring")),
+        candidates[0] if candidates else None,
     )
     if main is not None:
         return main
@@ -1006,13 +1010,19 @@ def api_monitor_open_capture(file_path: str, install_root: str | None = None) ->
         raise RuntimeError("Opening API Monitor captures requires Windows")
 
     architecture = "x86" if path.suffix.lower() == ".apmx86" else "x64"
+    bitness = "32-bit" if architecture == "x86" else "64-bit"
+    candidates = [
+        window
+        for window in _find_api_monitor_windows()
+        if "api monitor v2" in window["title"].casefold() and bitness in window["title"]
+    ]
     main_window = next(
         (
             window
-            for window in _find_api_monitor_windows()
-            if "api monitor v2" in window["title"].casefold()
+            for window in candidates
+            if not window["title"].casefold().startswith("monitoring")
         ),
-        None,
+        candidates[0] if candidates else None,
     )
     if main_window is None:
         root = _app_root(install_root)
@@ -1078,6 +1088,20 @@ def api_monitor_save_capture(
     )
     if main_window is None:
         raise TimeoutError("API Monitor main window did not appear")
+    if main_window["title"].casefold().startswith("monitoring"):
+        bitness = "32-bit" if path.suffix.lower() == ".apmx86" else "64-bit"
+        capture_window = next(
+            (
+                window
+                for window in _find_api_monitor_windows()
+                if "api monitor v2" in window["title"].casefold()
+                and bitness in window["title"]
+                and not window["title"].casefold().startswith("monitoring")
+            ),
+            None,
+        )
+        if capture_window is not None:
+            main_window = capture_window
     _run_file_dialog(
         main_window,
         COMMAND_SAVE_CAPTURE_AS,
