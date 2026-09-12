@@ -501,6 +501,16 @@ def _parse_capture_process_info(data: bytes, pointer_size: int = 8) -> dict[str,
     return result
 
 
+def _capture_process_pid(archive: Any, entries: set[str], process_index: int, pointer_size: int) -> int | None:
+    entry_name = f"process/{process_index}/info"
+    if entry_name not in entries:
+        return None
+    try:
+        return _parse_capture_process_info(archive.read(entry_name), pointer_size).get("pid")
+    except (ValueError, struct.error):
+        return None
+
+
 def _capture_layout(pointer_size: int) -> dict[str, Any]:
     if pointer_size == 4:
         return {
@@ -5293,6 +5303,7 @@ def capture_export_all_calls(
         writer.writerow(
             [
                 "process_index",
+                "pid",
                 "record_index",
                 "offset",
                 "size",
@@ -5324,6 +5335,7 @@ def capture_export_all_calls(
                     writer.writerow(
                         [
                             process_index,
+                            process.get("process_pid", ""),
                             record["index"],
                             record["offset"],
                             record["size"],
@@ -5525,6 +5537,7 @@ def capture_call_records(
     data_name = f"process/{process_index}/data"
     archive, _, _ = _open_capture_zip(path)
     with archive:
+        entries = {info.filename for info in archive.infolist()}
         try:
             calls = archive.read(calls_name)
         except KeyError as exc:
@@ -5533,7 +5546,8 @@ def capture_call_records(
             data = archive.read(data_name)
         except KeyError:
             data = b""
-        definitions = archive.read("definitions") if resolve_definitions and "definitions" in archive.namelist() else None
+        definitions = archive.read("definitions") if resolve_definitions and "definitions" in entries else None
+        process_pid = _capture_process_pid(archive, entries, process_index, pointer_size)
     if len(calls) % pointer_size:
         raise ValueError(
             f"process calls entry is not an array of {pointer_size * 8}-bit offsets"
@@ -5554,6 +5568,7 @@ def capture_call_records(
     return {
         "file": str(path),
         "process_index": process_index,
+        "process_pid": process_pid,
         "calls_entry": calls_name,
         "data_entry": data_name if data else None,
         "call_entry_bytes": len(calls),
@@ -5657,6 +5672,7 @@ def capture_export_calls(
         writer.writerow(
             [
                 "process_index",
+                "pid",
                 "record_index",
                 "offset",
                 "size",
@@ -5686,6 +5702,7 @@ def capture_export_calls(
                 writer.writerow(
                     [
                         process_index,
+                        result.get("process_pid", ""),
                         record["index"],
                         record["offset"],
                         record["size"],
@@ -5723,6 +5740,7 @@ def capture_export_calls(
         "output": str(output),
         "format": output_format,
         "process_index": process_index,
+        "process_pid": result.get("process_pid"),
         "start_index": result["start_index"],
         "end_index": result["end_index"],
         "count": len(result["records"]),
@@ -5954,6 +5972,7 @@ def capture_decode_call(
     return {
         "file": result["file"],
         "process_index": process_index,
+        "process_pid": result["process_pid"],
         "record_index": record_index,
         "record": record,
         "argument_stream": argument_stream,
@@ -6004,6 +6023,7 @@ def capture_decode_calls(
     return {
         "file": result["file"],
         "process_index": process_index,
+        "process_pid": result["process_pid"],
         "architecture": result["architecture"],
         "count": result["count"],
         "start_index": result["start_index"],
@@ -6109,6 +6129,7 @@ def capture_export_decoded_calls(
         writer.writerow(
             [
                 "process_index",
+                "pid",
                 "record_index",
                 "offset",
                 "size",
@@ -6148,6 +6169,7 @@ def capture_export_decoded_calls(
                     writer.writerow(
                         [
                             process_index,
+                            process.get("process_pid", ""),
                             record.get("index", ""),
                             record.get("offset", ""),
                             record.get("size", ""),
@@ -7375,6 +7397,7 @@ def capture_calls_around(
             raise FileNotFoundError(f"Capture call entry not found: {calls_name}") from exc
         data = archive.read(data_name) if data_name in entries else b""
         definitions = archive.read("definitions") if resolve_definitions and "definitions" in entries else None
+        process_pid = _capture_process_pid(archive, entries, process_index, pointer_size)
     if len(calls) % pointer_size:
         raise ValueError(
             f"process calls entry is not an array of {pointer_size * 8}-bit offsets"
@@ -7399,6 +7422,7 @@ def capture_calls_around(
     return {
         "file": str(path),
         "process_index": process_index,
+        "process_pid": process_pid,
         "record_index": record_index,
         "before": before,
         "after": after,
@@ -7453,6 +7477,7 @@ def capture_read_call_bytes(
     return {
         "file": context["file"],
         "process_index": process_index,
+        "process_pid": context.get("process_pid"),
         "record_index": record_index,
         "offset": record["offset"],
         "size": size,
@@ -8330,10 +8355,12 @@ def _self_test() -> None:
         assert xml["nodes"][0]["attributes"]["Field"] == "API"
         call_records = capture_call_records(str(path), include_data=True)
         assert call_records["count"] == 1
+        assert call_records["process_pid"] == 1234
         assert call_records["start_index"] == 0
         assert call_records["records"][0]["data_refs"][0]["payload"]["text"] == "hello"
         raw_call = capture_read_call_bytes(str(path), 0, 0)
         assert raw_call["size"] == 160
+        assert raw_call["process_pid"] == 1234
         assert base64.b64decode(raw_call["record_bytes"]["base64"]) == bytes(record)
         call_context = call_records["records"][0]["context"]
         assert call_context["thread_id"] == 0x1234
@@ -8422,6 +8449,7 @@ def _self_test() -> None:
         assert resolved_records["records"][0]["definition"]["ordinal"] == 123
         assert capture_read_definition(str(path), 16)["definition"]["name"] == "CreateFileW"
         decoded_call = capture_decode_call(str(path), 0, 0, resolve_definitions=True)
+        assert decoded_call["process_pid"] == 1234
         assert decoded_call["record"]["data_refs"][0]["decoding"]["strings"][0]["text"] == "hello"
         assert decoded_call["record"]["definition"]["name"] == "CreateFileW"
         assert decoded_call["return_value"]["typed"]["value"] == 7
@@ -8449,9 +8477,9 @@ def _self_test() -> None:
         )
         assert csv_export["format"] == "csv"
         csv_text = (Path(directory) / "calls.csv").read_text()
-        assert csv_text.startswith("process_index,record_index")
+        assert csv_text.startswith("process_index,pid,record_index")
         assert "thread_id" in csv_text.splitlines()[0]
-        assert "CreateFileW" in csv_text and "kernel32.dll" in csv_text
+        assert "CreateFileW" in csv_text and "kernel32.dll" in csv_text and ",1234," in csv_text
         call_search = capture_search_calls(str(path), "ell")
         assert call_search["count"] == 1
         assert call_search["matches"][0]["payload_matches"][0]["snippet"] == "hello"
@@ -8530,6 +8558,7 @@ def _self_test() -> None:
         assert csv_definition_export["count"] == 1
         assert "CreateFileW" in definitions_csv.read_text()
         call_window = capture_calls_around(str(path), 0, 0, before=2, after=2)
+        assert call_window["process_pid"] == 1234
         assert call_window["window_start"] == 0
         assert call_window["records"][0]["is_target"]
         resolved_window = capture_calls_around(str(path), 0, 0, resolve_definitions=True)
@@ -8724,12 +8753,13 @@ def _self_test() -> None:
         all_json_export = capture_export_all_calls(str(path), str(all_json_path))
         assert all_json_export["count"] == 1
         assert json.loads(all_json_path.read_text())["processes"][0]["process_index"] == 0
+        assert json.loads(all_json_path.read_text())["processes"][0]["process_pid"] == 1234
         all_csv_path = Path(directory) / "all-calls.csv"
         all_csv_export = capture_export_all_calls(
             str(path), str(all_csv_path), output_format="csv", resolve_definitions=True
         )
         assert all_csv_export["count"] == 1
-        assert "CreateFileW" in all_csv_path.read_text()
+        assert "CreateFileW" in all_csv_path.read_text() and ",1234," in all_csv_path.read_text()
         multi_path = Path(directory) / "multi.apmx64"
         multi_payload = io.BytesIO()
         with zipfile.ZipFile(multi_payload, "w", zipfile.ZIP_STORED) as archive:
@@ -8765,7 +8795,7 @@ def _self_test() -> None:
             str(path), str(decoded_csv), output_format="csv", resolve_definitions=True
         )
         assert decoded_csv_export["count"] == 1
-        assert "CreateFileW" in decoded_csv.read_text()
+        assert "CreateFileW" in decoded_csv.read_text() and ",1234," in decoded_csv.read_text()
 
         x86_path = Path(directory) / "sample.apmx86"
         x86_record = bytearray(120)
@@ -8857,6 +8887,7 @@ def _self_test() -> None:
             str(x86_path), include_data=True, resolve_definitions=True
         )
         assert x86_records["architecture"] == "x86"
+        assert x86_records["process_pid"] == 4321
         assert x86_records["records"][0]["definition"]["name"] == "CreateFileA"
         assert x86_records["records"][0]["data_refs"][0]["payload"]["size"] == len(x86_encoded_argument)
         x86_context = x86_records["records"][0]["context"]
