@@ -1,0 +1,24 @@
+{
+  "name": "api-monitor-mcp",
+  "version": "0.1.0",
+  "description": "MCP bridge for Rohitab API Monitor captures and GUI.",
+  "author": {
+    "name": "zxcvbbq",
+    "url": "https://github.com/zxcvbbq"
+  },
+  "homepage": "https://github.com/zxcvbbq/API-Monitor-MCP",
+  "repository": "https://github.com/zxcvbbq/API-Monitor-MCP.git",
+  "license": "MIT",
+  "keywords": ["api-monitor", "rohitab", "windows", "mcp"],
+  "mcpServers": "./.mcp.json",
+  "interface": {
+    "displayName": "API Monitor MCP",
+    "shortDescription": "Inspect and control Rohitab API Monitor.",
+    "longDescription": "Capture, inspect, search, and automate the installed Rohitab API Monitor.",
+    "developerName": "zxcvbbq",
+    "category": "Developer Tools",
+    "capabilities": ["Interactive", "MCP"],
+    "websiteURL": "https://github.com/zxcvbbq/API-Monitor-MCP",
+    "defaultPrompt": ["Inspect a Rohitab API Monitor capture."]
+  }
+}

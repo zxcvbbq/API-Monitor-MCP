@@ -1,0 +1,19 @@
+{
+  "name": "api-monitor-mcp",
+  "owner": {
+    "name": "zxcvbbq"
+  },
+  "description": "Rohitab API Monitor MCP.",
+  "plugins": [
+    {
+      "name": "api-monitor-mcp",
+      "source": {
+        "source": "github",
+        "repo": "zxcvbbq/API-Monitor-MCP"
+      },
+      "description": "MCP bridge for Rohitab API Monitor captures and GUI.",
+      "version": "0.1.0",
+      "category": "Developer Tools"
+    }
+  ]
+}

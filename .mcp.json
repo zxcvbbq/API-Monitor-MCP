@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "api-monitor": {
+      "command": "uv",
+      "args": ["run", "--project", ".", "python", "server.py"],
+      "cwd": ".",
+      "env_vars": ["APIMONITOR_HOME"]
+    }
+  }
+}

@@ -9,11 +9,20 @@ Features:
 - List/search captures, strings, ZIP entries, and raw hex
 - Search Rohitab XML API definitions
 
-Run:
+Install:
 
 ```powershell
-uv run --with mcp python .\server.py
-uv run --with mcp python .\server.py --self-test
+claude plugin marketplace add zxcvbbq/API-Monitor-MCP
+claude plugin install api-monitor-mcp@api-monitor-mcp
+codex plugin marketplace add zxcvbbq/API-Monitor-MCP
+codex plugin add api-monitor-mcp@api-monitor-mcp
+```
+
+Run locally:
+
+```powershell
+uv run python .\server.py
+uv run python .\server.py --self-test
 ```
 
 Set `APIMONITOR_HOME` if the app is installed elsewhere.
