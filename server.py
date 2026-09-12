@@ -392,6 +392,24 @@ def _post_mouse_click(handle: int) -> None:
     _post_mouse_click_at(handle, max(0, rect.right // 2), max(0, rect.bottom // 2))
 
 
+def _post_scroll(handle: int, direction: str, amount: int) -> None:
+    messages = {
+        "up": (0x0115, 0),
+        "down": (0x0115, 1),
+        "page_up": (0x0115, 2),
+        "page_down": (0x0115, 3),
+        "left": (0x0114, 0),
+        "right": (0x0114, 1),
+    }
+    if direction not in messages:
+        raise ValueError("direction must be up, down, page_up, page_down, left, or right")
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+    message, code = messages[direction]
+    for _ in range(amount):
+        if not user32.PostMessageW(handle, message, code, 0):
+            raise OSError(ctypes.get_last_error(), "Could not scroll API Monitor control")
+
+
 def _uia_text(control: Any) -> str:
     try:
         return control.window_text() or control.element_info.name or ""
@@ -831,6 +849,35 @@ def api_monitor_gui_click_point(
         "y": y,
         "window": parent,
         "control": control,
+    }
+
+
+@mcp.tool()
+def api_monitor_gui_scroll(
+    control_handle: int,
+    direction: str,
+    amount: int = 1,
+    window_title: str = "",
+) -> dict[str, Any]:
+    """Scroll an exact Rohitab control in the background."""
+    if sys.platform != "win32":
+        raise RuntimeError("Rohitab GUI scrolling requires Windows")
+    if control_handle < 1:
+        raise ValueError("control_handle must be positive")
+    amount = _limit(amount, "amount", 100)
+    target = _find_ui_control(
+        _find_api_monitor_windows(), None, "", "", window_title, control_handle
+    )
+    if target is None:
+        raise LookupError(f"Rohitab GUI control {control_handle} was not found")
+    _post_scroll(control_handle, direction, amount)
+    return {
+        "scrolled": True,
+        "method": "background-win32",
+        "direction": direction,
+        "amount": amount,
+        "window": target[0],
+        "control": target[1],
     }
 
 
