@@ -2561,6 +2561,59 @@ def _tasklist_rows() -> tuple[list[list[str]], str | None]:
     return list(csv.reader(io.StringIO(completed.stdout))), None
 
 
+def _detect_process_architecture(pid: int) -> dict[str, Any]:
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    open_process = kernel32.OpenProcess
+    open_process.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    open_process.restype = wintypes.HANDLE
+    close_handle = kernel32.CloseHandle
+    close_handle.argtypes = [wintypes.HANDLE]
+    process = open_process(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+    if not process:
+        raise OSError(ctypes.get_last_error(), f"Could not query process {pid}")
+    try:
+        machine_names = {0x014C: "x86", 0x8664: "x64", 0xAA64: "arm64"}
+        is_wow64_process2 = getattr(kernel32, "IsWow64Process2", None)
+        if is_wow64_process2 is not None:
+            is_wow64_process2.argtypes = [
+                wintypes.HANDLE,
+                ctypes.POINTER(ctypes.c_ushort),
+                ctypes.POINTER(ctypes.c_ushort),
+            ]
+            is_wow64_process2.restype = wintypes.BOOL
+            process_machine = ctypes.c_ushort()
+            native_machine = ctypes.c_ushort()
+            if not is_wow64_process2(
+                process,
+                ctypes.byref(process_machine),
+                ctypes.byref(native_machine),
+            ):
+                raise OSError(ctypes.get_last_error(), f"Could not query process {pid} architecture")
+            machine = process_machine.value or native_machine.value
+            return {
+                "pid": pid,
+                "architecture": machine_names.get(machine),
+                "machine": f"0x{machine:04x}",
+                "method": "IsWow64Process2",
+            }
+        is_wow64_process = kernel32.IsWow64Process
+        is_wow64_process.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.BOOL)]
+        is_wow64_process.restype = wintypes.BOOL
+        wow64 = wintypes.BOOL()
+        if not is_wow64_process(process, ctypes.byref(wow64)):
+            raise OSError(ctypes.get_last_error(), f"Could not query process {pid} architecture")
+        return {
+            "pid": pid,
+            "architecture": "x86" if wow64.value else "x64",
+            "machine": None,
+            "method": "IsWow64Process",
+        }
+    finally:
+        close_handle(process)
+
+
 def _named_gui_rows(headers: list[str], rows: list[list[str]]) -> list[dict[str, Any]]:
     return [
         {
@@ -2624,6 +2677,17 @@ def api_monitor_target_processes(query: str = "", limit: int = 500) -> dict[str,
         "count": len(processes),
         "truncated": len(processes) > limit,
     }
+
+
+@mcp.tool()
+def api_monitor_process_architecture(pid: int) -> dict[str, Any]:
+    """Report a running Windows process architecture for API Monitor attach selection."""
+    if sys.platform != "win32":
+        return {"supported": False, "pid": pid, "architecture": None}
+    if pid < 1:
+        raise ValueError("pid must be positive")
+    result = _detect_process_architecture(pid)
+    return {"supported": True, **result}
 
 
 @mcp.tool()
@@ -3832,8 +3896,14 @@ def api_monitor_attach_process(
         raise ValueError("pid must be positive")
     if timeout_seconds < 1 or timeout_seconds > 60:
         raise ValueError("timeout_seconds must be between 1 and 60")
-    if architecture not in {"x86", "x64"}:
-        raise ValueError("architecture must be x86 or x64")
+    if architecture not in {"auto", "x86", "x64"}:
+        raise ValueError("architecture must be auto, x86, or x64")
+    requested_architecture = architecture
+    if architecture == "auto":
+        detected = api_monitor_process_architecture(pid)
+        architecture = detected.get("architecture")
+        if architecture not in {"x86", "x64"}:
+            raise RuntimeError(f"Could not determine an API Monitor-compatible architecture for PID {pid}")
 
     main_windows = [
         window
@@ -3886,6 +3956,7 @@ def api_monitor_attach_process(
                     "process": cells[0],
                     "pid": pid,
                     "architecture": architecture,
+                    "requested_architecture": requested_architecture,
                     "window": {"handle": window.handle, "title": window.window_text()},
                 }
     suffix = f" named {process_name!r}" if process_name else ""
@@ -7295,6 +7366,9 @@ def _self_test() -> None:
         assert waited_new["ready"]
         assert waited_new["current_calls"] == 4
         assert waited_new["new_calls"] == 2
+        if sys.platform == "win32":
+            process_architecture = api_monitor_process_architecture(os.getpid())
+            assert process_architecture["architecture"] in {"x86", "x64", "arm64"}
 
 
 def main() -> None:
