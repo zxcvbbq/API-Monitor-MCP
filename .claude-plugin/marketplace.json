@@ -8,11 +8,11 @@
     {
       "name": "api-monitor-mcp",
       "source": {
-        "source": "github",
-        "repo": "zxcvbbq/API-Monitor-MCP"
+        "source": "url",
+        "url": "https://github.com/zxcvbbq/API-Monitor-MCP.git"
       },
       "description": "MCP bridge for Rohitab API Monitor captures and GUI.",
-      "version": "0.10.44",
+      "version": "0.10.45",
       "category": "Developer Tools"
     }
   ]

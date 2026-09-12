@@ -16,7 +16,7 @@ Features:
 Install:
 
 ```powershell
-claude plugin marketplace add zxcvbbq/API-Monitor-MCP
+claude plugin marketplace add https://github.com/zxcvbbq/API-Monitor-MCP.git
 claude plugin install api-monitor-mcp@api-monitor-mcp
 codex plugin marketplace add zxcvbbq/API-Monitor-MCP
 codex plugin add api-monitor-mcp@api-monitor-mcp
