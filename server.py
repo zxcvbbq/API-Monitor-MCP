@@ -513,13 +513,14 @@ def _capture_record_size(
 
 def _capture_call_context(data: bytes, offset: int, pointer_size: int = 8) -> dict[str, Any]:
     if pointer_size == 8:
-        module_base_offset, timestamp_offset, duration_offset = 48, 72, 96
+        module_base_offset, timestamp_offset, duration_offset, error_offset = 48, 72, 96, 84
     else:
-        module_base_offset, timestamp_offset, duration_offset = 40, 56, 80
+        module_base_offset, timestamp_offset, duration_offset, error_offset = 40, 56, 80, 68
     context: dict[str, Any] = {
         "thread_id": struct.unpack_from("<I", data, offset + 16)[0],
         "thread_number": struct.unpack_from("<I", data, offset + 20)[0],
         "module_base": f"0x{int.from_bytes(data[offset + module_base_offset : offset + module_base_offset + pointer_size], 'little'):0{pointer_size * 2}x}",
+        "error_code": struct.unpack_from("<I", data, offset + error_offset)[0],
     }
     timestamp = int.from_bytes(
         data[offset + timestamp_offset : offset + timestamp_offset + 8], "little"
@@ -5211,6 +5212,7 @@ def _self_test() -> None:
             struct.pack_into("<I", record, 20, 7)
             struct.pack_into("<Q", record, 48, 0x7FF600001000)
             struct.pack_into("<Q", record, 72, 132223104000000000)
+            struct.pack_into("<I", record, 84, 5)
             struct.pack_into("<d", record, 96, 0.125)
             struct.pack_into("<Q", record, 40, 16)
             struct.pack_into("<I", record, 32, 5)
@@ -5329,6 +5331,7 @@ def _self_test() -> None:
         assert call_context["thread_id"] == 0x1234
         assert call_context["thread_number"] == 7
         assert call_context["module_base"] == "0x00007ff600001000"
+        assert call_context["error_code"] == 5
         assert call_context["timestamp_utc"] == "2020-01-01T00:00:00+00:00"
         assert call_context["duration_seconds"] == 0.125
         resolved_records = capture_call_records(str(path), resolve_definitions=True)
@@ -5540,6 +5543,7 @@ def _self_test() -> None:
         struct.pack_into("<I", x86_record, 20, 8)
         struct.pack_into("<I", x86_record, 40, 0x00401000)
         struct.pack_into("<Q", x86_record, 56, 132223104000000000)
+        struct.pack_into("<I", x86_record, 68, 6)
         struct.pack_into("<d", x86_record, 80, 0.25)
         struct.pack_into("<I", x86_record, 36, 16)
         struct.pack_into("<I", x86_record, 32, 5)
@@ -5627,6 +5631,7 @@ def _self_test() -> None:
         assert x86_context["thread_id"] == 0x2345
         assert x86_context["thread_number"] == 8
         assert x86_context["module_base"] == "0x00401000"
+        assert x86_context["error_code"] == 6
         assert x86_context["duration_seconds"] == 0.25
         assert capture_read_definition(str(x86_path), 16)["architecture"] == "x86"
         assert capture_list_apis(str(x86_path))["apis"][0]["module"] == "kernel32.dll"
