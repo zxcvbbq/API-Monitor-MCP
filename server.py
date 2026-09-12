@@ -499,7 +499,7 @@ def _post_scroll(handle: int, direction: str, amount: int) -> None:
             raise OSError(ctypes.get_last_error(), "Could not scroll API Monitor control")
 
 
-def _post_key(handle: int, key: str) -> None:
+def _post_key(handle: int, key: str, modifiers: list[str] | None = None) -> None:
     keys = {
         "backspace": 0x08,
         "tab": 0x09,
@@ -517,6 +517,10 @@ def _post_key(handle: int, key: str) -> None:
         "insert": 0x2D,
         "delete": 0x2E,
     }
+    modifier_keys = {"ctrl": 0x11, "shift": 0x10, "alt": 0x12}
+    modifiers = modifiers or []
+    if any(modifier.casefold() not in modifier_keys for modifier in modifiers):
+        raise ValueError("modifiers must contain only ctrl, shift, or alt")
     if len(key) == 1:
         value = ord(key.upper())
         if not 0x20 <= value <= 0x7E:
@@ -526,10 +530,20 @@ def _post_key(handle: int, key: str) -> None:
         if value is None:
             raise ValueError("key must be one supported named key or one ASCII character")
     user32 = ctypes.WinDLL("user32", use_last_error=True)
-    if not user32.PostMessageW(handle, 0x0100, value, 0):  # WM_KEYDOWN
-        raise OSError(ctypes.get_last_error(), "Could not send API Monitor key")
-    if not user32.PostMessageW(handle, 0x0101, value, 0):  # WM_KEYUP
-        raise OSError(ctypes.get_last_error(), "Could not release API Monitor key")
+    pressed = []
+    try:
+        for modifier in modifiers:
+            modifier_value = modifier_keys[modifier.casefold()]
+            if not user32.PostMessageW(handle, 0x0100, modifier_value, 0):  # WM_KEYDOWN
+                raise OSError(ctypes.get_last_error(), "Could not send API Monitor modifier")
+            pressed.append(modifier_value)
+        if not user32.PostMessageW(handle, 0x0100, value, 0):  # WM_KEYDOWN
+            raise OSError(ctypes.get_last_error(), "Could not send API Monitor key")
+        if not user32.PostMessageW(handle, 0x0101, value, 0):  # WM_KEYUP
+            raise OSError(ctypes.get_last_error(), "Could not release API Monitor key")
+    finally:
+        for modifier_value in reversed(pressed):
+            user32.PostMessageW(handle, 0x0101, modifier_value, 0)  # WM_KEYUP
 
 
 def _uia_text(control: Any) -> str:
@@ -1010,6 +1024,7 @@ def api_monitor_gui_key(
     control_handle: int,
     key: str,
     window_title: str = "",
+    modifiers: list[str] | None = None,
 ) -> dict[str, Any]:
     """Send one navigation key to an exact Rohitab control in the background."""
     if sys.platform != "win32":
@@ -1021,13 +1036,14 @@ def api_monitor_gui_key(
     )
     if target is None:
         raise LookupError(f"Rohitab GUI control {control_handle} was not found")
-    _post_key(control_handle, key)
+    _post_key(control_handle, key, modifiers)
     return {
         "sent": True,
         "method": "background-win32",
         "key": key,
         "window": target[0],
         "control": target[1],
+        "modifiers": modifiers or [],
     }
 
 
