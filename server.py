@@ -202,7 +202,19 @@ def _windows_filetime(value: int) -> str | None:
     return (datetime(1601, 1, 1, tzinfo=timezone.utc) + timedelta(microseconds=value / 10)).isoformat()
 
 
-def _parse_capture_process_info(data: bytes) -> dict[str, Any]:
+def _parse_capture_process_info(data: bytes, pointer_size: int = 8) -> dict[str, Any]:
+    if pointer_size == 4:
+        if len(data) < 16:
+            raise ValueError("32-bit process info entry is too small")
+        version, capture_index, pid, image_base = struct.unpack_from("<IIII", data)
+        return {
+            "architecture": "x86",
+            "format_version": version,
+            "capture_index": capture_index,
+            "pid": pid,
+            "image_base": f"0x{image_base:x}",
+            "format_note": "32-bit header decoded; remaining process metadata is app-version specific",
+        }
     if len(data) < 24:
         raise ValueError("Process info entry is too small")
     payload_end = len(data) - 4
@@ -3816,6 +3828,7 @@ def capture_list_processes(file_path: str, limit: int = 200) -> dict[str, Any]:
     """List process records and executable paths recoverable from an APMX capture."""
     limit = _limit(limit, "limit", 2000)
     path = _capture_path(file_path)
+    pointer_size = 4 if path.suffix.lower() == ".apmx86" else 8
     archive, _, _ = _open_capture_zip(path)
     processes: list[dict[str, Any]] = []
     with archive:
@@ -3838,7 +3851,7 @@ def capture_list_processes(file_path: str, limit: int = 200) -> dict[str, Any]:
                 if value.casefold().endswith(".exe") and value not in executables:
                     executables.append(value)
             try:
-                metadata = _parse_capture_process_info(data)
+                metadata = _parse_capture_process_info(data, pointer_size)
             except ValueError as exc:
                 metadata = {"parse_error": str(exc)}
             processes.append(
@@ -3850,9 +3863,9 @@ def capture_list_processes(file_path: str, limit: int = 200) -> dict[str, Any]:
                     "executables": executables,
                     "calls_entry": f"process/{index}/calls" if f"process/{index}/calls" in entries else None,
                     "data_entry": f"process/{index}/data" if f"process/{index}/data" in entries else None,
-                    "call_count": entries[f"process/{index}/calls"].file_size // 8
+                    "call_count": entries[f"process/{index}/calls"].file_size // pointer_size
                     if f"process/{index}/calls" in entries
-                    and entries[f"process/{index}/calls"].file_size % 8 == 0
+                    and entries[f"process/{index}/calls"].file_size % pointer_size == 0
                     else None,
                     "data_size": entries[f"process/{index}/data"].file_size
                     if f"process/{index}/data" in entries
@@ -4311,6 +4324,7 @@ def _self_test() -> None:
             archive.writestr("process/0/calls", struct.pack("<I", 0))
             archive.writestr("process/0/data", bytes(x86_record) + b"hello")
             archive.writestr("definitions", bytes(x86_definitions))
+            archive.writestr("process/0/info", struct.pack("<IIII", 1, 0, 4321, 0x400000))
         x86_path.write_bytes(b"\r\nAPI Monitor 32-bit Capture\r\nRBAPM" + x86_payload.getvalue())
         x86_records = capture_call_records(
             str(x86_path), include_data=True, resolve_definitions=True
@@ -4319,6 +4333,9 @@ def _self_test() -> None:
         assert x86_records["records"][0]["definition"]["name"] == "CreateFileA"
         assert x86_records["records"][0]["data_refs"][0]["payload"]["text"] == "hello"
         assert capture_list_apis(str(x86_path))["apis"][0]["module"] == "kernel32.dll"
+        x86_processes = capture_list_processes(str(x86_path))
+        assert x86_processes["processes"][0]["call_count"] == 1
+        assert x86_processes["processes"][0]["metadata"]["pid"] == 4321
 
         app_root = Path(directory) / "app"
         definition_root = app_root / "API"
