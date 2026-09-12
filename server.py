@@ -301,6 +301,66 @@ def _capture_record_size(offsets: list[int], index: int, data: bytes) -> int:
     return next_offset - offset if 144 <= next_offset - offset <= 160 else 160 if data[offset + 2] else 144
 
 
+def _capture_definition_info(definitions: bytes, relative: int) -> dict[str, Any]:
+    result: dict[str, Any] = {"offset": relative, "valid": False}
+    if relative > len(definitions) - 64:
+        result["error"] = "definition offset is outside definitions entry"
+        return result
+    flags = definitions[relative]
+    ordinal = struct.unpack_from("<I", definitions, relative + 8)[0]
+    name_relative = struct.unpack_from("<Q", definitions, relative + 24)[0]
+    module_relative = struct.unpack_from("<Q", definitions, relative + 40)[0]
+    result.update(
+        {
+            "flags": f"0x{flags:02x}",
+            "ordinal": ordinal,
+            "name_offset": name_relative,
+            "module_offset": module_relative,
+        }
+    )
+    if name_relative >= len(definitions):
+        result["error"] = "definition name offset is outside definitions entry"
+        return result
+    name_end = definitions.find(b"\x00", name_relative)
+    if name_end < 0:
+        result["error"] = "definition name is not NUL-terminated"
+        return result
+    name_bytes = definitions[name_relative:name_end]
+    try:
+        name = name_bytes.decode("ascii")
+    except UnicodeDecodeError:
+        result["error"] = "definition name is not ASCII"
+        return result
+    if not name or not all(char.isprintable() for char in name):
+        result["error"] = "definition name is not printable"
+        return result
+    result["name"] = name
+    if module_relative:
+        if module_relative > len(definitions) - 24:
+            result["error"] = "definition module offset is outside definitions entry"
+            return result
+        module_name_relative = struct.unpack_from("<Q", definitions, module_relative + 16)[0]
+        if module_name_relative >= len(definitions):
+            result["error"] = "definition module name offset is outside definitions entry"
+            return result
+        module_name_end = definitions.find(b"\x00", module_name_relative)
+        if module_name_end < 0:
+            result["error"] = "definition module name is not NUL-terminated"
+            return result
+        try:
+            module = definitions[module_name_relative:module_name_end].decode("ascii")
+        except UnicodeDecodeError:
+            result["error"] = "definition module name is not ASCII"
+            return result
+        if not module or not all(char.isprintable() for char in module):
+            result["error"] = "definition module name is not printable"
+            return result
+        result["module"] = module
+        result["module_name_offset"] = module_name_relative
+    result["valid"] = True
+    return result
+
+
 def _capture_call_records(
     calls: bytes,
     data: bytes,
@@ -308,6 +368,7 @@ def _capture_call_records(
     include_data: bool,
     max_data_bytes: int,
     start_index: int = 0,
+    definitions: bytes | None = None,
 ) -> list[dict[str, Any]]:
     if len(calls) % 8:
         raise ValueError("process calls entry is not an array of 64-bit offsets")
@@ -327,6 +388,10 @@ def _capture_call_records(
             "header_hex": data[offset : offset + min(record_size, 112)].hex(" "),
             "data_refs": [],
         }
+        definition_offset = struct.unpack_from("<Q", data, offset + 40)[0]
+        record["definition_offset"] = definition_offset
+        if definitions is not None:
+            record["definition"] = _capture_definition_info(definitions, definition_offset)
         if not record["valid"]:
             record["error"] = "record extends beyond process data"
             records.append(record)
@@ -2690,6 +2755,7 @@ def capture_call_records(
     limit: int = 500,
     include_data: bool = False,
     max_data_bytes: int = 4096,
+    resolve_definitions: bool = False,
 ) -> dict[str, Any]:
     """Decode saved process call offsets and their raw data references."""
     if process_index < 0 or start_index < 0:
@@ -2709,6 +2775,7 @@ def capture_call_records(
             data = archive.read(data_name)
         except KeyError:
             data = b""
+        definitions = archive.read("definitions") if resolve_definitions and "definitions" in archive.namelist() else None
     count = len(calls) // 8
     if start_index > count:
         raise IndexError(f"start_index {start_index} is outside {count} saved calls")
@@ -2719,6 +2786,7 @@ def capture_call_records(
         include_data,
         max_data_bytes,
         start_index=start_index,
+        definitions=definitions,
     )
     return {
         "file": str(path),
@@ -2727,12 +2795,17 @@ def capture_call_records(
         "data_entry": data_name if data else None,
         "call_entry_bytes": len(calls),
         "data_entry_bytes": len(data),
+        "definitions_available": definitions is not None,
         "count": count,
         "start_index": start_index,
         "end_index": records[-1]["index"] if records else None,
         "records": records,
         "truncated": start_index + len(records) < count,
-        "format": "APMX process call offset stream; record fields remain raw until API definition correlation is added",
+        "format": (
+            "APMX process call offset stream with definition resolution"
+            if definitions is not None
+            else "APMX process call offset stream; enable resolve_definitions when the definitions entry is present"
+        ),
     }
 
 
@@ -2747,6 +2820,7 @@ def capture_export_calls(
     include_data: bool = True,
     max_data_bytes: int = 4096,
     overwrite: bool = False,
+    resolve_definitions: bool = False,
 ) -> dict[str, Any]:
     """Export a bounded saved call-record page as JSON or CSV."""
     if output_format not in {"json", "csv"}:
@@ -2764,6 +2838,7 @@ def capture_export_calls(
         limit=limit,
         include_data=include_data,
         max_data_bytes=max_data_bytes,
+        resolve_definitions=resolve_definitions,
     )
     if output_format == "json":
         content = json.dumps(result, indent=2, ensure_ascii=False) + "\n"
@@ -2778,6 +2853,9 @@ def capture_export_calls(
                 "size",
                 "valid",
                 "flags",
+                "definition_offset",
+                "api_name",
+                "api_module",
                 "slot",
                 "data_offset",
                 "length",
@@ -2787,6 +2865,7 @@ def capture_export_calls(
         )
         for record in result["records"]:
             references = record.get("data_refs", []) or [{}]
+            definition = record.get("definition", {})
             for reference in references:
                 payload = reference.get("payload", {})
                 writer.writerow(
@@ -2797,6 +2876,9 @@ def capture_export_calls(
                         record["size"],
                         record["valid"],
                         record["flags"],
+                        record.get("definition_offset", ""),
+                        definition.get("name", ""),
+                        definition.get("module", ""),
                         reference.get("slot", ""),
                         reference.get("offset", ""),
                         reference.get("length", ""),
@@ -2970,8 +3052,9 @@ def capture_search_calls(
     limit: int = 100,
     max_records: int = 100_000,
     max_data_bytes: int = 16_384,
+    resolve_definitions: bool = False,
 ) -> dict[str, Any]:
-    """Search decoded saved call payloads across one or all capture processes."""
+    """Search saved call payloads and optionally resolved API definitions."""
     if not query:
         raise ValueError("query must not be empty")
     if process_index is not None and process_index < 0:
@@ -2995,6 +3078,7 @@ def capture_search_calls(
         for index in sorted(process_indices):
             calls = archive.read(f"process/{index}/calls")
             data = archive.read(f"process/{index}/data") if f"process/{index}/data" in entries else b""
+            definitions = archive.read("definitions") if resolve_definitions and "definitions" in entries else None
             if len(calls) % 8:
                 raise ValueError(f"process/{index}/calls is not an array of 64-bit offsets")
             record_count = len(calls) // 8
@@ -3006,6 +3090,7 @@ def capture_search_calls(
                 min(record_count, max_records - scanned),
                 True,
                 max_data_bytes,
+                definitions=definitions,
             )
             for record in records:
                 scanned += 1
@@ -3025,13 +3110,28 @@ def capture_search_calls(
                             "snippet": text[start:end],
                         }
                     )
-                if payload_matches:
-                    matches.append(
+                definition = record.get("definition", {})
+                api_matches = []
+                api_text = f"{definition.get('name', '')} {definition.get('module', '')}"
+                if definition.get("valid") and wanted in api_text.casefold():
+                    api_matches.append(
                         {
-                            "process_index": index,
-                            "record": record,
-                            "payload_matches": payload_matches,
+                            "name": definition.get("name"),
+                            "module": definition.get("module"),
+                            "ordinal": definition.get("ordinal"),
+                            "offset": definition.get("offset"),
                         }
+                    )
+                if payload_matches or api_matches:
+                    match = {
+                        "process_index": index,
+                        "record": record,
+                        "payload_matches": payload_matches,
+                    }
+                    if api_matches:
+                        match["api_matches"] = api_matches
+                    matches.append(
+                        match
                     )
                     if len(matches) >= limit:
                         return {
@@ -3053,6 +3153,7 @@ def capture_search_calls(
         "count": len(matches),
         "scanned_records": scanned,
         "truncated": scan_truncated,
+        "definitions_resolved": resolve_definitions,
     }
 
 
@@ -3065,6 +3166,7 @@ def capture_calls_around(
     after: int = 5,
     include_data: bool = True,
     max_data_bytes: int = 4096,
+    resolve_definitions: bool = False,
 ) -> dict[str, Any]:
     """Return a bounded raw call-record window around one saved call."""
     if process_index < 0 or record_index < 0:
@@ -3077,11 +3179,13 @@ def capture_calls_around(
     data_name = f"process/{process_index}/data"
     archive, _, _ = _open_capture_zip(path)
     with archive:
+        entries = {info.filename for info in archive.infolist()}
         try:
             calls = archive.read(calls_name)
         except KeyError as exc:
             raise FileNotFoundError(f"Capture call entry not found: {calls_name}") from exc
-        data = archive.read(data_name) if data_name in archive.namelist() else b""
+        data = archive.read(data_name) if data_name in entries else b""
+        definitions = archive.read("definitions") if resolve_definitions and "definitions" in entries else None
     if len(calls) % 8:
         raise ValueError("process calls entry is not an array of 64-bit offsets")
     count = len(calls) // 8
@@ -3096,6 +3200,7 @@ def capture_calls_around(
         include_data,
         max_data_bytes,
         start_index=start,
+        definitions=definitions,
     )
     for record in records:
         record["is_target"] = record["index"] == record_index
@@ -3111,7 +3216,11 @@ def capture_calls_around(
         "window_start": start,
         "window_end": end - 1,
         "records": records,
-        "format": "APMX process call offset stream; record fields remain raw until API definition correlation is added",
+        "format": (
+            "APMX process call offset stream with definition resolution"
+            if resolve_definitions and definitions is not None
+            else "APMX process call offset stream; enable resolve_definitions when the definitions entry is present"
+        ),
     }
 
 
@@ -3519,10 +3628,19 @@ def _self_test() -> None:
             )
             record = bytearray(160)
             record[2] = 1
+            struct.pack_into("<Q", record, 40, 16)
             struct.pack_into("<I", record, 32, 5)
             struct.pack_into("<Q", record, 112, 160)
             archive.writestr("process/0/calls", struct.pack("<Q", 0))
             archive.writestr("process/0/data", bytes(record) + b"hello")
+            definitions = bytearray(160)
+            struct.pack_into("<I", definitions, 16 + 8, 123)
+            struct.pack_into("<Q", definitions, 16 + 24, 80)
+            struct.pack_into("<Q", definitions, 16 + 40, 96)
+            definitions[80 : 80 + len(b"CreateFileW\x00")] = b"CreateFileW\x00"
+            struct.pack_into("<Q", definitions, 96 + 16, 128)
+            definitions[128 : 128 + len(b"kernel32.dll\x00")] = b"kernel32.dll\x00"
+            archive.writestr("definitions", bytes(definitions))
             archive.writestr(
                 "log/monitoring.txt",
                 "sample.exe: Monitoring Module 0x1234 -> C:\\sample.dll\n",
@@ -3575,24 +3693,43 @@ def _self_test() -> None:
         assert call_records["count"] == 1
         assert call_records["start_index"] == 0
         assert call_records["records"][0]["data_refs"][0]["payload"]["text"] == "hello"
+        resolved_records = capture_call_records(str(path), resolve_definitions=True)
+        assert resolved_records["definitions_available"]
+        assert resolved_records["records"][0]["definition"]["name"] == "CreateFileW"
+        assert resolved_records["records"][0]["definition"]["module"] == "kernel32.dll"
+        assert resolved_records["records"][0]["definition"]["ordinal"] == 123
         extracted_payload = Path(directory) / "payload.bin"
         payload_export = capture_extract_call_payload(str(path), 0, 0, 0, str(extracted_payload))
         assert payload_export["size"] == 5
         assert extracted_payload.read_bytes() == b"hello"
-        json_export = capture_export_calls(str(path), str(Path(directory) / "calls.json"))
+        json_export = capture_export_calls(
+            str(path), str(Path(directory) / "calls.json"), resolve_definitions=True
+        )
         assert json_export["count"] == 1
-        assert json.loads((Path(directory) / "calls.json").read_text())["records"][0]["index"] == 0
+        exported_json = json.loads((Path(directory) / "calls.json").read_text())
+        assert exported_json["records"][0]["index"] == 0
+        assert exported_json["records"][0]["definition"]["name"] == "CreateFileW"
         csv_export = capture_export_calls(
-            str(path), str(Path(directory) / "calls.csv"), output_format="csv"
+            str(path),
+            str(Path(directory) / "calls.csv"),
+            output_format="csv",
+            resolve_definitions=True,
         )
         assert csv_export["format"] == "csv"
-        assert (Path(directory) / "calls.csv").read_text().startswith("process_index,record_index")
+        csv_text = (Path(directory) / "calls.csv").read_text()
+        assert csv_text.startswith("process_index,record_index")
+        assert "CreateFileW" in csv_text and "kernel32.dll" in csv_text
         call_search = capture_search_calls(str(path), "ell")
         assert call_search["count"] == 1
         assert call_search["matches"][0]["payload_matches"][0]["snippet"] == "hello"
+        api_search = capture_search_calls(str(path), "CreateFileW", resolve_definitions=True)
+        assert api_search["count"] == 1
+        assert api_search["matches"][0]["api_matches"][0]["module"] == "kernel32.dll"
         call_window = capture_calls_around(str(path), 0, 0, before=2, after=2)
         assert call_window["window_start"] == 0
         assert call_window["records"][0]["is_target"]
+        resolved_window = capture_calls_around(str(path), 0, 0, resolve_definitions=True)
+        assert resolved_window["records"][0]["definition"]["name"] == "CreateFileW"
         binary_payload = _read_payload(b"\x01\x00\xff\x00")
         assert binary_payload["encoding"] == "base64"
         assert binary_payload["size"] == 4
@@ -3620,6 +3757,7 @@ def _self_test() -> None:
             "filter/display.xml",
             "process/0/calls",
             "process/0/data",
+            "definitions",
             "log/monitoring.txt",
             "process/0/info",
             "info",
@@ -3629,7 +3767,7 @@ def _self_test() -> None:
         directory_search = capture_search_directory(directory, "CreateFile", recursive=False, limit=10)
         assert directory_search["captures"][0]["entries"][0]["entry"] == "calls.bin"
         comparison = capture_compare(str(path), str(second_path))
-        assert comparison["counts"] == {"added": 1, "removed": 7, "changed": 1}
+        assert comparison["counts"] == {"added": 1, "removed": 8, "changed": 1}
         assert not comparison["same"]
 
         app_root = Path(directory) / "app"
