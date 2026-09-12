@@ -39,6 +39,9 @@ UTF16_STRINGS = re.compile(rb"(?:[\x20-\x7e]\x00){4,}")
 API_NAME = re.compile(r'<Api\b[^>]*\bName\s*=\s*["\']([^"\']+)', re.I)
 MODULE_NAME = re.compile(r'<Module\b[^>]*\bName\s*=\s*["\']([^"\']+)', re.I)
 PROCESS_INFO = re.compile(r"process/(\d+)/info$", re.I)
+SUMMARY_TEXT = re.compile(
+    r"Summary\s*\|\s*([\d,]+)\s*calls\s*\|\s*([^|]+?)\s*\|\s*(.*)", re.I
+)
 
 mcp = FastMCP(
     "rohitab-api-monitor",
@@ -519,6 +522,34 @@ def api_monitor_ui_tree() -> dict[str, Any]:
     if sys.platform != "win32":
         return {"supported": False, "windows": []}
     return {"supported": True, "windows": _find_api_monitor_windows()}
+
+
+@mcp.tool()
+def api_monitor_summary(window_title: str = "") -> dict[str, Any]:
+    """Read Rohitab Summary panes without foregrounding the application."""
+    if sys.platform != "win32":
+        return {"supported": False, "summaries": []}
+    summaries: list[dict[str, Any]] = []
+    for window in _find_api_monitor_windows():
+        if "api monitor v2" not in window["title"].casefold():
+            continue
+        if window_title and window["title"] != window_title:
+            continue
+        for control in window.get("children", []):
+            match = SUMMARY_TEXT.fullmatch(control.get("title", "").strip())
+            if not match:
+                continue
+            summaries.append(
+                {
+                    "window": {"handle": window["handle"], "title": window["title"]},
+                    "control": control,
+                    "text": control["title"],
+                    "calls": int(match.group(1).replace(",", "")),
+                    "usage": match.group(2).strip(),
+                    "process": match.group(3).strip(),
+                }
+            )
+    return {"supported": True, "summaries": summaries}
 
 
 @mcp.tool()
