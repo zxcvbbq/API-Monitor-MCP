@@ -34,6 +34,7 @@ CAPTURE_SUFFIXES = {".apmx64", ".apmx86"}
 COMMAND_OPEN_CAPTURE = 32852
 COMMAND_SAVE_CAPTURE = 32854
 COMMAND_SAVE_CAPTURE_AS = 32954
+COMMAND_MONITOR_NEW_PROCESS = 32884
 COMMAND_START_MONITORING = 32882
 COMMAND_STOP_MONITORING = 32929
 COMMAND_REMOVE_PROCESS = 32919
@@ -1409,17 +1410,7 @@ def api_monitor_monitor_process(
         None,
     )
     if dialog is None:
-        button = next(
-            (
-                child
-                for child in main_window.get("children", [])
-                if child.get("title") == "Monitor New Process"
-            ),
-            None,
-        )
-        if button is None:
-            raise RuntimeError("Monitor New Process button not found")
-        _post_button_click(button["handle"])
+        _post_window_command(main_window["handle"], COMMAND_MONITOR_NEW_PROCESS)
         dialog = _wait_for_api_monitor_window(
             lambda window: window["title"] == "Monitor Process", timeout_seconds
         )
