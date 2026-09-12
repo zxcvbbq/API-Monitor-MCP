@@ -5841,6 +5841,136 @@ def capture_list_apis(
 
 
 @mcp.tool()
+def capture_list_definitions(
+    file_path: str,
+    process_index: int | None = None,
+    limit: int = 1000,
+    max_records: int = 1_000_000,
+    include_details: bool = False,
+) -> dict[str, Any]:
+    """List API definitions referenced by saved calls, including unresolved offsets."""
+    if process_index is not None and process_index < 0:
+        raise ValueError("process_index must be non-negative")
+    limit = _limit(limit, "limit", 10_000)
+    max_records = _limit(max_records, "max_records", 1_000_000)
+    path = _capture_path(file_path)
+    pointer_size = 4 if path.suffix.lower() == ".apmx86" else 8
+    archive, _, _ = _open_capture_zip(path)
+    definitions_by_offset: dict[int, dict[str, Any]] = {}
+    scanned = 0
+    unknown_records = 0
+    invalid_records = 0
+    truncated = False
+    with archive:
+        entries = {info.filename for info in archive.infolist()}
+        if "definitions" not in entries:
+            return {
+                "file": str(path),
+                "process_index": process_index,
+                "definitions_available": False,
+                "definitions": [],
+                "count": 0,
+                "scanned_records": 0,
+                "resolved_records": 0,
+                "unknown_records": 0,
+                "invalid_records": 0,
+                "truncated": False,
+            }
+        definitions = archive.read("definitions")
+        process_indices = sorted(
+            int(match.group(1))
+            for name in entries
+            if (match := re.fullmatch(r"process/(\d+)/calls", name, re.IGNORECASE))
+            and (process_index is None or int(match.group(1)) == process_index)
+        )
+        for index in process_indices:
+            calls_name = f"process/{index}/calls"
+            data_name = f"process/{index}/data"
+            calls = archive.read(calls_name)
+            data = archive.read(data_name) if data_name in entries else b""
+            if len(calls) % pointer_size:
+                raise ValueError(
+                    f"process/{index}/calls is not an array of {pointer_size * 8}-bit offsets"
+                )
+            record_count = len(calls) // pointer_size
+            page_count = min(record_count, max_records - scanned)
+            truncated |= page_count < record_count
+            records = _capture_call_records(
+                calls,
+                data,
+                page_count,
+                False,
+                0,
+                definitions=definitions,
+                pointer_size=pointer_size,
+            )
+            for record in records:
+                scanned += 1
+                definition_offset = record.get("definition_offset", 0)
+                if not definition_offset:
+                    unknown_records += 1
+                    continue
+                definition = record.get("definition", {})
+                if not definition.get("valid"):
+                    invalid_records += 1
+                item = definitions_by_offset.setdefault(
+                    definition_offset,
+                    {
+                        "offset": definition_offset,
+                        "count": 0,
+                        "process_indices": [],
+                        "first_record": {
+                            "process_index": index,
+                            "index": record["index"],
+                        },
+                        "last_record": {
+                            "process_index": index,
+                            "index": record["index"],
+                        },
+                        "definition": definition,
+                    },
+                )
+                item["count"] += 1
+                if index not in item["process_indices"]:
+                    item["process_indices"].append(index)
+                first = item["first_record"]
+                last = item["last_record"]
+                if (index, record["index"]) < (first["process_index"], first["index"]):
+                    item["first_record"] = {"process_index": index, "index": record["index"]}
+                if (index, record["index"]) > (last["process_index"], last["index"]):
+                    item["last_record"] = {"process_index": index, "index": record["index"]}
+            if scanned >= max_records:
+                break
+    returned = sorted(
+        definitions_by_offset.values(),
+        key=lambda item: (-item["count"], item["offset"]),
+    )
+    for item in returned:
+        definition = item.pop("definition")
+        item.update(
+            {
+                key: definition[key]
+                for key in ("valid", "error", "name", "module", "ordinal", "flags", "parameter_count")
+                if key in definition
+            }
+        )
+        if include_details:
+            item["details"] = definition
+    return {
+        "file": str(path),
+        "process_index": process_index,
+        "definitions_available": True,
+        "definitions": returned[:limit],
+        "count": len(returned),
+        "scanned_records": scanned,
+        "resolved_records": scanned - unknown_records - invalid_records,
+        "unknown_records": unknown_records,
+        "invalid_records": invalid_records,
+        "truncated": truncated or len(returned) > limit,
+    }
+
+
+@mcp.tool()
 def capture_search_calls(
     file_path: str,
     query: str,
@@ -7321,6 +7451,10 @@ def _self_test() -> None:
         assert api_list["apis"][0]["count"] == 1
         assert api_list["apis"][0]["context"]["error_count"] == 1
         assert api_list["apis"][0]["context"]["duration_seconds"]["average"] == 0.125
+        definitions_list = capture_list_definitions(str(path), include_details=True)
+        assert definitions_list["count"] == 1
+        assert definitions_list["definitions"][0]["name"] == "CreateFileW"
+        assert definitions_list["definitions"][0]["details"]["module"] == "kernel32.dll"
         entries = _zip_entries(path)
         assert {entry["name"] for entry in entries} == {
             "metadata.txt",
