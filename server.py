@@ -1887,6 +1887,42 @@ def capture_info(file_path: str) -> dict[str, Any]:
 
 
 @mcp.tool()
+def capture_validate(file_path: str) -> dict[str, Any]:
+    """Validate an APMX prefix, ZIP container, and every stored entry CRC."""
+    path = _capture_path(file_path)
+    try:
+        archive, data, offset = _open_capture_zip(path)
+    except (ValueError, zipfile.BadZipFile) as exc:
+        return {
+            "file": str(path),
+            "valid": False,
+            "prefix_valid": False,
+            "zip_offset": None,
+            "entries": 0,
+            "first_bad_entry": None,
+            "error": str(exc),
+        }
+    bad_entry = None
+    error = None
+    with archive:
+        try:
+            bad_entry = archive.testzip()
+        except (OSError, RuntimeError, zipfile.BadZipFile) as exc:
+            error = str(exc)
+        entry_count = len(archive.infolist())
+    prefix = data[:offset]
+    return {
+        "file": str(path),
+        "valid": error is None and bad_entry is None,
+        "prefix_valid": prefix.endswith(b"RBAPM"),
+        "zip_offset": offset,
+        "entries": entry_count,
+        "first_bad_entry": bad_entry,
+        "error": error,
+    }
+
+
+@mcp.tool()
 def capture_compare(
     first_file: str,
     second_file: str,
@@ -2478,6 +2514,7 @@ def _self_test() -> None:
         assert info["architecture"] == "x64"
         assert info["metadata"]["application"] == "API Monitor v2 Alpha-r13 64-bit"
         assert info["metadata"]["crc32_valid"]
+        assert capture_validate(str(path))["valid"]
         assert info["entries"][0]["name"] == "metadata.txt"
         strings = _capture_strings(path, "CreateFile", 10, 4)
         assert strings and "CreateFileW" in strings[0]["text"]
