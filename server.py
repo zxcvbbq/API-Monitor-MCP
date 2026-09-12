@@ -943,7 +943,7 @@ def _capture_call_stats(
                 error_codes_truncated = True
         if context["timestamp_filetime"]:
             timestamps.append(context["timestamp_filetime"])
-        if context.get("duration_valid"):
+        if context.get("duration_valid") and math.isfinite(context["duration_seconds"]):
             durations.append(context["duration_seconds"])
         for slot, pointer_offset, length_offset in layout["pointer_refs"]:
             if pointer_offset + pointer_size > record_size or length_offset + 4 > record_size:
@@ -4707,7 +4707,7 @@ def capture_list_apis(
                 item["_thread_ids"].add(context.get("thread_id", 0))
                 if context.get("timestamp_filetime"):
                     item["_timestamps"].append(context["timestamp_filetime"])
-                if context.get("duration_valid"):
+                if context.get("duration_valid") and math.isfinite(context["duration_seconds"]):
                     item["_durations"].append(context["duration_seconds"])
                 if context.get("error_code"):
                     item["_error_count"] += 1
