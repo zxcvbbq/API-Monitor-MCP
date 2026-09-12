@@ -3722,10 +3722,24 @@ def capture_validate(
         entry_count = len(archive.infolist())
     prefix = data[:offset]
     prefix_valid = prefix.endswith(b"RBAPM")
+    suffix_architecture = "x86" if path.suffix.lower() == ".apmx86" else "x64"
+    header_architecture = (
+        "x64"
+        if b"64-bit Capture" in prefix
+        else "x86"
+        if b"32-bit Capture" in prefix
+        else None
+    )
+    architecture_match = (
+        header_architecture is None or header_architecture == suffix_architecture
+    )
     result: dict[str, Any] = {
         "file": str(path),
-        "valid": prefix_valid and error is None and bad_entry is None,
+        "valid": prefix_valid and architecture_match and error is None and bad_entry is None,
         "prefix_valid": prefix_valid,
+        "architecture": suffix_architecture,
+        "header_architecture": header_architecture,
+        "architecture_match": architecture_match,
         "zip_offset": offset,
         "entries": entry_count,
         "first_bad_entry": bad_entry,
@@ -3740,6 +3754,17 @@ def capture_validate(
     with archive:
         entries = {info.filename: info for info in archive.infolist()}
         definitions = archive.read("definitions") if "definitions" in entries else None
+        info_validation: dict[str, Any] = {"available": False}
+        if "info" in entries:
+            try:
+                info_metadata = _parse_capture_info(archive.read("info"))
+                info_validation = {
+                    "available": True,
+                    "valid": info_metadata["crc32_valid"],
+                    "metadata": info_metadata,
+                }
+            except ValueError as exc:
+                info_validation = {"available": True, "valid": False, "error": str(exc)}
         process_infos = []
         for name in sorted(entries):
             match = PROCESS_INFO.fullmatch(name)
@@ -3814,9 +3839,12 @@ def capture_validate(
                 stream["error"] = str(exc)
             streams.append(stream)
     result["streams"] = streams
+    result["info"] = info_validation
     result["process_infos"] = process_infos
-    result["structural_valid"] = all(stream["valid"] for stream in streams) and all(
-        process["valid"] for process in process_infos
+    result["structural_valid"] = (
+        all(stream["valid"] for stream in streams)
+        and all(process["valid"] for process in process_infos)
+        and (not info_validation["available"] or info_validation["valid"])
     )
     result["valid"] = result["valid"] and result["structural_valid"]
     return result
@@ -5634,6 +5662,8 @@ def _self_test() -> None:
         deep_validation = capture_validate(str(path), deep=True)
         assert deep_validation["structural_valid"]
         assert deep_validation["process_infos"][0]["valid"]
+        assert deep_validation["info"]["valid"]
+        assert deep_validation["architecture_match"]
         assert deep_validation["streams"][0]["definitions"]["resolved"] == 1
         assert capture_read_type(str(path), 160)["type"]["kind"] == 2
         invalid_prefix = Path(directory) / "invalid-prefix.apmx64"
