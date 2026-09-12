@@ -752,7 +752,9 @@ def _read_payload(data: bytes) -> dict[str, Any]:
             text = ""
             encoding = None
 
-    if text and sum(char.isprintable() or char in "\r\n\t" for char in text) / len(text) >= 0.85:
+    if text and "\x00" not in text and sum(
+        char.isprintable() or char in "\r\n\t" for char in text
+    ) / len(text) >= 0.9:
         return {"encoding": encoding, "text": text}
     return {"encoding": "base64", "base64": base64.b64encode(data).decode("ascii")}
 
@@ -2538,6 +2540,7 @@ def _self_test() -> None:
         call_records = capture_call_records(str(path), include_data=True)
         assert call_records["count"] == 1
         assert call_records["records"][0]["data_refs"][0]["payload"]["text"] == "hello"
+        assert _read_payload(b"\x01\x00\xff\x00")["encoding"] == "base64"
         extracted = Path(directory) / "calls.bin"
         exported = capture_extract_entry(str(path), "calls.bin", str(extracted))
         assert exported["size"] == len(b"CreateFileW\x00https://example.test\x00")
