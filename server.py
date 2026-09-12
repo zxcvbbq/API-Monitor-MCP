@@ -5546,8 +5546,15 @@ def capture_search_entries(
 
 
 @mcp.tool()
-def capture_read_entry(file_path: str, entry_name: str, max_bytes: int = 1_048_576) -> dict[str, Any]:
+def capture_read_entry(
+    file_path: str,
+    entry_name: str,
+    max_bytes: int = 1_048_576,
+    offset: int = 0,
+) -> dict[str, Any]:
     """Read one APMX ZIP entry, returning text when printable or base64 otherwise."""
+    if offset < 0:
+        raise ValueError("offset must be non-negative")
     max_bytes = _limit(max_bytes, "max_bytes", 16 * 1024 * 1024)
     path = _capture_path(file_path)
     archive, _, _ = _open_capture_zip(path)
@@ -5556,15 +5563,22 @@ def capture_read_entry(file_path: str, entry_name: str, max_bytes: int = 1_048_5
             info = archive.getinfo(entry_name)
         except KeyError as exc:
             raise FileNotFoundError(f"ZIP entry not found: {entry_name}") from exc
+        if info.is_dir():
+            raise IsADirectoryError(f"ZIP entry is a directory: {entry_name}")
+        if offset > info.file_size:
+            raise ValueError(f"offset {offset} is outside {info.file_size}-byte entry")
         with archive.open(info) as member:
+            member.seek(offset)
             data = member.read(max_bytes + 1)
-    truncated = len(data) > max_bytes
+    returned_bytes = min(len(data), max_bytes)
+    truncated = len(data) > max_bytes or offset + returned_bytes < info.file_size
     payload = _read_payload(data[:max_bytes])
     return {
         "entry": entry_name,
+        "offset": offset,
         "size": info.file_size,
-        "returned_bytes": min(len(data), max_bytes),
-        "truncated": truncated or info.file_size > max_bytes,
+        "returned_bytes": returned_bytes,
+        "truncated": truncated,
         **payload,
     }
 
@@ -8528,6 +8542,10 @@ def _self_test() -> None:
         log = capture_monitoring_log(str(path), "module", 10)
         assert log["lines"] == ["sample.exe: Monitoring Module 0x1234 -> C:\\sample.dll"]
         assert log["events"][0]["type"] == "module"
+        full_log_entry = capture_read_entry(str(path), "log/monitoring.txt", max_bytes=1024)
+        log_slice = capture_read_entry(str(path), "log/monitoring.txt", max_bytes=4, offset=7)
+        assert log_slice["text"] == full_log_entry["text"][7:11]
+        assert log_slice["truncated"]
         log_json = Path(directory) / "monitoring.json"
         log_export = capture_export_monitoring_log(str(path), str(log_json), query="module")
         assert log_export["count"] == 1
