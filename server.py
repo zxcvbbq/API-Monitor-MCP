@@ -2368,6 +2368,100 @@ def capture_call_records(
 
 
 @mcp.tool()
+def capture_search_calls(
+    file_path: str,
+    query: str,
+    process_index: int | None = None,
+    limit: int = 100,
+    max_records: int = 100_000,
+    max_data_bytes: int = 16_384,
+) -> dict[str, Any]:
+    """Search decoded saved call payloads across one or all capture processes."""
+    if not query:
+        raise ValueError("query must not be empty")
+    if process_index is not None and process_index < 0:
+        raise ValueError("process_index must be non-negative")
+    limit = _limit(limit, "limit", 10_000)
+    max_records = _limit(max_records, "max_records", 1_000_000)
+    max_data_bytes = _limit(max_data_bytes, "max_data_bytes", 16 * 1024 * 1024)
+    path = _capture_path(file_path)
+    archive, _, _ = _open_capture_zip(path)
+    wanted = query.casefold()
+    matches: list[dict[str, Any]] = []
+    scanned = 0
+    scan_truncated = False
+    process_indices: set[int] = set()
+    with archive:
+        entries = {info.filename: info for info in archive.infolist()}
+        for name in entries:
+            match = re.fullmatch(r"process/(\d+)/calls", name, re.I)
+            if match and (process_index is None or int(match.group(1)) == process_index):
+                process_indices.add(int(match.group(1)))
+        for index in sorted(process_indices):
+            calls = archive.read(f"process/{index}/calls")
+            data = archive.read(f"process/{index}/data") if f"process/{index}/data" in entries else b""
+            if len(calls) % 8:
+                raise ValueError(f"process/{index}/calls is not an array of 64-bit offsets")
+            record_count = len(calls) // 8
+            if scanned + record_count > max_records:
+                scan_truncated = True
+            records = _capture_call_records(
+                calls,
+                data,
+                min(record_count, max_records - scanned),
+                True,
+                max_data_bytes,
+            )
+            for record in records:
+                scanned += 1
+                payload_matches = []
+                for reference in record.get("data_refs", []):
+                    text = reference.get("payload", {}).get("text")
+                    if text is None or wanted not in text.casefold():
+                        continue
+                    position = text.casefold().find(wanted)
+                    start = max(0, position - 120)
+                    end = min(len(text), position + len(query) + 120)
+                    payload_matches.append(
+                        {
+                            "slot": reference["slot"],
+                            "offset": reference["offset"],
+                            "length": reference["length"],
+                            "snippet": text[start:end],
+                        }
+                    )
+                if payload_matches:
+                    matches.append(
+                        {
+                            "process_index": index,
+                            "record": record,
+                            "payload_matches": payload_matches,
+                        }
+                    )
+                    if len(matches) >= limit:
+                        return {
+                            "file": str(path),
+                            "query": query,
+                            "process_index": process_index,
+                            "matches": matches,
+                            "count": len(matches),
+                            "scanned_records": scanned,
+                            "truncated": True,
+                        }
+            if scanned >= max_records:
+                break
+    return {
+        "file": str(path),
+        "query": query,
+        "process_index": process_index,
+        "matches": matches,
+        "count": len(matches),
+        "scanned_records": scanned,
+        "truncated": scan_truncated,
+    }
+
+
+@mcp.tool()
 def capture_extract_entry(
     file_path: str,
     entry_name: str,
@@ -2802,6 +2896,9 @@ def _self_test() -> None:
         call_records = capture_call_records(str(path), include_data=True)
         assert call_records["count"] == 1
         assert call_records["records"][0]["data_refs"][0]["payload"]["text"] == "hello"
+        call_search = capture_search_calls(str(path), "ell")
+        assert call_search["count"] == 1
+        assert call_search["matches"][0]["payload_matches"][0]["snippet"] == "hello"
         assert _read_payload(b"\x01\x00\xff\x00")["encoding"] == "base64"
         extracted = Path(directory) / "calls.bin"
         exported = capture_extract_entry(str(path), "calls.bin", str(extracted))
