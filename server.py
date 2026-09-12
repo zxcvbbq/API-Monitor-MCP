@@ -4167,16 +4167,36 @@ def api_monitor_detach_all(timeout_seconds: int = 30) -> dict[str, Any]:
 
 
 @mcp.tool()
-def api_monitor_launch(architecture: str = "x64", install_root: str | None = None) -> dict[str, Any]:
+def api_monitor_launch(
+    architecture: str = "x64",
+    install_root: str | None = None,
+    timeout_seconds: int = 15,
+) -> dict[str, Any]:
     """Launch the installed Rohitab API Monitor x86 or x64 executable."""
+    if timeout_seconds < 1 or timeout_seconds > 60:
+        raise ValueError("timeout_seconds must be between 1 and 60")
     root = _app_root(install_root)
     executable = _app_executable(root, architecture)
+    existing_handles = {window["handle"] for window in _find_api_monitor_windows()}
     process = subprocess.Popen(
         [str(executable)],
         cwd=str(root),
         creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
     )
-    return {"pid": process.pid, "architecture": architecture, "executable": str(executable)}
+    bitness = "32-bit" if architecture == "x86" else "64-bit"
+    window = _wait_for_api_monitor_window(
+        lambda candidate: candidate["handle"] not in existing_handles
+        and "api monitor v2" in candidate["title"].casefold()
+        and bitness in candidate["title"],
+        timeout_seconds,
+    )
+    return {
+        "pid": process.pid,
+        "architecture": architecture,
+        "executable": str(executable),
+        "ready": window is not None,
+        "window": window,
+    }
 
 
 @mcp.tool()
