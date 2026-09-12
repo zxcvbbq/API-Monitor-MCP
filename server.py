@@ -3540,6 +3540,44 @@ def capture_extract_call_payload(
 
 
 @mcp.tool()
+def capture_read_process_data(
+    file_path: str,
+    process_index: int,
+    offset: int = 0,
+    length: int = 4096,
+) -> dict[str, Any]:
+    """Read a bounded logical slice from a saved process data entry."""
+    if process_index < 0 or offset < 0:
+        raise ValueError("process_index and offset must be non-negative")
+    length = _limit(length, "length", 16 * 1024 * 1024)
+    path = _capture_path(file_path)
+    entry_name = f"process/{process_index}/data"
+    archive, _, _ = _open_capture_zip(path)
+    with archive:
+        try:
+            info = archive.getinfo(entry_name)
+        except KeyError as exc:
+            raise FileNotFoundError(f"Capture data entry not found: {entry_name}") from exc
+        if offset > info.file_size:
+            raise ValueError(f"offset {offset} is outside {info.file_size}-byte data entry")
+        with archive.open(info) as member:
+            member.seek(offset)
+            data = member.read(length + 1)
+    returned = data[:length]
+    payload = _read_payload(returned)
+    return {
+        "file": str(path),
+        "process_index": process_index,
+        "entry": entry_name,
+        "entry_size": info.file_size,
+        "offset": offset,
+        "returned_bytes": len(returned),
+        "truncated": len(data) > length,
+        **payload,
+    }
+
+
+@mcp.tool()
 def capture_decode_call(
     file_path: str,
     process_index: int,
@@ -4496,6 +4534,8 @@ def _self_test() -> None:
         payload_export = capture_extract_call_payload(str(path), 0, 0, 0, str(extracted_payload))
         assert payload_export["size"] == 5
         assert extracted_payload.read_bytes() == b"hello"
+        process_slice = capture_read_process_data(str(path), 0, 160, 5)
+        assert process_slice["text"] == "hello"
         json_export = capture_export_calls(
             str(path), str(Path(directory) / "calls.json"), resolve_definitions=True
         )
