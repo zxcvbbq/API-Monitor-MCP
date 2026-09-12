@@ -359,7 +359,10 @@ def _capture_relative_text(data: bytes, relative: int) -> str | None:
 
 
 def _capture_type_info(
-    definitions: bytes, relative: int, pointer_size: int = 8
+    definitions: bytes,
+    relative: int,
+    pointer_size: int = 8,
+    _depth: int = 0,
 ) -> dict[str, Any] | None:
     type_size = 24 if pointer_size == 4 else 48
     if relative <= 0 or relative > len(definitions) - type_size:
@@ -382,6 +385,49 @@ def _capture_type_info(
         if text:
             type_info[key] = offset
             type_info[key[:-7]] = text
+    if type_info["kind"] == 11 and _depth < 4:
+        table_field = relative + pointer_size * 4
+        count_field = relative + (44 if pointer_size == 8 else 24)
+        if count_field < len(definitions) and table_field + pointer_size <= len(definitions):
+            field_table = struct.unpack_from(pointer_format, definitions, table_field)[0]
+            field_count = definitions[count_field]
+            descriptor_size = 12 if pointer_size == 4 else 24
+            table_end = field_table + field_count * descriptor_size
+            if field_count <= 256 and field_table > 0 and table_end <= len(definitions):
+                fields = []
+                for index in range(field_count):
+                    descriptor = field_table + index * descriptor_size
+                    field_name_offset = struct.unpack_from(
+                        pointer_format, definitions, descriptor
+                    )[0]
+                    field_type_offset = struct.unpack_from(
+                        pointer_format, definitions, descriptor + pointer_size
+                    )[0]
+                    field: dict[str, Any] = {
+                        "index": index,
+                        "offset": descriptor,
+                        "name_offset": field_name_offset,
+                        "type_offset": field_type_offset,
+                        "flags": struct.unpack_from(
+                            "<H", definitions, descriptor + pointer_size * 2
+                        )[0],
+                    }
+                    field_name = _capture_relative_text(definitions, field_name_offset)
+                    if field_name:
+                        field["name"] = field_name
+                    field_type = _capture_type_info(
+                        definitions, field_type_offset, pointer_size, _depth + 1
+                    )
+                    if field_type:
+                        field["type"] = field_type
+                    fields.append(field)
+                type_info.update(
+                    {
+                        "field_table_offset": field_table,
+                        "field_count": field_count,
+                        "fields": fields,
+                    }
+                )
     return type_info
 
 
@@ -1565,6 +1611,54 @@ def _capture_exact_scalar(data: bytes, type_info: dict[str, Any]) -> dict[str, A
     return None
 
 
+def _capture_exact_value(
+    data: bytes, type_info: dict[str, Any], depth: int = 0
+) -> dict[str, Any] | None:
+    scalar = _capture_exact_scalar(data, type_info)
+    if scalar or type_info.get("kind") != 11 or depth >= 4:
+        return scalar
+    fields = type_info.get("fields", [])
+    if not fields:
+        return None
+    table_bytes = 4 * len(fields)
+    if len(data) < table_bytes:
+        return None
+    decoded_fields = []
+    for index, field in enumerate(fields):
+        offset, packed_length = struct.unpack_from("<HH", data, index * 4)
+        length = packed_length >> 1
+        item: dict[str, Any] = {
+            "index": index,
+            "offset": offset,
+            "length": length,
+            "valid": not (packed_length & 1),
+        }
+        if field.get("name"):
+            item["name"] = field["name"]
+        if not item["valid"]:
+            item["error"] = "API Monitor marked this field unavailable"
+        elif offset + length > len(data) - table_bytes:
+            item["valid"] = False
+            item["error"] = "structure field exceeds payload"
+        else:
+            raw = data[table_bytes + offset : table_bytes + offset + length]
+            item["payload"] = _read_payload(raw)
+            field_type = field.get("type")
+            if field_type:
+                typed = _capture_exact_value(raw, field_type, depth + 1)
+                if typed:
+                    item["typed"] = typed
+        decoded_fields.append(item)
+    return {
+        "exact": True,
+        "kind": "structure",
+        "valid": all(field["valid"] for field in decoded_fields),
+        "field_count": len(decoded_fields),
+        "serialized_table_bytes": table_bytes,
+        "fields": decoded_fields,
+    }
+
+
 def _capture_decoded_argument_stream(
     data: bytes,
     definition: dict[str, Any],
@@ -1588,7 +1682,7 @@ def _capture_decoded_argument_stream(
         parameter = parameters[argument["index"]]
         type_info = parameter.get("type")
         if type_info:
-            exact = _capture_exact_scalar(raw, type_info)
+            exact = _capture_exact_value(raw, type_info)
             if exact:
                 argument["typed"] = exact
         if parameter.get("name"):
@@ -3773,7 +3867,7 @@ def capture_decode_call(
         return_raw = _payload_bytes(return_payload)
         return_type = definition.get("return_type")
         if return_type:
-            exact = _capture_exact_scalar(return_raw, return_type)
+            exact = _capture_exact_value(return_raw, return_type)
             if exact:
                 return_value["typed"] = exact
             return_value["type"] = return_type
@@ -3785,7 +3879,7 @@ def capture_decode_call(
         "argument_stream": argument_stream,
         "return_value": return_value,
         "definitions_available": result["definitions_available"],
-        "format": "APMX encoded parameter table; typed scalar values are exact, other values remain heuristic",
+        "format": "APMX encoded parameter table; recognized scalar, string, and structure values are exact, other values remain heuristic",
     }
 
 
@@ -4046,6 +4140,7 @@ def capture_search_calls(
                                     payload.get("text", ""),
                                     payload.get("hex_preview", ""),
                                     typed.get("value", ""),
+                                    json.dumps(typed, ensure_ascii=False),
                                 )
                                 if value != ""
                             )
@@ -4573,7 +4668,7 @@ def _self_test() -> None:
             struct.pack_into("<Q", record, 128, 165)
             archive.writestr("process/0/calls", struct.pack("<Q", 0))
             archive.writestr("process/0/data", bytes(record) + b"hello" + struct.pack("<I", 7))
-            definitions = bytearray(256)
+            definitions = bytearray(512)
             struct.pack_into("<I", definitions, 16 + 8, 123)
             struct.pack_into("<Q", definitions, 16 + 24, 80)
             struct.pack_into("<Q", definitions, 16 + 40, 96)
@@ -4585,6 +4680,13 @@ def _self_test() -> None:
             struct.pack_into("<I", definitions, 160 + 8, 2)
             definitions[160 + 32] = 4
             definitions[240 : 240 + len(b"DWORD\x00")] = b"DWORD\x00"
+            struct_type_offset = 272
+            struct.pack_into("<I", definitions, struct_type_offset + 8, 11)
+            struct.pack_into("<Q", definitions, struct_type_offset + 32, 320)
+            definitions[struct_type_offset + 44] = 1
+            struct.pack_into("<Q", definitions, 320, 400)
+            struct.pack_into("<Q", definitions, 328, 160)
+            definitions[400 : 400 + len(b"dwValue\x00")] = b"dwValue\x00"
             archive.writestr("definitions", bytes(definitions))
             archive.writestr(
                 "log/monitoring.txt",
@@ -4686,14 +4788,17 @@ def _self_test() -> None:
         argument_record = bytearray(160)
         argument_record[2] = 1
         struct.pack_into("<Q", argument_record, 40, 16)
-        encoded_argument = b"\x01" + struct.pack("<HH", 0, 8) + struct.pack("<I", 42)
+        struct_argument = struct.pack("<HH", 0, 8) + struct.pack("<I", 99)
+        encoded_argument = b"\x01" + struct.pack(
+            "<HH", 0, len(struct_argument) << 1
+        ) + struct_argument
         struct.pack_into("<Q", argument_record, 112, 160)
         struct.pack_into("<I", argument_record, 32, len(encoded_argument))
         argument_definitions = bytearray(definitions)
         argument_definitions[16 + 2] = 1
         struct.pack_into("<Q", argument_definitions, 16 + 32, 224)
         struct.pack_into("<Q", argument_definitions, 224, 240)
-        struct.pack_into("<Q", argument_definitions, 232, 160)
+        struct.pack_into("<Q", argument_definitions, 232, struct_type_offset)
         argument_payload = io.BytesIO()
         with zipfile.ZipFile(argument_payload, "w", zipfile.ZIP_STORED) as archive:
             archive.writestr("process/0/calls", struct.pack("<Q", 0))
@@ -4706,13 +4811,15 @@ def _self_test() -> None:
         )
         argument_search = capture_search_calls(
             str(argument_path),
-            "42",
+            "99",
             resolve_definitions=True,
             decode_arguments=True,
         )
         assert argument_search["count"] == 1
         assert argument_search["arguments_decoded"]
-        assert argument_search["matches"][0]["argument_matches"][0]["typed"]["value"] == 42
+        typed_structure = argument_search["matches"][0]["argument_matches"][0]["typed"]
+        assert typed_structure["kind"] == "structure"
+        assert typed_structure["fields"][0]["typed"]["value"] == 99
         call_window = capture_calls_around(str(path), 0, 0, before=2, after=2)
         assert call_window["window_start"] == 0
         assert call_window["records"][0]["is_target"]
@@ -4791,17 +4898,35 @@ def _self_test() -> None:
         struct.pack_into("<I", x86_record, 36, 16)
         struct.pack_into("<I", x86_record, 32, 5)
         struct.pack_into("<I", x86_record, 96, 120)
-        x86_definitions = bytearray(160)
+        x86_definitions = bytearray(512)
         struct.pack_into("<I", x86_definitions, 16 + 8, 321)
         struct.pack_into("<I", x86_definitions, 16 + 24, 80)
         struct.pack_into("<I", x86_definitions, 16 + 32, 96)
+        x86_definitions[16 + 2] = 1
+        struct.pack_into("<I", x86_definitions, 16 + 28, 440)
         x86_definitions[80 : 80 + len(b"CreateFileA\x00")] = b"CreateFileA\x00"
         struct.pack_into("<I", x86_definitions, 96 + 16, 128)
         x86_definitions[128 : 128 + len(b"kernel32.dll\x00")] = b"kernel32.dll\x00"
+        struct.pack_into("<I", x86_definitions, 160 + 4, 2)
+        x86_definitions[160 + 16] = 4
+        x86_struct_type_offset = 272
+        struct.pack_into("<I", x86_definitions, x86_struct_type_offset + 4, 11)
+        struct.pack_into("<I", x86_definitions, x86_struct_type_offset + 16, 320)
+        x86_definitions[x86_struct_type_offset + 24] = 1
+        struct.pack_into("<I", x86_definitions, 320, 480)
+        struct.pack_into("<I", x86_definitions, 324, 160)
+        x86_definitions[480 : 480 + len(b"dwValue\x00")] = b"dwValue\x00"
+        struct.pack_into("<I", x86_definitions, 440, 480)
+        struct.pack_into("<I", x86_definitions, 444, x86_struct_type_offset)
+        x86_struct_argument = struct.pack("<HH", 0, 8) + struct.pack("<I", 77)
+        x86_encoded_argument = b"\x01" + struct.pack(
+            "<HH", 0, len(x86_struct_argument) << 1
+        ) + x86_struct_argument
+        struct.pack_into("<I", x86_record, 32, len(x86_encoded_argument))
         x86_payload = io.BytesIO()
         with zipfile.ZipFile(x86_payload, "w", zipfile.ZIP_STORED) as archive:
             archive.writestr("process/0/calls", struct.pack("<I", 0))
-            archive.writestr("process/0/data", bytes(x86_record) + b"hello")
+            archive.writestr("process/0/data", bytes(x86_record) + x86_encoded_argument)
             archive.writestr("definitions", bytes(x86_definitions))
             archive.writestr("process/0/info", struct.pack("<IIII", 1, 0, 4321, 0x400000))
         x86_path.write_bytes(b"\r\nAPI Monitor 32-bit Capture\r\nRBAPM" + x86_payload.getvalue())
@@ -4810,7 +4935,7 @@ def _self_test() -> None:
         )
         assert x86_records["architecture"] == "x86"
         assert x86_records["records"][0]["definition"]["name"] == "CreateFileA"
-        assert x86_records["records"][0]["data_refs"][0]["payload"]["text"] == "hello"
+        assert x86_records["records"][0]["data_refs"][0]["payload"]["size"] == len(x86_encoded_argument)
         assert capture_read_definition(str(x86_path), 16)["architecture"] == "x86"
         assert capture_list_apis(str(x86_path))["apis"][0]["module"] == "kernel32.dll"
         x86_deep_validation = capture_validate(str(x86_path), deep=True)
@@ -4821,6 +4946,8 @@ def _self_test() -> None:
         x86_processes = capture_list_processes(str(x86_path))
         assert x86_processes["processes"][0]["call_count"] == 1
         assert x86_processes["processes"][0]["metadata"]["pid"] == 4321
+        x86_decoded = capture_decode_call(str(x86_path), 0, 0, resolve_definitions=True)
+        assert x86_decoded["argument_stream"]["arguments"][0]["typed"]["fields"][0]["typed"]["value"] == 77
 
         app_root = Path(directory) / "app"
         definition_root = app_root / "API"
