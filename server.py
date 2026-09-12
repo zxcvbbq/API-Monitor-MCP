@@ -51,6 +51,13 @@ def _capture_path(file_path: str) -> Path:
     return path.resolve()
 
 
+def _capture_directory(directory: str) -> Path:
+    path = Path(directory).expanduser()
+    if not path.is_dir():
+        raise NotADirectoryError(f"Capture directory not found: {path}")
+    return path.resolve()
+
+
 def _limit(value: int, name: str, maximum: int) -> int:
     if not 1 <= value <= maximum:
         raise ValueError(f"{name} must be between 1 and {maximum}")
@@ -347,6 +354,63 @@ def capture_hex(file_path: str, offset: int = 0, length: int = 256) -> dict[str,
 
 
 @mcp.tool()
+def capture_list_directory(
+    directory: str,
+    recursive: bool = True,
+    limit: int = 500,
+) -> dict[str, Any]:
+    """List Rohitab APMX captures in a directory."""
+    limit = _limit(limit, "limit", 5000)
+    root = _capture_directory(directory)
+    paths = root.rglob("*") if recursive else root.glob("*")
+    captures = []
+    for path in paths:
+        if not path.is_file() or path.suffix.lower() not in CAPTURE_SUFFIXES:
+            continue
+        stat = path.stat()
+        captures.append(
+            {
+                "file": str(path.resolve()),
+                "architecture": "x86" if path.suffix.lower() == ".apmx86" else "x64",
+                "size": stat.st_size,
+                "modified_utc": _file_time(path),
+            }
+        )
+    captures.sort(key=lambda item: item["modified_utc"], reverse=True)
+    return {
+        "directory": str(root),
+        "recursive": recursive,
+        "captures": captures[:limit],
+        "count": len(captures),
+        "truncated": len(captures) > limit,
+    }
+
+
+@mcp.tool()
+def capture_search_directory(
+    directory: str,
+    query: str,
+    recursive: bool = True,
+    limit: int = 100,
+) -> dict[str, Any]:
+    """Search printable strings across all APMX captures in a directory."""
+    if not query:
+        raise ValueError("query must not be empty")
+    limit = _limit(limit, "limit", 1000)
+    root = _capture_directory(directory)
+    listed = capture_list_directory(str(root), recursive, 5000)["captures"]
+    matches: list[dict[str, Any]] = []
+    for capture in listed:
+        path = Path(capture["file"])
+        strings = _capture_strings(path, query, min(20, limit), 4)
+        if strings:
+            matches.append({"file": str(path), "matches": strings})
+            if len(matches) >= limit:
+                break
+    return {"directory": str(root), "query": query, "captures": matches, "count": len(matches)}
+
+
+@mcp.tool()
 def api_monitor_search_apis(
     query: str,
     limit: int = 100,
@@ -400,6 +464,8 @@ def _self_test() -> None:
         assert strings and "CreateFileW" in strings[0]["text"]
         entries = _zip_entries(path)
         assert {entry["name"] for entry in entries} == {"metadata.txt", "calls.bin"}
+        listed = capture_list_directory(directory, recursive=False, limit=10)
+        assert listed["count"] == 1
 
 
 def main() -> None:

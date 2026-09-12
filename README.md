@@ -7,6 +7,7 @@ Current scope:
 - launch and inspect the installed x86/x64 API Monitor processes;
 - open `.apmx86`/`.apmx64` captures in the real application;
 - inspect the capture container and ZIP entries;
+- list and search capture files across a directory;
 - extract/search printable ANSI and UTF-16LE strings;
 - read bounded ZIP entries and raw hex ranges;
 - search the installed Rohitab XML API definitions.
