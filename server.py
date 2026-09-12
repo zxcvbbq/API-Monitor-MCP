@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import base64
 import csv
+import ctypes
 import hashlib
 import io
 import mmap
@@ -200,6 +201,82 @@ def _app_executable(root: Path, architecture: str) -> Path:
     return executable
 
 
+def _window_text(user32: Any, handle: Any) -> str:
+    length = user32.GetWindowTextLengthW(handle)
+    buffer = ctypes.create_unicode_buffer(length + 1)
+    user32.GetWindowTextW(handle, buffer, length + 1)
+    return buffer.value
+
+
+def _window_class(user32: Any, handle: Any) -> str:
+    buffer = ctypes.create_unicode_buffer(256)
+    user32.GetClassNameW(handle, buffer, len(buffer))
+    return buffer.value
+
+
+def _ui_window(handle: Any, user32: Any) -> dict[str, Any]:
+    return {
+        "handle": int(handle),
+        "class": _window_class(user32, handle),
+        "title": _window_text(user32, handle),
+        "control_id": int(user32.GetDlgCtrlID(handle)),
+    }
+
+
+def _find_api_monitor_windows() -> list[dict[str, Any]]:
+    if sys.platform != "win32":
+        return []
+    from ctypes import wintypes
+
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+    enum_windows = user32.EnumWindows
+    enum_windows.argtypes = [ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM), wintypes.LPARAM]
+    enum_windows.restype = ctypes.c_bool
+    get_pid = user32.GetWindowThreadProcessId
+    get_pid.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
+    get_pid.restype = wintypes.DWORD
+    enum_children = user32.EnumChildWindows
+    enum_children.argtypes = [
+        wintypes.HWND,
+        ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM),
+        wintypes.LPARAM,
+    ]
+    enum_children.restype = ctypes.c_bool
+
+    windows: list[dict[str, Any]] = []
+    child_callback_type = ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)
+    window_callback_type = ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)
+
+    def add_children(window: dict[str, Any]) -> None:
+        children: list[dict[str, Any]] = []
+
+        @child_callback_type
+        def child_callback(handle: Any, _param: Any) -> bool:
+            child = _ui_window(handle, user32)
+            if child["title"] or child["class"]:
+                children.append(child)
+            return True
+
+        enum_children(window["handle"], child_callback, 0)
+        window["children"] = children
+
+    @window_callback_type
+    def window_callback(handle: Any, _param: Any) -> bool:
+        title = _window_text(user32, handle)
+        if "api monitor" not in title.casefold():
+            return True
+        window = _ui_window(handle, user32)
+        process_id = wintypes.DWORD()
+        get_pid(handle, ctypes.byref(process_id))
+        window["pid"] = int(process_id.value)
+        add_children(window)
+        windows.append(window)
+        return True
+
+    enum_windows(window_callback, 0)
+    return windows
+
+
 def _read_payload(data: bytes) -> dict[str, Any]:
     try:
         text = data.decode("utf-8")
@@ -244,6 +321,14 @@ def api_monitor_status() -> dict[str, Any]:
             pid = row[1]
         processes.append({"image": row[0], "pid": pid, "session": row[2], "memory": row[4]})
     return {"supported": True, "processes": processes}
+
+
+@mcp.tool()
+def api_monitor_ui_tree() -> dict[str, Any]:
+    """Inspect Rohitab API Monitor top-level windows and immediate controls."""
+    if sys.platform != "win32":
+        return {"supported": False, "windows": []}
+    return {"supported": True, "windows": _find_api_monitor_windows()}
 
 
 @mcp.tool()

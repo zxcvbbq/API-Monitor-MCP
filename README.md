@@ -5,6 +5,7 @@ Bare-bones, read-only MCP bridge for the real Rohitab API Monitor installation.
 Current scope:
 
 - launch and inspect the installed x86/x64 API Monitor processes;
+- inspect the live API Monitor Win32 window/control tree;
 - open `.apmx86`/`.apmx64` captures in the real application;
 - inspect the capture container and ZIP entries;
 - list and search capture files across a directory;
