@@ -2714,6 +2714,8 @@ def api_monitor_open_capture(
         ]
         main_window = capture_candidates[0] if capture_candidates else None
     if main_window is None:
+        if window_handle is not None:
+            raise LookupError(f"API Monitor window not found: {window_handle}")
         existing_handles = {window["handle"] for window in candidates}
         launch = api_monitor_launch(architecture, install_root)
         main_window = _wait_for_api_monitor_window(
