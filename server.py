@@ -7107,6 +7107,144 @@ def capture_call_timeline(
 
 
 @mcp.tool()
+def capture_export_timeline(
+    file_path: str,
+    output_path: str,
+    process_index: int | None = None,
+    start_time_utc: str | None = None,
+    end_time_utc: str | None = None,
+    order_by: str = "timestamp",
+    descending: bool = False,
+    limit: int = 500,
+    max_records: int = 100_000,
+    include_data: bool = False,
+    max_data_bytes: int = 4096,
+    resolve_definitions: bool = False,
+    api_name: str | None = None,
+    api_module: str | None = None,
+    definition_offset: int | None = None,
+    flags: int | None = None,
+    pid: int | None = None,
+    thread_number: int | None = None,
+    module_base: int | None = None,
+    thread_id: int | None = None,
+    error_code: int | None = None,
+    min_duration_seconds: float | None = None,
+    max_duration_seconds: float | None = None,
+    output_format: str = "json",
+    overwrite: bool = False,
+) -> dict[str, Any]:
+    """Export a filtered cross-process call timeline as bounded JSON or CSV."""
+    if output_format not in {"json", "csv"}:
+        raise ValueError("output_format must be json or csv")
+    output = Path(output_path).expanduser()
+    if not output.parent.is_dir():
+        raise NotADirectoryError(f"Output directory not found: {output.parent}")
+    output = output.resolve()
+    if output.exists() and not overwrite:
+        raise FileExistsError(f"Output already exists: {output}")
+
+    result = capture_call_timeline(
+        file_path,
+        process_index=process_index,
+        start_time_utc=start_time_utc,
+        end_time_utc=end_time_utc,
+        order_by=order_by,
+        descending=descending,
+        limit=limit,
+        max_records=max_records,
+        include_data=include_data,
+        max_data_bytes=max_data_bytes,
+        resolve_definitions=resolve_definitions,
+        api_name=api_name,
+        api_module=api_module,
+        definition_offset=definition_offset,
+        flags=flags,
+        pid=pid,
+        thread_number=thread_number,
+        module_base=module_base,
+        thread_id=thread_id,
+        error_code=error_code,
+        min_duration_seconds=min_duration_seconds,
+        max_duration_seconds=max_duration_seconds,
+    )
+    if output_format == "json":
+        content = json.dumps(result, indent=2, ensure_ascii=False) + "\n"
+    else:
+        stream = io.StringIO(newline="")
+        writer = csv.writer(stream)
+        writer.writerow(
+            [
+                "process_index",
+                "record_index",
+                "offset",
+                "size",
+                "valid",
+                "flags",
+                "definition_offset",
+                "api_name",
+                "api_module",
+                "pid",
+                "thread_id",
+                "thread_number",
+                "module_base",
+                "timestamp_utc",
+                "duration_seconds",
+                "error_code",
+                "data_refs_json",
+            ]
+        )
+        for item in result["timeline"]:
+            record = item["record"]
+            definition = record.get("definition", {})
+            context = record.get("context", {})
+            writer.writerow(
+                [
+                    item["process_index"],
+                    record.get("index", ""),
+                    record.get("offset", ""),
+                    record.get("size", ""),
+                    record.get("valid", ""),
+                    record.get("flags", ""),
+                    record.get("definition_offset", ""),
+                    definition.get("name", ""),
+                    definition.get("module", ""),
+                    context.get("pid", ""),
+                    context.get("thread_id", ""),
+                    context.get("thread_number", ""),
+                    context.get("module_base", ""),
+                    context.get("timestamp_utc", ""),
+                    context.get("duration_seconds", ""),
+                    context.get("error_code", ""),
+                    json.dumps(record.get("data_refs", []), ensure_ascii=False),
+                ]
+            )
+        content = stream.getvalue()
+    encoded = content.encode("utf-8")
+    digest = hashlib.sha256(encoded).hexdigest()
+    try:
+        mode = "wb" if overwrite else "xb"
+        with output.open(mode) as handle:
+            handle.write(encoded)
+    except Exception:
+        if output.exists() and not overwrite:
+            output.unlink()
+        raise
+    return {
+        "exported": True,
+        "file": result["file"],
+        "output": str(output),
+        "format": output_format,
+        "count": result["count"],
+        "truncated": result["truncated"],
+        "order_by": order_by,
+        "descending": descending,
+        "size": len(encoded),
+        "sha256": digest,
+    }
+
+
+@mcp.tool()
 def capture_calls_around(
     file_path: str,
     process_index: int,
@@ -8023,6 +8161,24 @@ def _self_test() -> None:
         )
         assert api_timeline["count"] == 1
         assert api_timeline["timeline"][0]["record"]["definition"]["name"] == "CreateFileW"
+        timeline_json = Path(directory) / "timeline.json"
+        timeline_export = capture_export_timeline(
+            str(path),
+            str(timeline_json),
+            thread_id=0x1234,
+            error_code=5,
+            min_duration_seconds=0.1,
+            max_duration_seconds=0.2,
+            resolve_definitions=True,
+        )
+        assert timeline_export["count"] == 1
+        assert json.loads(timeline_json.read_text())["timeline"][0]["process_index"] == 0
+        timeline_csv = Path(directory) / "timeline.csv"
+        timeline_csv_export = capture_export_timeline(
+            str(path), str(timeline_csv), output_format="csv", resolve_definitions=True
+        )
+        assert timeline_csv_export["count"] == 1
+        assert "CreateFileW" in timeline_csv.read_text()
         resolved_records = capture_call_records(str(path), resolve_definitions=True)
         assert resolved_records["definitions_available"]
         assert resolved_records["records"][0]["definition"]["name"] == "CreateFileW"
