@@ -501,7 +501,16 @@ def _capture_window_png(handle: int, max_width: int, max_height: int) -> tuple[b
     for row in range(height - 1, -1, -1):
         start = row * width * 4
         pixels = raw[start : start + width * 4]
-        rows.append(b"\x00" + b"".join(pixels[index : index + 3] + pixels[index + 3 : index + 4] for index in range(0, len(pixels), 4)))
+        rows.append(
+            b"\x00"
+            + b"".join(
+                pixels[index + 2 : index + 3]
+                + pixels[index + 1 : index + 2]
+                + pixels[index : index + 1]
+                + pixels[index + 3 : index + 4]
+                for index in range(0, len(pixels), 4)
+            )
+        )
     png = b"\x89PNG\r\n\x1a\n"
     png += _png_chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 6, 0, 0, 0))
     png += _png_chunk(b"IDAT", zlib.compress(b"".join(rows), 6))
