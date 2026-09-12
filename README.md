@@ -7,6 +7,7 @@ Features:
 - Launch/status, live background capture, process attach, native filter-tree inspection, and GUI actions
 - Open, validate, decode, search, inspect, and export `.apmx86`/`.apmx64` captures, including API definition names when embedded
 - Inspect/search capture ZIPs, XML filters, logs, process metadata/modules, strings, raw hex, and payloads
+- Resolve saved API names and run bounded heuristic payload decoding
 - Search Rohitab XML API definitions
 
 Install:

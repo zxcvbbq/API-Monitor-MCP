@@ -1210,6 +1210,45 @@ def _read_payload(data: bytes) -> dict[str, Any]:
     }
 
 
+def _capture_payload_candidates(data: bytes, max_items: int) -> dict[str, Any]:
+    result: dict[str, Any] = {
+        "heuristic": True,
+        "size": len(data),
+        "strings": [],
+        "integer_arrays": [],
+    }
+    for encoding in ("utf-8", "utf-16-le"):
+        if encoding == "utf-16-le" and len(data) % 2:
+            continue
+        try:
+            text = data.decode(encoding).rstrip("\x00")
+        except UnicodeDecodeError:
+            continue
+        if text and "\x00" not in text and sum(
+            char.isprintable() or char in "\r\n\t" for char in text
+        ) / len(text) >= 0.9:
+            result["strings"].append({"encoding": encoding, "text": text})
+    for width, code in ((1, "B"), (2, "H"), (4, "I"), (8, "Q")):
+        count = len(data) // width
+        if not count or len(data) % width or count > max_items:
+            continue
+        values = list(struct.unpack(f"<{count}{code}", data))
+        result["integer_arrays"].append(
+            {
+                "width": width,
+                "signed": False,
+                "values": values,
+                "hex_values": [f"0x{value:0{width * 2}x}" for value in values],
+            }
+        )
+        if width > 1:
+            signed = list(struct.unpack(f"<{count}{code.lower()}", data))
+            result["integer_arrays"].append(
+                {"width": width, "signed": True, "values": signed}
+            )
+    return result
+
+
 def _xml_entry_nodes(
     root: ElementTree.Element, query: str, limit: int
 ) -> tuple[list[dict[str, Any]], int]:
@@ -2991,6 +3030,55 @@ def capture_extract_call_payload(
 
 
 @mcp.tool()
+def capture_decode_call(
+    file_path: str,
+    process_index: int,
+    record_index: int,
+    max_data_bytes: int = 4096,
+    max_items: int = 64,
+    resolve_definitions: bool = False,
+) -> dict[str, Any]:
+    """Return one saved call with heuristic string and integer payload candidates."""
+    if process_index < 0 or record_index < 0:
+        raise ValueError("process_index and record_index must be non-negative")
+    max_data_bytes = _limit(max_data_bytes, "max_data_bytes", 16 * 1024 * 1024)
+    max_items = _limit(max_items, "max_items", 256)
+    result = capture_call_records(
+        file_path,
+        process_index=process_index,
+        start_index=record_index,
+        limit=1,
+        include_data=True,
+        max_data_bytes=max_data_bytes,
+        resolve_definitions=resolve_definitions,
+    )
+    if not result["records"]:
+        raise IndexError(f"record_index {record_index} is outside saved calls")
+    record = result["records"][0]
+    for reference in record.get("data_refs", []):
+        payload = reference.get("payload")
+        if payload is None:
+            reference["decoding"] = {
+                "heuristic": True,
+                "skipped": "payload exceeds max_data_bytes",
+            }
+            continue
+        if payload.get("encoding") == "base64":
+            raw = base64.b64decode(payload["base64"])
+        else:
+            raw = payload.get("text", "").encode(payload.get("encoding") or "utf-8")
+        reference["decoding"] = _capture_payload_candidates(raw, max_items)
+    return {
+        "file": result["file"],
+        "process_index": process_index,
+        "record_index": record_index,
+        "record": record,
+        "definitions_available": result["definitions_available"],
+        "format": "APMX raw payload candidates; decoding is heuristic",
+    }
+
+
+@mcp.tool()
 def capture_call_stats(
     file_path: str,
     process_index: int | None = None,
@@ -3698,6 +3786,9 @@ def _self_test() -> None:
         assert resolved_records["records"][0]["definition"]["name"] == "CreateFileW"
         assert resolved_records["records"][0]["definition"]["module"] == "kernel32.dll"
         assert resolved_records["records"][0]["definition"]["ordinal"] == 123
+        decoded_call = capture_decode_call(str(path), 0, 0, resolve_definitions=True)
+        assert decoded_call["record"]["data_refs"][0]["decoding"]["strings"][0]["text"] == "hello"
+        assert decoded_call["record"]["definition"]["name"] == "CreateFileW"
         extracted_payload = Path(directory) / "payload.bin"
         payload_export = capture_extract_call_payload(str(path), 0, 0, 0, str(extracted_payload))
         assert payload_export["size"] == 5
