@@ -58,7 +58,7 @@ mcp = FastMCP(
     instructions=(
         "Read Rohitab API Monitor .apmx captures, search their raw contents, "
         "launch the installed API Monitor application, and automate its GUI "
-        "without bringing it to the foreground. Decode saved call streams "
+        "without bringing it to the foreground, including native API/filter trees. Decode saved call streams "
         "when their process call/data entries are present."
     ),
 )
@@ -582,6 +582,181 @@ def _set_combo_selection(handle: int, value: str) -> None:
         user32.PostMessageW(parent, 0x0111, notification, handle)  # WM_COMMAND
 
 
+def _tree_items(handle: int, limit: int, max_depth: int) -> list[dict[str, Any]]:
+    from ctypes import wintypes
+
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
+    user32.GetWindowThreadProcessId.restype = wintypes.DWORD
+    user32.SendMessageW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
+    user32.SendMessageW.restype = wintypes.LRESULT
+    kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.VirtualAllocEx.argtypes = [wintypes.HANDLE, wintypes.LPVOID, ctypes.c_size_t, wintypes.DWORD, wintypes.DWORD]
+    kernel32.VirtualAllocEx.restype = wintypes.LPVOID
+    kernel32.VirtualFreeEx.argtypes = [wintypes.HANDLE, wintypes.LPVOID, ctypes.c_size_t, wintypes.DWORD]
+    kernel32.WriteProcessMemory.argtypes = [
+        wintypes.HANDLE, wintypes.LPVOID, wintypes.LPCVOID, ctypes.c_size_t, ctypes.POINTER(ctypes.c_size_t)
+    ]
+    kernel32.ReadProcessMemory.argtypes = [
+        wintypes.HANDLE, wintypes.LPVOID, wintypes.LPCVOID, ctypes.c_size_t, ctypes.POINTER(ctypes.c_size_t)
+    ]
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    process_id = wintypes.DWORD()
+    if not user32.GetWindowThreadProcessId(handle, ctypes.byref(process_id)):
+        raise OSError(ctypes.get_last_error(), "Could not inspect API Monitor tree")
+    process = kernel32.OpenProcess(0x438, False, process_id.value)  # query/read/write/allocate
+    if not process:
+        raise OSError(ctypes.get_last_error(), "Could not open API Monitor tree process")
+
+    class TreeItem(ctypes.Structure):
+        _fields_ = [
+            ("mask", wintypes.UINT),
+            ("hItem", wintypes.HANDLE),
+            ("state", wintypes.UINT),
+            ("stateMask", wintypes.UINT),
+            ("pszText", wintypes.LPWSTR),
+            ("cchTextMax", ctypes.c_int),
+            ("iImage", ctypes.c_int),
+            ("iSelectedImage", ctypes.c_int),
+            ("cChildren", ctypes.c_int),
+            ("lParam", wintypes.LPARAM),
+        ]
+
+    size = ctypes.sizeof(TreeItem)
+    remote_item = kernel32.VirtualAllocEx(process, None, size, 0x3000, 4)
+    remote_text = kernel32.VirtualAllocEx(process, None, 2048, 0x3000, 4)
+    if not remote_item or not remote_text:
+        if remote_item:
+            kernel32.VirtualFreeEx(process, remote_item, 0, 0x8000)
+        if remote_text:
+            kernel32.VirtualFreeEx(process, remote_text, 0, 0x8000)
+        kernel32.CloseHandle(process)
+        raise OSError(ctypes.get_last_error(), "Could not allocate API Monitor tree buffer")
+
+    def read_item(item_handle: int) -> dict[str, Any]:
+        item = TreeItem(
+            0x0001 | 0x0004 | 0x0008,
+            item_handle,
+            0,
+            0xF000,
+            remote_text,
+            1024,
+            0,
+            0,
+            0,
+            0,
+        )
+        written = ctypes.c_size_t()
+        if not kernel32.WriteProcessMemory(
+            process, remote_item, ctypes.byref(item), size, ctypes.byref(written)
+        ):
+            raise OSError(ctypes.get_last_error(), "Could not write API Monitor tree buffer")
+        if not user32.SendMessageW(handle, 0x113E, 0, remote_item):  # TVM_GETITEMW
+            raise OSError(ctypes.get_last_error(), "Could not read API Monitor tree item")
+        text_buffer = ctypes.create_unicode_buffer(1024)
+        if not kernel32.ReadProcessMemory(
+            process, text_buffer, remote_text, 2048, ctypes.byref(written)
+        ):
+            raise OSError(ctypes.get_last_error(), "Could not read API Monitor tree text")
+        if not kernel32.ReadProcessMemory(
+            process, ctypes.byref(item), remote_item, size, ctypes.byref(written)
+        ):
+            raise OSError(ctypes.get_last_error(), "Could not read API Monitor tree state")
+        image_state = (item.state & 0xF000) >> 12
+        return {
+            "native_handle": int(item_handle),
+            "text": text_buffer.value,
+            "checked": image_state == 2,
+            "state_image": image_state,
+            "has_children": item.cChildren != 0,
+        }
+
+    items: list[dict[str, Any]] = []
+
+    def visit(item_handle: int, parent_index: int, depth: int) -> None:
+        if not item_handle or len(items) >= limit or depth > max_depth:
+            return
+        current = item_handle
+        while current and len(items) < limit:
+            index = len(items)
+            item = read_item(current)
+            item.update({"index": index, "parent_index": parent_index, "depth": depth})
+            items.append(item)
+            if item["has_children"] and depth < max_depth:
+                child = user32.SendMessageW(handle, 0x1104, 4, current)  # TVM_GETNEXTITEM/TVGN_CHILD
+                visit(int(child), index, depth + 1)
+            current = user32.SendMessageW(handle, 0x1104, 1, current)  # TVGN_NEXT
+
+    try:
+        root = user32.SendMessageW(handle, 0x1104, 0, 0)  # TVGN_ROOT
+        visit(int(root), -1, 0)
+        return items
+    finally:
+        kernel32.VirtualFreeEx(process, remote_item, 0, 0x8000)
+        kernel32.VirtualFreeEx(process, remote_text, 0, 0x8000)
+        kernel32.CloseHandle(process)
+
+
+def _set_tree_item_check(tree_handle: int, item_handle: int, checked: bool) -> None:
+    from ctypes import wintypes
+
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
+    user32.GetWindowThreadProcessId.restype = wintypes.DWORD
+    user32.SendMessageW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
+    user32.SendMessageW.restype = wintypes.LRESULT
+    kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.VirtualAllocEx.argtypes = [wintypes.HANDLE, wintypes.LPVOID, ctypes.c_size_t, wintypes.DWORD, wintypes.DWORD]
+    kernel32.VirtualAllocEx.restype = wintypes.LPVOID
+    kernel32.VirtualFreeEx.argtypes = [wintypes.HANDLE, wintypes.LPVOID, ctypes.c_size_t, wintypes.DWORD]
+    kernel32.WriteProcessMemory.argtypes = [
+        wintypes.HANDLE, wintypes.LPVOID, wintypes.LPCVOID, ctypes.c_size_t, ctypes.POINTER(ctypes.c_size_t)
+    ]
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    process_id = wintypes.DWORD()
+    if not user32.GetWindowThreadProcessId(tree_handle, ctypes.byref(process_id)):
+        raise OSError(ctypes.get_last_error(), "Could not inspect API Monitor tree")
+    process = kernel32.OpenProcess(0x438, False, process_id.value)
+    if not process:
+        raise OSError(ctypes.get_last_error(), "Could not open API Monitor tree process")
+
+    class TreeItem(ctypes.Structure):
+        _fields_ = [
+            ("mask", wintypes.UINT),
+            ("hItem", wintypes.HANDLE),
+            ("state", wintypes.UINT),
+            ("stateMask", wintypes.UINT),
+            ("pszText", wintypes.LPWSTR),
+            ("cchTextMax", ctypes.c_int),
+            ("iImage", ctypes.c_int),
+            ("iSelectedImage", ctypes.c_int),
+            ("cChildren", ctypes.c_int),
+            ("lParam", wintypes.LPARAM),
+        ]
+
+    item = TreeItem(0x0008, item_handle, 2 << 12 if checked else 1 << 12, 0xF000, None, 0, 0, 0, 0, 0)
+    size = ctypes.sizeof(item)
+    remote_item = kernel32.VirtualAllocEx(process, None, size, 0x3000, 4)
+    if not remote_item:
+        kernel32.CloseHandle(process)
+        raise OSError(ctypes.get_last_error(), "Could not allocate API Monitor tree buffer")
+    try:
+        written = ctypes.c_size_t()
+        if not kernel32.WriteProcessMemory(
+            process, remote_item, ctypes.byref(item), size, ctypes.byref(written)
+        ):
+            raise OSError(ctypes.get_last_error(), "Could not write API Monitor tree buffer")
+        if not user32.SendMessageW(tree_handle, 0x113D, 0, remote_item):  # TVM_SETITEMW
+            raise OSError(ctypes.get_last_error(), "Could not update API Monitor tree item")
+    finally:
+        kernel32.VirtualFreeEx(process, remote_item, 0, 0x8000)
+        kernel32.CloseHandle(process)
+
+
 def _wait_for_api_monitor_window(predicate: Any, timeout_seconds: float) -> dict[str, Any] | None:
     deadline = time.monotonic() + timeout_seconds
     while time.monotonic() < deadline:
@@ -1044,6 +1219,76 @@ def api_monitor_gui_key(
         "window": target[0],
         "control": target[1],
         "modifiers": modifiers or [],
+    }
+
+
+@mcp.tool()
+def api_monitor_gui_tree(
+    tree_handle: int | None = None,
+    window_title: str = "",
+    limit: int = 2000,
+    max_depth: int = 32,
+) -> dict[str, Any]:
+    """Read Rohitab's native API/filter tree, including checkbox states, in the background."""
+    if sys.platform != "win32":
+        return {"supported": False, "items": []}
+    limit = _limit(limit, "limit", 20_000)
+    if not 0 <= max_depth <= 128:
+        raise ValueError("max_depth must be between 0 and 128")
+    windows = _find_api_monitor_windows()
+    if tree_handle is not None:
+        candidates = [
+            (window, child)
+            for window in windows
+            for child in window.get("children", [])
+            if child.get("handle") == tree_handle
+            and (not window_title or window.get("title") == window_title)
+            and child.get("class") == "SysTreeView32"
+        ]
+    else:
+        candidates = [
+            (window, child)
+            for window in windows
+            for child in window.get("children", [])
+            if child.get("class") == "SysTreeView32"
+            and child.get("control_id") == 32804
+            and child.get("visible")
+            and (not window_title or window.get("title") == window_title)
+        ]
+    if len(candidates) != 1:
+        raise ValueError("tree_handle or window_title must identify one native API Monitor tree")
+    window, tree = candidates[0]
+    items = _tree_items(tree["handle"], limit + 1, max_depth)
+    return {
+        "supported": True,
+        "method": "background-win32",
+        "window": {"handle": window["handle"], "title": window["title"]},
+        "tree": tree,
+        "items": items[:limit],
+        "truncated": len(items) > limit,
+    }
+
+
+@mcp.tool()
+def api_monitor_gui_tree_check(
+    item_handle: int,
+    checked: bool,
+    tree_handle: int | None = None,
+    window_title: str = "",
+) -> dict[str, Any]:
+    """Set one Rohitab native API/filter tree checkbox without foregrounding the app."""
+    if sys.platform != "win32":
+        raise RuntimeError("Rohitab tree controls require Windows")
+    if item_handle < 1:
+        raise ValueError("item_handle must be positive")
+    tree = api_monitor_gui_tree(tree_handle, window_title, 1, 0)["tree"]
+    _set_tree_item_check(tree["handle"], item_handle, checked)
+    return {
+        "updated": True,
+        "method": "background-win32",
+        "tree": tree,
+        "item_handle": item_handle,
+        "checked": checked,
     }
 
 
