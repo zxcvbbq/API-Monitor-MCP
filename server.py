@@ -1123,28 +1123,27 @@ def api_monitor_open_capture(file_path: str, install_root: str | None = None) ->
         for window in _find_api_monitor_windows()
         if "api monitor v2" in window["title"].casefold() and bitness in window["title"]
     ]
-    main_window = next(
-        (
-            window
-            for window in candidates
-            if not window["title"].casefold().startswith("monitoring")
-        ),
-        candidates[0] if candidates else None,
-    )
+    capture_candidates = [
+        window
+        for window in candidates
+        if not window["title"].casefold().startswith("monitoring")
+    ]
+    main_window = capture_candidates[0] if capture_candidates else None
     if main_window is None:
-        root = _app_root(install_root)
-        executable = _app_executable(root, architecture)
-        process = subprocess.Popen([str(executable)], cwd=str(root))
+        existing_handles = {window["handle"] for window in candidates}
+        launch = api_monitor_launch(architecture, install_root)
         main_window = _wait_for_api_monitor_window(
-            lambda window: "api monitor v2" in window["title"].casefold()
-            and bitness in window["title"],
+            lambda window: window["handle"] not in existing_handles
+            and "api monitor v2" in window["title"].casefold()
+            and bitness in window["title"]
+            and not window["title"].casefold().startswith("monitoring"),
             15,
         )
         if main_window is None:
             return {
                 "opened": True,
                 "method": "direct-launch-fallback",
-                "pid": process.pid,
+                "pid": launch["pid"],
                 "file": str(path),
             }
 
