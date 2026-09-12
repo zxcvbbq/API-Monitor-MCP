@@ -2357,8 +2357,9 @@ def capture_search_directory(
     for capture in listed:
         path = Path(capture["file"])
         strings = _capture_strings(path, query, min(20, limit), 4)
-        if strings:
-            matches.append({"file": str(path), "matches": strings})
+        entries = capture_search_entries(str(path), query, min(20, limit), 4 * 1024 * 1024)["entries"]
+        if strings or entries:
+            matches.append({"file": str(path), "matches": strings, "entries": entries})
             if len(matches) >= limit:
                 break
     return {"directory": str(root), "query": query, "captures": matches, "count": len(matches)}
@@ -2563,6 +2564,8 @@ def _self_test() -> None:
         }
         listed = capture_list_directory(directory, recursive=False, limit=10)
         assert listed["count"] == 1
+        directory_search = capture_search_directory(directory, "CreateFile", recursive=False, limit=10)
+        assert directory_search["captures"][0]["entries"][0]["entry"] == "calls.bin"
         comparison = capture_compare(str(path), str(second_path))
         assert comparison["counts"] == {"added": 1, "removed": 6, "changed": 1}
         assert not comparison["same"]
