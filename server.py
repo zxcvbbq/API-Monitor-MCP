@@ -891,6 +891,7 @@ def _capture_call_stats(
     durations: list[float] = []
     error_codes: dict[str, int] = {}
     error_codes_truncated = False
+    error_count = 0
     for index, offset in enumerate(offsets[:scanned]):
         if offset > len(data) - layout["minimum_record_size"]:
             stats["invalid_records"] += 1
@@ -914,6 +915,7 @@ def _capture_call_stats(
         thread_ids.add(context["thread_id"])
         error_code = context["error_code"]
         if error_code:
+            error_count += 1
             error_key = f"0x{error_code:08x}"
             if error_key in error_codes or len(error_codes) < 256:
                 error_codes[error_key] = error_codes.get(error_key, 0) + 1
@@ -942,7 +944,7 @@ def _capture_call_stats(
     context_stats: dict[str, Any] = {
         "thread_count": len(thread_ids),
         "duration_count": len(durations),
-        "error_count": sum(error_codes.values()),
+        "error_count": error_count,
         "error_codes": error_codes,
         "error_codes_truncated": error_codes_truncated,
         "first_timestamp_utc": _windows_filetime(min(timestamps)) if timestamps else None,
@@ -5421,6 +5423,14 @@ def _self_test() -> None:
         stats = capture_call_stats(str(path))
         assert stats["processes"][0]["context"]["error_count"] == 1
         assert stats["processes"][0]["context"]["error_codes"] == {"0x00000005": 1}
+        bounded_records = bytearray(257 * 160)
+        bounded_calls = b"".join(struct.pack("<Q", index * 160) for index in range(257))
+        for index in range(257):
+            bounded_records[index * 160 + 2] = 1
+            struct.pack_into("<I", bounded_records, index * 160 + 84, index + 1)
+        bounded_stats = _capture_call_stats(bounded_calls, bytes(bounded_records), 1000)
+        assert bounded_stats["context"]["error_count"] == 257
+        assert bounded_stats["context"]["error_codes_truncated"]
         resolved_records = capture_call_records(str(path), resolve_definitions=True)
         assert resolved_records["definitions_available"]
         assert resolved_records["records"][0]["definition"]["name"] == "CreateFileW"
