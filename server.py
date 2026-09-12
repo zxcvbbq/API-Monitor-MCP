@@ -619,6 +619,79 @@ def api_monitor_gui_lists(window_title: str = "", limit: int = 200) -> dict[str,
 
 
 @mcp.tool()
+def api_monitor_gui_select(
+    list_handle: int,
+    row_index: int | None = None,
+    query: str = "",
+) -> dict[str, Any]:
+    """Select a Rohitab list row by index or text without foregrounding the app."""
+    if sys.platform != "win32":
+        raise RuntimeError("Rohitab GUI selection requires Windows")
+    if list_handle < 1:
+        raise ValueError("list_handle must be positive")
+    if row_index is None and not query:
+        raise ValueError("row_index or query is required")
+    if row_index is not None and row_index < 0:
+        raise ValueError("row_index must be non-negative")
+    try:
+        from pywinauto import Desktop
+    except ImportError as exc:
+        raise RuntimeError("Install pywinauto to select a GUI row") from exc
+
+    wanted = query.casefold()
+    api_monitor_pids = {
+        int(process["pid"])
+        for process in api_monitor_status().get("processes", [])
+        if isinstance(process.get("pid"), int)
+    }
+    for window in Desktop(backend="uia").windows():
+        if window.process_id() not in api_monitor_pids:
+            continue
+        for control in window.descendants():
+            if control.element_info.control_type != "List" or control.handle != list_handle:
+                continue
+            rows = [
+                item
+                for item in control.children()
+                if item.element_info.control_type == "ListItem"
+            ]
+            if row_index is not None:
+                if row_index >= len(rows):
+                    raise IndexError(f"row_index {row_index} is outside the list")
+                matches = [(row_index, rows[row_index])]
+            else:
+                matches = [
+                    (index, item)
+                    for index, item in enumerate(rows)
+                    if wanted in _uia_text(item).casefold()
+                    or wanted in " ".join(
+                        _uia_text(cell)
+                        for cell in item.descendants()
+                        if cell.element_info.control_type == "Text"
+                    ).casefold()
+                ]
+                if len(matches) != 1:
+                    raise ValueError("query must match exactly one GUI row")
+            index, item = matches[0]
+            item.select()
+            cells = [
+                _uia_text(cell)
+                for cell in item.descendants()
+                if cell.element_info.control_type == "Text"
+            ]
+            return {
+                "selected": True,
+                "method": "background-ui-automation",
+                "window": {"handle": window.handle, "title": window.window_text()},
+                "list_handle": list_handle,
+                "row_index": index,
+                "cells": cells or [_uia_text(item)],
+                "rectangle": _uia_rect(item),
+            }
+    raise LookupError(f"Rohitab GUI list {list_handle} was not found")
+
+
+@mcp.tool()
 def api_monitor_monitor_process(
     process_path: str,
     architecture: str = "x64",
