@@ -36,6 +36,8 @@ COMMAND_SAVE_CAPTURE = 32854
 COMMAND_SAVE_CAPTURE_AS = 32954
 COMMAND_START_MONITORING = 32882
 COMMAND_STOP_MONITORING = 32929
+COMMAND_REMOVE_PROCESS = 32919
+COMMAND_TERMINATE_PROCESS = 32924
 ZIP_SIGNATURES = (b"PK\x03\x04", b"PK\x05\x06", b"PK\x07\x08")
 ASCII_STRINGS = re.compile(rb"[\x20-\x7e]{4,}")
 UTF16_STRINGS = re.compile(rb"(?:[\x20-\x7e]\x00){4,}")
@@ -1370,6 +1372,45 @@ def api_monitor_monitoring_control(
             raise LookupError(f"API Monitor window not found: {window_handle}")
         raise TimeoutError("API Monitor main window did not appear")
     command = COMMAND_START_MONITORING if action == "start" else COMMAND_STOP_MONITORING
+    _post_window_command(main_window["handle"], command)
+    return {
+        "submitted": True,
+        "method": "background-gui",
+        "action": action,
+        "architecture": architecture,
+        "window": {"handle": main_window["handle"], "title": main_window["title"]},
+    }
+
+
+@mcp.tool()
+def api_monitor_process_control(
+    action: str,
+    architecture: str = "x64",
+    timeout_seconds: int = 10,
+    window_handle: int | None = None,
+    confirm: bool = False,
+) -> dict[str, Any]:
+    """Remove or terminate the selected process in Rohitab's monitor window."""
+    if sys.platform != "win32":
+        raise RuntimeError("Rohitab process controls require Windows")
+    if action not in {"remove", "terminate"}:
+        raise ValueError("action must be remove or terminate")
+    if action == "terminate" and not confirm:
+        raise ValueError("terminate requires confirm=true")
+    if architecture not in {"x86", "x64"}:
+        raise ValueError("architecture must be x86 or x64")
+    if timeout_seconds < 1 or timeout_seconds > 60:
+        raise ValueError("timeout_seconds must be between 1 and 60")
+    main_window = (
+        _api_monitor_window_by_handle(window_handle, architecture)
+        if window_handle is not None
+        else _api_monitor_main_window(architecture, timeout_seconds)
+    )
+    if main_window is None:
+        if window_handle is not None:
+            raise LookupError(f"API Monitor window not found: {window_handle}")
+        raise TimeoutError("API Monitor main window did not appear")
+    command = COMMAND_REMOVE_PROCESS if action == "remove" else COMMAND_TERMINATE_PROCESS
     _post_window_command(main_window["handle"], command)
     return {
         "submitted": True,
