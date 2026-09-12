@@ -32,6 +32,7 @@ COMMAND_OPEN_CAPTURE = 32852
 COMMAND_SAVE_CAPTURE = 32854
 COMMAND_SAVE_CAPTURE_AS = 32954
 COMMAND_START_MONITORING = 32882
+COMMAND_STOP_MONITORING = 32929
 ZIP_SIGNATURES = (b"PK\x03\x04", b"PK\x05\x06", b"PK\x07\x08")
 ASCII_STRINGS = re.compile(rb"[\x20-\x7e]{4,}")
 UTF16_STRINGS = re.compile(rb"(?:[\x20-\x7e]\x00){4,}")
@@ -841,6 +842,35 @@ def api_monitor_attach_process(
                 }
     suffix = f" named {process_name!r}" if process_name else ""
     raise LookupError(f"Process PID {pid}{suffix} was not found in API Monitor's process list")
+
+
+@mcp.tool()
+def api_monitor_monitoring_control(
+    action: str,
+    architecture: str = "x64",
+    timeout_seconds: int = 10,
+) -> dict[str, Any]:
+    """Start or stop the selected Rohitab monitoring session in the background."""
+    if sys.platform != "win32":
+        raise RuntimeError("Rohitab monitoring control requires Windows")
+    if action not in {"start", "stop"}:
+        raise ValueError("action must be start or stop")
+    if architecture not in {"x86", "x64"}:
+        raise ValueError("architecture must be x86 or x64")
+    if timeout_seconds < 1 or timeout_seconds > 60:
+        raise ValueError("timeout_seconds must be between 1 and 60")
+    main_window = _api_monitor_main_window(architecture, timeout_seconds)
+    if main_window is None:
+        raise TimeoutError("API Monitor main window did not appear")
+    command = COMMAND_START_MONITORING if action == "start" else COMMAND_STOP_MONITORING
+    _post_window_command(main_window["handle"], command)
+    return {
+        "submitted": True,
+        "method": "background-gui",
+        "action": action,
+        "architecture": architecture,
+        "window": {"handle": main_window["handle"], "title": main_window["title"]},
+    }
 
 
 @mcp.tool()
