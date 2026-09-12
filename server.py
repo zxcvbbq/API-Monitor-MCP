@@ -183,6 +183,12 @@ def _parse_capture_info(data: bytes) -> dict[str, Any]:
     }
 
 
+def _capture_record_size(offsets: list[int], index: int, data: bytes) -> int:
+    offset = offsets[index]
+    next_offset = offsets[index + 1] if index + 1 < len(offsets) else len(data)
+    return next_offset - offset if 144 <= next_offset - offset <= 160 else 160 if data[offset + 2] else 144
+
+
 def _capture_call_records(
     calls: bytes,
     data: bytes,
@@ -199,8 +205,7 @@ def _capture_call_records(
         if offset > len(data) - 144:
             records.append({"index": index, "offset": offset, "valid": False, "error": "record offset is outside process data"})
             continue
-        next_offset = offsets[index + 1] if index + 1 < len(offsets) else len(data)
-        record_size = next_offset - offset if 144 <= next_offset - offset <= 160 else 160 if data[offset + 2] else 144
+        record_size = _capture_record_size(offsets, index, data)
         record = {
             "index": index,
             "offset": offset,
@@ -235,6 +240,61 @@ def _capture_call_records(
             record["data_refs"].append(reference)
         records.append(record)
     return records
+
+
+def _capture_call_stats(calls: bytes, data: bytes, max_records: int) -> dict[str, Any]:
+    if len(calls) % 8:
+        raise ValueError("process calls entry is not an array of 64-bit offsets")
+    offsets = [struct.unpack_from("<Q", calls, index)[0] for index in range(0, len(calls), 8)]
+    scanned = min(len(offsets), max_records)
+    stats: dict[str, Any] = {
+        "count": len(offsets),
+        "scanned_records": scanned,
+        "truncated": scanned < len(offsets),
+        "valid_records": 0,
+        "invalid_records": 0,
+        "record_sizes": {"144": 0, "160": 0, "other": 0},
+        "flags": {},
+        "payload_slots": {
+            str(slot): {"references": 0, "bytes": 0, "invalid_references": 0}
+            for slot in range(5)
+        },
+        "data_bytes": len(data),
+        "referenced_data_bytes": 0,
+    }
+    for index, offset in enumerate(offsets[:scanned]):
+        if offset > len(data) - 144:
+            stats["invalid_records"] += 1
+            continue
+        stats["valid_records"] += 1
+        record_size = _capture_record_size(offsets, index, data)
+        size_key = str(record_size) if record_size in (144, 160) else "other"
+        stats["record_sizes"][size_key] += 1
+        flags = data[offset + 2]
+        flag_key = f"0x{flags:02x}"
+        stats["flags"][flag_key] = stats["flags"].get(flag_key, 0) + 1
+        for slot, pointer_offset, length_offset in (
+            (0, 112, 32),
+            (1, 120, 88),
+            (2, 128, 92),
+            (3, 136, 108),
+            (4, 152, 144),
+        ):
+            if pointer_offset + 8 > record_size or length_offset + 4 > record_size:
+                continue
+            relative = struct.unpack_from("<Q", data, offset + pointer_offset)[0]
+            length = struct.unpack_from("<I", data, offset + length_offset)[0]
+            reference_stats = stats["payload_slots"][str(slot)]
+            if not relative and not length:
+                continue
+            if relative + length > len(data):
+                reference_stats["invalid_references"] += 1
+                continue
+            reference_stats["references"] += 1
+            reference_stats["bytes"] += length
+            stats["referenced_data_bytes"] += length
+    stats["unreferenced_data_bytes"] = max(0, len(data) - stats["referenced_data_bytes"])
+    return stats
 
 
 def _scan_strings(data: bytes | mmap.mmap, query: str, limit: int, minimum: int) -> list[dict[str, Any]]:
@@ -2379,6 +2439,60 @@ def capture_call_records(
 
 
 @mcp.tool()
+def capture_call_stats(
+    file_path: str,
+    process_index: int | None = None,
+    max_records: int = 1_000_000,
+) -> dict[str, Any]:
+    """Summarize saved raw call streams without returning every record."""
+    if process_index is not None and process_index < 0:
+        raise ValueError("process_index must be non-negative")
+    max_records = _limit(max_records, "max_records", 1_000_000)
+    path = _capture_path(file_path)
+    archive, _, _ = _open_capture_zip(path)
+    with archive:
+        entries = {info.filename for info in archive.infolist()}
+        process_indices = sorted(
+            int(match.group(1))
+            for name in entries
+            if (match := re.fullmatch(r"process/(\d+)/calls", name, re.I))
+            and (process_index is None or int(match.group(1)) == process_index)
+        )
+        processes = []
+        for index in process_indices:
+            calls_name = f"process/{index}/calls"
+            data_name = f"process/{index}/data"
+            calls = archive.read(calls_name)
+            data = archive.read(data_name) if data_name in entries else b""
+            stats = _capture_call_stats(calls, data, max_records)
+            processes.append(
+                {
+                    "process_index": index,
+                    "calls_entry": calls_name,
+                    "data_entry": data_name if data else None,
+                    **stats,
+                }
+            )
+    totals = {
+        "count": sum(process["count"] for process in processes),
+        "scanned_records": sum(process["scanned_records"] for process in processes),
+        "valid_records": sum(process["valid_records"] for process in processes),
+        "invalid_records": sum(process["invalid_records"] for process in processes),
+        "data_bytes": sum(process["data_bytes"] for process in processes),
+        "referenced_data_bytes": sum(process["referenced_data_bytes"] for process in processes),
+    }
+    totals["unreferenced_data_bytes"] = max(0, totals["data_bytes"] - totals["referenced_data_bytes"])
+    return {
+        "file": str(path),
+        "process_index": process_index,
+        "max_records": max_records,
+        "processes": processes,
+        "totals": totals,
+        "count": len(processes),
+    }
+
+
+@mcp.tool()
 def capture_search_calls(
     file_path: str,
     query: str,
@@ -2984,6 +3098,9 @@ def _self_test() -> None:
         processes = capture_list_processes(str(path), 10)
         assert processes["processes"][0]["executables"] == ["C:\\sample.exe"]
         assert processes["processes"][0]["call_count"] == 1
+        call_stats = capture_call_stats(str(path), process_index=0)
+        assert call_stats["processes"][0]["record_sizes"]["160"] == 1
+        assert call_stats["totals"]["referenced_data_bytes"] == 5
         entries = _zip_entries(path)
         assert {entry["name"] for entry in entries} == {
             "metadata.txt",
