@@ -9,7 +9,7 @@ Features:
 - Deep-validate saved process metadata, call streams, and payload references
 - Compare saved traffic by call index and payload fingerprint
 - Inspect/search capture ZIPs, XML filters, logs, process data, metadata/modules, strings, raw hex, and payloads
-- Resolve saved API names, search/decode saved parameters/returns, plus exact primitive values
+- Resolve saved API names, search/decode saved parameters/returns, plus exact typed values
 - List saved API frequency across processes
 - Search Rohitab XML API definitions
 

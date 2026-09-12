@@ -372,6 +372,7 @@ def _capture_type_info(
         "kind": struct.unpack_from("<I", definitions, relative + pointer_size)[0],
         "size": definitions[relative + pointer_size * 4],
         "flags": definitions[relative + pointer_size * 4 + 1],
+        "pointer_size": pointer_size,
     }
     for key, offset in (
         ("name_offset", name_offset),
@@ -1466,6 +1467,64 @@ def _capture_encoded_argument_stream(
 def _capture_exact_scalar(data: bytes, type_info: dict[str, Any]) -> dict[str, Any] | None:
     kind = type_info.get("kind")
     size = type_info.get("size")
+    if kind == 4:
+        pointer_size = int(type_info.get("pointer_size", 8))
+        pointer_offset = 0 if int(type_info.get("flags", 0)) & 8 else 8
+        serialized_size = pointer_offset + pointer_size
+        if len(data) < serialized_size or pointer_size not in (4, 8):
+            return None
+        return {
+            "exact": True,
+            "kind": "pointer",
+            "size": pointer_size,
+            "serialized_size": serialized_size,
+            "payload_offset": pointer_offset,
+            "value": f"0x{int.from_bytes(data[pointer_offset:serialized_size], 'little'):0{pointer_size * 2}x}",
+        }
+    if kind in (7, 8, 9):
+        if len(data) < 4:
+            return None
+        present, length = struct.unpack_from("<HH", data)
+        if not present:
+            return {
+                "exact": True,
+                "kind": "string",
+                "present": False,
+                "size": 0,
+                "serialized_size": 4,
+                "value": None,
+            }
+        if length > len(data) - 4:
+            return None
+        raw = data[4 : 4 + length]
+        encodings = {
+            7: ("ascii", "utf-8"),
+            8: ("utf-16-le",),
+            9: ("utf-8", "utf-16-le"),
+        }[kind]
+        for encoding in encodings:
+            try:
+                value = raw.decode(encoding).rstrip("\x00")
+            except UnicodeDecodeError:
+                continue
+            return {
+                "exact": True,
+                "kind": "string",
+                "present": True,
+                "size": length,
+                "serialized_size": 4 + length,
+                "encoding": encoding,
+                "value": value,
+            }
+        return {
+            "exact": True,
+            "kind": "string",
+            "present": True,
+            "size": length,
+            "serialized_size": 4 + length,
+            "encoding": "bytes",
+            "value": _read_payload(raw),
+        }
     if not isinstance(size, int) or size <= 0 or size > 16 or len(data) < size:
         return None
     raw = data[:size]
@@ -4662,6 +4721,13 @@ def _self_test() -> None:
         assert _capture_exact_scalar(
             struct.pack("<I", 42), {"kind": 2, "size": 4, "flags": 0}
         )["value"] == 42
+        assert _capture_exact_scalar(
+            b"\x00" * 8 + struct.pack("<Q", 0x1234),
+            {"kind": 4, "flags": 0, "pointer_size": 8},
+        )["value"] == "0x0000000000001234"
+        assert _capture_exact_scalar(
+            struct.pack("<HH", 1, 5) + b"hello", {"kind": 7, "flags": 0}
+        )["value"] == "hello"
         extracted = Path(directory) / "calls.bin"
         exported = capture_extract_entry(str(path), "calls.bin", str(extracted))
         assert exported["size"] == len(b"CreateFileW\x00https://example.test\x00")
