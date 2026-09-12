@@ -1940,7 +1940,7 @@ def _capture_exact_array(
                 if typed:
                     item["typed"] = typed
             elements.append(item)
-    return {
+    result = {
         "exact": True,
         "kind": "array",
         "valid": all(item["valid"] for item in elements),
@@ -1950,6 +1950,22 @@ def _capture_exact_array(
         "serialized_table_bytes": table_bytes,
         "elements": elements,
     }
+    if representation == "contiguous" and element_type.get("kind") in (7, 8, 9):
+        raw = data[data_start : data_start + count * element_size]
+        kind = element_type["kind"]
+        encoding = (
+            "utf-16-le"
+            if kind == 8 or (kind == 9 and machine_flag)
+            else "ascii"
+            if kind == 7
+            else "utf-8"
+        )
+        try:
+            result["value"] = raw.decode(encoding).rstrip("\x00")
+            result["encoding"] = encoding
+        except UnicodeDecodeError:
+            pass
+    return result
 
 
 def _capture_exact_scalar(
@@ -5367,6 +5383,15 @@ def _self_test() -> None:
         assert array_type and array_type["array_flags"] == 1
         array_value = _capture_exact_value(struct.pack("<III", 1, 2, 3), array_type)
         assert array_value and array_value["elements"][1]["typed"]["value"] == 2
+        string_array_value = _capture_exact_value(
+            b"hello", {"kind": 14, "array_count": 5, "array_flags": 1, "element_type": {"kind": 7}}
+        )
+        assert string_array_value and string_array_value["value"] == "hello"
+        wide_array_value = _capture_exact_value(
+            "wide".encode("utf-16-le"),
+            {"kind": 14, "array_count": 4, "array_flags": 1, "element_type": {"kind": 8}},
+        )
+        assert wide_array_value and wide_array_value["value"] == "wide"
         prefixed_array_value = _capture_exact_value(
             struct.pack("<HIII", 3, 1, 2, 3), array_type
         )
