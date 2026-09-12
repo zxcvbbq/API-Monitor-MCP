@@ -464,6 +464,35 @@ def api_monitor_gui_action(
 
 
 @mcp.tool()
+def api_monitor_gui_read(
+    control_id: int | None = None,
+    title: str = "",
+    class_name: str = "",
+    window_title: str = "",
+    max_chars: int = 20_000,
+) -> dict[str, Any]:
+    """Read one Rohitab GUI control without focusing or raising the window."""
+    if sys.platform != "win32":
+        raise RuntimeError("Rohitab GUI reads require Windows")
+    if control_id is None and not title and not class_name:
+        raise ValueError("control_id, title, or class_name is required")
+    max_chars = _limit(max_chars, "max_chars", 1_000_000)
+    target = _find_ui_control(
+        _find_api_monitor_windows(), control_id, title, class_name, window_title
+    )
+    if target is None:
+        raise LookupError("Rohitab GUI control not found")
+    parent, control = target
+    text = _window_text(ctypes.WinDLL("user32", use_last_error=True), control["handle"])
+    return {
+        "window": parent,
+        "control": control,
+        "text": text[:max_chars],
+        "truncated": len(text) > max_chars,
+    }
+
+
+@mcp.tool()
 def api_monitor_gui_lists(window_title: str = "", limit: int = 200) -> dict[str, Any]:
     """Read Rohitab list views through background Windows UI Automation."""
     if sys.platform != "win32":
