@@ -295,47 +295,106 @@ def _parse_capture_process_info(data: bytes) -> dict[str, Any]:
     return result
 
 
-def _capture_record_size(offsets: list[int], index: int, data: bytes) -> int:
+def _capture_layout(pointer_size: int) -> dict[str, Any]:
+    if pointer_size == 4:
+        return {
+            "minimum_record_size": 112,
+            "full_record_size": 120,
+            "offset_format": "<I",
+            "pointer_refs": (
+                (0, 96, 32),
+                (1, 100, 72),
+                (2, 104, 76),
+                (3, 108, 92),
+                (4, 116, 112),
+            ),
+        }
+    if pointer_size == 8:
+        return {
+            "minimum_record_size": 144,
+            "full_record_size": 160,
+            "offset_format": "<Q",
+            "pointer_refs": (
+                (0, 112, 32),
+                (1, 120, 88),
+                (2, 128, 92),
+                (3, 136, 108),
+                (4, 152, 144),
+            ),
+        }
+    raise ValueError("pointer_size must be 4 or 8")
+
+
+def _capture_record_size(
+    offsets: list[int], index: int, data: bytes, pointer_size: int = 8
+) -> int:
+    layout = _capture_layout(pointer_size)
     offset = offsets[index]
     next_offset = offsets[index + 1] if index + 1 < len(offsets) else len(data)
-    return next_offset - offset if 144 <= next_offset - offset <= 160 else 160 if data[offset + 2] else 144
+    minimum = layout["minimum_record_size"]
+    full = layout["full_record_size"]
+    return next_offset - offset if minimum <= next_offset - offset <= full else full if data[offset + 2] else minimum
 
 
-def _capture_type_info(definitions: bytes, relative: int) -> dict[str, Any] | None:
-    if relative <= 0 or relative > len(definitions) - 48:
+def _capture_relative_text(data: bytes, relative: int) -> str | None:
+    if relative <= 0 or relative >= len(data):
         return None
+    end = data.find(b"\x00", relative)
+    if end < 0:
+        return None
+    text = data[relative:end].decode("ascii", errors="replace")
+    return text if text and all(char.isprintable() for char in text) else None
+
+
+def _capture_type_info(
+    definitions: bytes, relative: int, pointer_size: int = 8
+) -> dict[str, Any] | None:
+    type_size = 24 if pointer_size == 4 else 48
+    if relative <= 0 or relative > len(definitions) - type_size:
+        return None
+    pointer_format = "<I" if pointer_size == 4 else "<Q"
+    name_offset = struct.unpack_from(pointer_format, definitions, relative)[0]
+    alias_offset = struct.unpack_from(pointer_format, definitions, relative + pointer_size * 2)[0]
     type_info: dict[str, Any] = {
         "offset": relative,
-        "kind": struct.unpack_from("<I", definitions, relative + 8)[0],
-        "size": definitions[relative + 32],
-        "flags": definitions[relative + 33],
+        "kind": struct.unpack_from("<I", definitions, relative + pointer_size)[0],
+        "size": definitions[relative + pointer_size * 4],
+        "flags": definitions[relative + pointer_size * 4 + 1],
     }
     for key, offset in (
-        ("name_offset", struct.unpack_from("<Q", definitions, relative)[0]),
-        ("alias_offset", struct.unpack_from("<Q", definitions, relative + 16)[0]),
+        ("name_offset", name_offset),
+        ("alias_offset", alias_offset),
     ):
-        if offset < len(definitions):
-            end = definitions.find(b"\x00", offset)
-            if end >= 0:
-                type_info[key] = offset
-                type_info[key[:-7]] = definitions[offset:end].decode(
-                    "ascii", errors="replace"
-                )
+        text = _capture_relative_text(definitions, offset)
+        if text:
+            type_info[key] = offset
+            type_info[key[:-7]] = text
     return type_info
 
 
-def _capture_definition_info(definitions: bytes, relative: int) -> dict[str, Any]:
+def _capture_definition_info(
+    definitions: bytes, relative: int, pointer_size: int = 8
+) -> dict[str, Any]:
+    pointer_format = "<I" if pointer_size == 4 else "<Q"
+    node_size = 44 if pointer_size == 4 else 64
+    parameter_table_field = 28 if pointer_size == 4 else 32
+    module_field = 32 if pointer_size == 4 else 40
+    return_field = 40 if pointer_size == 4 else 56
     result: dict[str, Any] = {"offset": relative, "valid": False}
-    if relative < 0 or relative > len(definitions) - 64:
+    if relative < 0 or relative > len(definitions) - node_size:
         result["error"] = "definition offset is outside definitions entry"
         return result
     flags = definitions[relative]
     ordinal = struct.unpack_from("<I", definitions, relative + 8)[0]
-    name_relative = struct.unpack_from("<Q", definitions, relative + 24)[0]
-    module_relative = struct.unpack_from("<Q", definitions, relative + 40)[0]
+    name_relative = struct.unpack_from("<Q" if pointer_size == 8 else "<I", definitions, relative + 24)[0]
+    module_relative = struct.unpack_from(pointer_format, definitions, relative + module_field)[0]
     parameter_count = definitions[relative + 2]
-    parameter_table_relative = struct.unpack_from("<Q", definitions, relative + 32)[0]
-    return_descriptor_relative = struct.unpack_from("<Q", definitions, relative + 56)[0]
+    parameter_table_relative = struct.unpack_from(
+        pointer_format, definitions, relative + parameter_table_field
+    )[0]
+    return_descriptor_relative = struct.unpack_from(
+        pointer_format, definitions, relative + return_field
+    )[0]
     result.update(
         {
             "flags": f"0x{flags:02x}",
@@ -345,81 +404,63 @@ def _capture_definition_info(definitions: bytes, relative: int) -> dict[str, Any
             "parameter_count": parameter_count,
             "parameter_table_offset": parameter_table_relative,
             "return_descriptor_offset": return_descriptor_relative,
+            "pointer_size": pointer_size,
         }
     )
-    if name_relative >= len(definitions):
+    name = _capture_relative_text(definitions, name_relative)
+    if name is None:
         result["error"] = "definition name offset is outside definitions entry"
-        return result
-    name_end = definitions.find(b"\x00", name_relative)
-    if name_end < 0:
-        result["error"] = "definition name is not NUL-terminated"
-        return result
-    name_bytes = definitions[name_relative:name_end]
-    try:
-        name = name_bytes.decode("ascii")
-    except UnicodeDecodeError:
-        result["error"] = "definition name is not ASCII"
-        return result
-    if not name or not all(char.isprintable() for char in name):
-        result["error"] = "definition name is not printable"
         return result
     result["name"] = name
     if module_relative:
-        if module_relative > len(definitions) - 24:
+        if module_relative > len(definitions) - 16 - pointer_size:
             result["error"] = "definition module offset is outside definitions entry"
             return result
-        module_name_relative = struct.unpack_from("<Q", definitions, module_relative + 16)[0]
-        if module_name_relative >= len(definitions):
-            result["error"] = "definition module name offset is outside definitions entry"
-            return result
-        module_name_end = definitions.find(b"\x00", module_name_relative)
-        if module_name_end < 0:
-            result["error"] = "definition module name is not NUL-terminated"
-            return result
-        try:
-            module = definitions[module_name_relative:module_name_end].decode("ascii")
-        except UnicodeDecodeError:
-            result["error"] = "definition module name is not ASCII"
-            return result
-        if not module or not all(char.isprintable() for char in module):
+        module_name_relative = struct.unpack_from(
+            pointer_format, definitions, module_relative + 16
+        )[0]
+        module = _capture_relative_text(definitions, module_name_relative)
+        if module is None:
             result["error"] = "definition module name is not printable"
             return result
         result["module"] = module
         result["module_name_offset"] = module_name_relative
     if parameter_count and parameter_table_relative < len(definitions):
-        table_end = parameter_table_relative + parameter_count * 24
+        descriptor_size = 12 if pointer_size == 4 else 24
+        table_end = parameter_table_relative + parameter_count * descriptor_size
         if table_end <= len(definitions):
             parameters = []
             for index in range(parameter_count):
-                descriptor = parameter_table_relative + index * 24
-                name_offset = struct.unpack_from("<Q", definitions, descriptor)[0]
-                type_offset = struct.unpack_from("<Q", definitions, descriptor + 8)[0]
+                descriptor = parameter_table_relative + index * descriptor_size
+                name_offset = struct.unpack_from(pointer_format, definitions, descriptor)[0]
+                type_offset = struct.unpack_from(
+                    pointer_format, definitions, descriptor + pointer_size
+                )[0]
                 parameter: dict[str, Any] = {
                     "index": index,
                     "offset": descriptor,
                     "name_offset": name_offset,
                     "type_offset": type_offset,
-                    "flags": struct.unpack_from("<H", definitions, descriptor + 16)[0],
+                    "flags": struct.unpack_from(
+                        "<H", definitions, descriptor + pointer_size * 2
+                    )[0],
                 }
-                if name_offset < len(definitions):
-                    name_end = definitions.find(b"\x00", name_offset)
-                    if name_end >= 0:
-                        parameter["name"] = definitions[name_offset:name_end].decode(
-                            "ascii", errors="replace"
-                        )
-                type_info = _capture_type_info(definitions, type_offset)
+                name = _capture_relative_text(definitions, name_offset)
+                if name:
+                    parameter["name"] = name
+                type_info = _capture_type_info(definitions, type_offset, pointer_size)
                 if type_info:
                     parameter["type"] = type_info
                 parameters.append(parameter)
             result["parameters"] = parameters
         else:
             result["parameter_error"] = "parameter table exceeds definitions entry"
-    if return_descriptor_relative and return_descriptor_relative <= len(definitions) - 16:
+    if return_descriptor_relative and return_descriptor_relative <= len(definitions) - pointer_size:
         return_type_relative = struct.unpack_from(
-            "<Q", definitions, return_descriptor_relative
+            pointer_format, definitions, return_descriptor_relative
         )[0]
         result["return_type_offset"] = return_type_relative
-        return_type = _capture_type_info(definitions, return_type_relative)
+        return_type = _capture_type_info(definitions, return_type_relative, pointer_size)
         if return_type:
             result["return_type"] = return_type
     result["valid"] = True
@@ -434,16 +475,23 @@ def _capture_call_records(
     max_data_bytes: int,
     start_index: int = 0,
     definitions: bytes | None = None,
+    pointer_size: int = 8,
 ) -> list[dict[str, Any]]:
-    if len(calls) % 8:
-        raise ValueError("process calls entry is not an array of 64-bit offsets")
-    offsets = [struct.unpack_from("<Q", calls, index)[0] for index in range(0, len(calls), 8)]
+    layout = _capture_layout(pointer_size)
+    if len(calls) % pointer_size:
+        raise ValueError(f"process calls entry is not an array of {pointer_size * 8}-bit offsets")
+    offset_format = layout["offset_format"]
+    offsets = [
+        struct.unpack_from(offset_format, calls, index)[0]
+        for index in range(0, len(calls), pointer_size)
+    ]
+    minimum = layout["minimum_record_size"]
     records: list[dict[str, Any]] = []
     for index, offset in enumerate(offsets[start_index : start_index + limit], start=start_index):
-        if offset > len(data) - 144:
+        if offset > len(data) - minimum:
             records.append({"index": index, "offset": offset, "valid": False, "error": "record offset is outside process data"})
             continue
-        record_size = _capture_record_size(offsets, index, data)
+        record_size = _capture_record_size(offsets, index, data, pointer_size)
         record = {
             "index": index,
             "offset": offset,
@@ -453,24 +501,24 @@ def _capture_call_records(
             "header_hex": data[offset : offset + min(record_size, 112)].hex(" "),
             "data_refs": [],
         }
-        definition_offset = struct.unpack_from("<Q", data, offset + 40)[0]
+        definition_offset = struct.unpack_from(
+            offset_format, data, offset + (40 if pointer_size == 8 else 36)
+        )[0]
         record["definition_offset"] = definition_offset
         if definitions is not None:
-            record["definition"] = _capture_definition_info(definitions, definition_offset)
+            record["definition"] = _capture_definition_info(
+                definitions, definition_offset, pointer_size
+            )
         if not record["valid"]:
             record["error"] = "record extends beyond process data"
             records.append(record)
             continue
-        for slot, pointer_offset, length_offset in (
-            (0, 112, 32),
-            (1, 120, 88),
-            (2, 128, 92),
-            (3, 136, 108),
-            (4, 152, 144),
-        ):
-            if pointer_offset + 8 > record_size or length_offset + 4 > record_size:
+        for slot, pointer_offset, length_offset in layout["pointer_refs"]:
+            if pointer_offset + pointer_size > record_size or length_offset + 4 > record_size:
                 continue
-            relative = struct.unpack_from("<Q", data, offset + pointer_offset)[0]
+            relative = struct.unpack_from(
+                offset_format, data, offset + pointer_offset
+            )[0]
             length = struct.unpack_from("<I", data, offset + length_offset)[0]
             reference: dict[str, Any] = {"slot": slot, "offset": relative, "length": length}
             end = relative + length
@@ -488,10 +536,17 @@ def _capture_call_records(
     return records
 
 
-def _capture_call_stats(calls: bytes, data: bytes, max_records: int) -> dict[str, Any]:
-    if len(calls) % 8:
-        raise ValueError("process calls entry is not an array of 64-bit offsets")
-    offsets = [struct.unpack_from("<Q", calls, index)[0] for index in range(0, len(calls), 8)]
+def _capture_call_stats(
+    calls: bytes, data: bytes, max_records: int, pointer_size: int = 8
+) -> dict[str, Any]:
+    layout = _capture_layout(pointer_size)
+    if len(calls) % pointer_size:
+        raise ValueError(f"process calls entry is not an array of {pointer_size * 8}-bit offsets")
+    offset_format = layout["offset_format"]
+    offsets = [
+        struct.unpack_from(offset_format, calls, index)[0]
+        for index in range(0, len(calls), pointer_size)
+    ]
     scanned = min(len(offsets), max_records)
     stats: dict[str, Any] = {
         "count": len(offsets),
@@ -509,11 +564,11 @@ def _capture_call_stats(calls: bytes, data: bytes, max_records: int) -> dict[str
         "referenced_data_bytes": 0,
     }
     for index, offset in enumerate(offsets[:scanned]):
-        if offset > len(data) - 144:
+        if offset > len(data) - layout["minimum_record_size"]:
             stats["invalid_records"] += 1
             continue
         stats["valid_records"] += 1
-        record_size = _capture_record_size(offsets, index, data)
+        record_size = _capture_record_size(offsets, index, data, pointer_size)
         if offset + record_size > len(data):
             stats["valid_records"] -= 1
             stats["invalid_records"] += 1
@@ -523,16 +578,12 @@ def _capture_call_stats(calls: bytes, data: bytes, max_records: int) -> dict[str
         flags = data[offset + 2]
         flag_key = f"0x{flags:02x}"
         stats["flags"][flag_key] = stats["flags"].get(flag_key, 0) + 1
-        for slot, pointer_offset, length_offset in (
-            (0, 112, 32),
-            (1, 120, 88),
-            (2, 128, 92),
-            (3, 136, 108),
-            (4, 152, 144),
-        ):
-            if pointer_offset + 8 > record_size or length_offset + 4 > record_size:
+        for slot, pointer_offset, length_offset in layout["pointer_refs"]:
+            if pointer_offset + pointer_size > record_size or length_offset + 4 > record_size:
                 continue
-            relative = struct.unpack_from("<Q", data, offset + pointer_offset)[0]
+            relative = struct.unpack_from(
+                offset_format, data, offset + pointer_offset
+            )[0]
             length = struct.unpack_from("<I", data, offset + length_offset)[0]
             reference_stats = stats["payload_slots"][str(slot)]
             if not relative and not length:
@@ -1416,12 +1467,12 @@ def _capture_exact_scalar(data: bytes, type_info: dict[str, Any]) -> dict[str, A
             "size": size,
             "value": struct.unpack("<f" if size == 4 else "<d", raw)[0],
         }
-    if kind == 6 and size == 8:
+    if kind == 6 and size in (4, 8):
         return {
             "exact": True,
             "kind": "handle",
             "size": size,
-            "value": f"0x{int.from_bytes(raw, 'little'):016x}",
+            "value": f"0x{int.from_bytes(raw, 'little'):0{size * 2}x}",
         }
     return None
 
@@ -2983,6 +3034,7 @@ def capture_call_records(
     limit = _limit(limit, "limit", 10_000)
     max_data_bytes = _limit(max_data_bytes, "max_data_bytes", 16 * 1024 * 1024)
     path = _capture_path(file_path)
+    pointer_size = 4 if path.suffix.lower() == ".apmx86" else 8
     calls_name = f"process/{process_index}/calls"
     data_name = f"process/{process_index}/data"
     archive, _, _ = _open_capture_zip(path)
@@ -2996,7 +3048,11 @@ def capture_call_records(
         except KeyError:
             data = b""
         definitions = archive.read("definitions") if resolve_definitions and "definitions" in archive.namelist() else None
-    count = len(calls) // 8
+    if len(calls) % pointer_size:
+        raise ValueError(
+            f"process calls entry is not an array of {pointer_size * 8}-bit offsets"
+        )
+    count = len(calls) // pointer_size
     if start_index > count:
         raise IndexError(f"start_index {start_index} is outside {count} saved calls")
     records = _capture_call_records(
@@ -3007,6 +3063,7 @@ def capture_call_records(
         max_data_bytes,
         start_index=start_index,
         definitions=definitions,
+        pointer_size=pointer_size,
     )
     return {
         "file": str(path),
@@ -3016,6 +3073,7 @@ def capture_call_records(
         "call_entry_bytes": len(calls),
         "data_entry_bytes": len(data),
         "definitions_available": definitions is not None,
+        "architecture": "x86" if pointer_size == 4 else "x64",
         "count": count,
         "start_index": start_index,
         "end_index": records[-1]["index"] if records else None,
@@ -3156,6 +3214,7 @@ def capture_extract_call_payload(
         raise FileExistsError(f"Output already exists: {output}")
 
     path = _capture_path(file_path)
+    pointer_size = 4 if path.suffix.lower() == ".apmx86" else 8
     calls_name = f"process/{process_index}/calls"
     data_name = f"process/{process_index}/data"
     archive, _, _ = _open_capture_zip(path)
@@ -3168,13 +3227,21 @@ def capture_extract_call_payload(
             data = archive.read(data_name)
         except KeyError as exc:
             raise FileNotFoundError(f"Capture call entry not found: {data_name}") from exc
-    if len(calls) % 8:
-        raise ValueError("process calls entry is not an array of 64-bit offsets")
-    count = len(calls) // 8
+    if len(calls) % pointer_size:
+        raise ValueError(
+            f"process calls entry is not an array of {pointer_size * 8}-bit offsets"
+        )
+    count = len(calls) // pointer_size
     if record_index >= count:
         raise IndexError(f"record_index {record_index} is outside {count} saved calls")
     record = _capture_call_records(
-        calls, data, 1, False, max_bytes, start_index=record_index
+        calls,
+        data,
+        1,
+        False,
+        max_bytes,
+        start_index=record_index,
+        pointer_size=pointer_size,
     )[0]
     if not record["valid"]:
         raise ValueError(record.get("error", "saved call record is invalid"))
@@ -3330,6 +3397,7 @@ def capture_call_stats(
         raise ValueError("process_index must be non-negative")
     max_records = _limit(max_records, "max_records", 1_000_000)
     path = _capture_path(file_path)
+    pointer_size = 4 if path.suffix.lower() == ".apmx86" else 8
     archive, _, _ = _open_capture_zip(path)
     with archive:
         entries = {info.filename for info in archive.infolist()}
@@ -3345,7 +3413,7 @@ def capture_call_stats(
             data_name = f"process/{index}/data"
             calls = archive.read(calls_name)
             data = archive.read(data_name) if data_name in entries else b""
-            stats = _capture_call_stats(calls, data, max_records)
+            stats = _capture_call_stats(calls, data, max_records, pointer_size)
             processes.append(
                 {
                     "process_index": index,
@@ -3386,6 +3454,7 @@ def capture_list_apis(
     limit = _limit(limit, "limit", 10_000)
     max_records = _limit(max_records, "max_records", 1_000_000)
     path = _capture_path(file_path)
+    pointer_size = 4 if path.suffix.lower() == ".apmx86" else 8
     archive, _, _ = _open_capture_zip(path)
     apis: dict[int, dict[str, Any]] = {}
     scanned = 0
@@ -3413,13 +3482,21 @@ def capture_list_apis(
             calls = archive.read(f"process/{index}/calls")
             data_name = f"process/{index}/data"
             data = archive.read(data_name) if data_name in entries else b""
-            if len(calls) % 8:
-                raise ValueError(f"process/{index}/calls is not an array of 64-bit offsets")
-            record_count = len(calls) // 8
+            if len(calls) % pointer_size:
+                raise ValueError(
+                    f"process/{index}/calls is not an array of {pointer_size * 8}-bit offsets"
+                )
+            record_count = len(calls) // pointer_size
             page_count = min(record_count, max_records - scanned)
             truncated |= page_count < record_count
             records = _capture_call_records(
-                calls, data, page_count, False, 0, definitions=definitions
+                calls,
+                data,
+                page_count,
+                False,
+                0,
+                definitions=definitions,
+                pointer_size=pointer_size,
             )
             for record in records:
                 scanned += 1
@@ -3478,6 +3555,7 @@ def capture_search_calls(
     max_records = _limit(max_records, "max_records", 1_000_000)
     max_data_bytes = _limit(max_data_bytes, "max_data_bytes", 16 * 1024 * 1024)
     path = _capture_path(file_path)
+    pointer_size = 4 if path.suffix.lower() == ".apmx86" else 8
     archive, _, _ = _open_capture_zip(path)
     wanted = query.casefold()
     matches: list[dict[str, Any]] = []
@@ -3494,9 +3572,11 @@ def capture_search_calls(
             calls = archive.read(f"process/{index}/calls")
             data = archive.read(f"process/{index}/data") if f"process/{index}/data" in entries else b""
             definitions = archive.read("definitions") if resolve_definitions and "definitions" in entries else None
-            if len(calls) % 8:
-                raise ValueError(f"process/{index}/calls is not an array of 64-bit offsets")
-            record_count = len(calls) // 8
+            if len(calls) % pointer_size:
+                raise ValueError(
+                    f"process/{index}/calls is not an array of {pointer_size * 8}-bit offsets"
+                )
+            record_count = len(calls) // pointer_size
             if scanned + record_count > max_records:
                 scan_truncated = True
             records = _capture_call_records(
@@ -3506,6 +3586,7 @@ def capture_search_calls(
                 True,
                 max_data_bytes,
                 definitions=definitions,
+                pointer_size=pointer_size,
             )
             for record in records:
                 scanned += 1
@@ -3590,6 +3671,7 @@ def capture_calls_around(
         raise ValueError("before and after must be between 0 and 1000")
     max_data_bytes = _limit(max_data_bytes, "max_data_bytes", 16 * 1024 * 1024)
     path = _capture_path(file_path)
+    pointer_size = 4 if path.suffix.lower() == ".apmx86" else 8
     calls_name = f"process/{process_index}/calls"
     data_name = f"process/{process_index}/data"
     archive, _, _ = _open_capture_zip(path)
@@ -3601,9 +3683,11 @@ def capture_calls_around(
             raise FileNotFoundError(f"Capture call entry not found: {calls_name}") from exc
         data = archive.read(data_name) if data_name in entries else b""
         definitions = archive.read("definitions") if resolve_definitions and "definitions" in entries else None
-    if len(calls) % 8:
-        raise ValueError("process calls entry is not an array of 64-bit offsets")
-    count = len(calls) // 8
+    if len(calls) % pointer_size:
+        raise ValueError(
+            f"process calls entry is not an array of {pointer_size * 8}-bit offsets"
+        )
+    count = len(calls) // pointer_size
     if record_index >= count:
         raise IndexError(f"record_index {record_index} is outside {count} saved calls")
     start = max(0, record_index - before)
@@ -3616,6 +3700,7 @@ def capture_calls_around(
         max_data_bytes,
         start_index=start,
         definitions=definitions,
+        pointer_size=pointer_size,
     )
     for record in records:
         record["is_target"] = record["index"] == record_index
@@ -4207,6 +4292,33 @@ def _self_test() -> None:
         comparison = capture_compare(str(path), str(second_path))
         assert comparison["counts"] == {"added": 1, "removed": 8, "changed": 1}
         assert not comparison["same"]
+
+        x86_path = Path(directory) / "sample.apmx86"
+        x86_record = bytearray(120)
+        x86_record[2] = 1
+        struct.pack_into("<I", x86_record, 36, 16)
+        struct.pack_into("<I", x86_record, 32, 5)
+        struct.pack_into("<I", x86_record, 96, 120)
+        x86_definitions = bytearray(160)
+        struct.pack_into("<I", x86_definitions, 16 + 8, 321)
+        struct.pack_into("<I", x86_definitions, 16 + 24, 80)
+        struct.pack_into("<I", x86_definitions, 16 + 32, 96)
+        x86_definitions[80 : 80 + len(b"CreateFileA\x00")] = b"CreateFileA\x00"
+        struct.pack_into("<I", x86_definitions, 96 + 16, 128)
+        x86_definitions[128 : 128 + len(b"kernel32.dll\x00")] = b"kernel32.dll\x00"
+        x86_payload = io.BytesIO()
+        with zipfile.ZipFile(x86_payload, "w", zipfile.ZIP_STORED) as archive:
+            archive.writestr("process/0/calls", struct.pack("<I", 0))
+            archive.writestr("process/0/data", bytes(x86_record) + b"hello")
+            archive.writestr("definitions", bytes(x86_definitions))
+        x86_path.write_bytes(b"\r\nAPI Monitor 32-bit Capture\r\nRBAPM" + x86_payload.getvalue())
+        x86_records = capture_call_records(
+            str(x86_path), include_data=True, resolve_definitions=True
+        )
+        assert x86_records["architecture"] == "x86"
+        assert x86_records["records"][0]["definition"]["name"] == "CreateFileA"
+        assert x86_records["records"][0]["data_refs"][0]["payload"]["text"] == "hello"
+        assert capture_list_apis(str(x86_path))["apis"][0]["module"] == "kernel32.dll"
 
         app_root = Path(directory) / "app"
         definition_root = app_root / "API"
