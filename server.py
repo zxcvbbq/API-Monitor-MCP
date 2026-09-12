@@ -360,6 +360,18 @@ def _set_control_text(handle: int, text: str) -> None:
         raise OSError(ctypes.get_last_error(), "Could not set API Monitor control text")
 
 
+def _set_combo_selection(handle: int, value: str) -> None:
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+    index = user32.SendMessageW(handle, 0x0158, -1, ctypes.c_wchar_p(value))  # CB_FINDSTRINGEXACT
+    if index < 0:
+        raise ValueError(f"API Monitor combo option not found: {value}")
+    user32.SendMessageW(handle, 0x014E, index, 0)  # CB_SETCURSEL
+    parent = user32.GetParent(handle)
+    if parent:
+        notification = (1 << 16) | (user32.GetDlgCtrlID(handle) & 0xFFFF)  # CBN_SELCHANGE
+        user32.PostMessageW(parent, 0x0111, notification, handle)  # WM_COMMAND
+
+
 def _wait_for_api_monitor_window(predicate: Any, timeout_seconds: float) -> dict[str, Any] | None:
     deadline = time.monotonic() + timeout_seconds
     while time.monotonic() < deadline:
@@ -691,6 +703,83 @@ def api_monitor_gui_select(
                 "rectangle": _uia_rect(item),
             }
     raise LookupError(f"Rohitab GUI list {list_handle} was not found")
+
+
+@mcp.tool()
+def api_monitor_add_display_filter(
+    field: str,
+    operator: str,
+    value: str,
+    action: str = "Show",
+    ignore_case: bool = True,
+    architecture: str = "x64",
+    timeout_seconds: int = 10,
+) -> dict[str, Any]:
+    """Add a Rohitab Display Filter through its background GUI dialog."""
+    if sys.platform != "win32":
+        raise RuntimeError("Rohitab display filters require Windows")
+    if not field or not operator or not value:
+        raise ValueError("field, operator, and value are required")
+    if action not in {"Show", "Hide"}:
+        raise ValueError("action must be Show or Hide")
+    if architecture not in {"x86", "x64"}:
+        raise ValueError("architecture must be x86 or x64")
+    if timeout_seconds < 1 or timeout_seconds > 60:
+        raise ValueError("timeout_seconds must be between 1 and 60")
+
+    main_window = _api_monitor_main_window(architecture, timeout_seconds)
+    if main_window is None:
+        raise TimeoutError("API Monitor main window did not appear")
+    dialog = next(
+        (window for window in _find_api_monitor_windows() if window["title"] == "Display Filter"),
+        None,
+    )
+    if dialog is None:
+        button = next(
+            (
+                child
+                for child in main_window.get("children", [])
+                if child.get("title") == "Add Filter (Insert)"
+            ),
+            None,
+        )
+        if button is None:
+            raise RuntimeError("API Monitor Add Filter button was not found")
+        _post_button_click(button["handle"])
+        dialog = _wait_for_api_monitor_window(
+            lambda window: window["title"] == "Display Filter", timeout_seconds
+        )
+    if dialog is None:
+        raise TimeoutError("API Monitor Display Filter dialog did not appear")
+
+    controls = {child.get("control_id"): child for child in dialog.get("children", [])}
+    for control_id, option in ((2041, field), (2098, operator), (2001, action)):
+        control = controls.get(control_id)
+        if control is None:
+            raise RuntimeError(f"API Monitor Display Filter control {control_id} was not found")
+        _set_combo_selection(control["handle"], option)
+    value_control = controls.get(2110)
+    add_button = controls.get(2002)
+    close_button = controls.get(2)
+    case_button = controls.get(2051)
+    if not value_control or not add_button or not close_button or not case_button:
+        raise RuntimeError("API Monitor Display Filter controls were incomplete")
+    _set_control_text(value_control["handle"], value)
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+    checked = user32.SendMessageW(case_button["handle"], 0x00F0, 0, 0) == 1  # BM_GETCHECK
+    if checked != ignore_case:
+        _post_button_click(case_button["handle"])
+    _post_button_click(add_button["handle"])
+    _post_button_click(close_button["handle"])
+    return {
+        "added": True,
+        "method": "background-gui",
+        "field": field,
+        "operator": operator,
+        "value": value,
+        "action": action,
+        "ignore_case": ignore_case,
+    }
 
 
 @mcp.tool()
