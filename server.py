@@ -2809,8 +2809,11 @@ def capture_info(file_path: str) -> dict[str, Any]:
 
 
 @mcp.tool()
-def capture_validate(file_path: str) -> dict[str, Any]:
+def capture_validate(
+    file_path: str, deep: bool = False, max_records: int = 1_000_000
+) -> dict[str, Any]:
     """Validate an APMX prefix, ZIP container, and every stored entry CRC."""
+    max_records = _limit(max_records, "max_records", 1_000_000)
     path = _capture_path(file_path)
     try:
         archive, data, offset = _open_capture_zip(path)
@@ -2823,6 +2826,7 @@ def capture_validate(file_path: str) -> dict[str, Any]:
             "entries": 0,
             "first_bad_entry": None,
             "error": str(exc),
+            "deep": deep,
         }
     bad_entry = None
     error = None
@@ -2834,7 +2838,7 @@ def capture_validate(file_path: str) -> dict[str, Any]:
         entry_count = len(archive.infolist())
     prefix = data[:offset]
     prefix_valid = prefix.endswith(b"RBAPM")
-    return {
+    result: dict[str, Any] = {
         "file": str(path),
         "valid": prefix_valid and error is None and bad_entry is None,
         "prefix_valid": prefix_valid,
@@ -2842,7 +2846,41 @@ def capture_validate(file_path: str) -> dict[str, Any]:
         "entries": entry_count,
         "first_bad_entry": bad_entry,
         "error": error,
+        "deep": deep,
     }
+    if not deep or not result["valid"]:
+        return result
+    pointer_size = 4 if path.suffix.lower() == ".apmx86" else 8
+    streams = []
+    archive = zipfile.ZipFile(io.BytesIO(data[offset:]))
+    with archive:
+        entries = {info.filename: info for info in archive.infolist()}
+        for name in sorted(entries):
+            match = re.fullmatch(r"process/(\d+)/calls", name, re.I)
+            if not match:
+                continue
+            index = int(match.group(1))
+            calls = archive.read(name)
+            data_name = f"process/{index}/data"
+            data = archive.read(data_name) if data_name in entries else b""
+            stream: dict[str, Any] = {
+                "process_index": index,
+                "architecture": "x86" if pointer_size == 4 else "x64",
+                "calls_entry": name,
+                "data_entry": data_name if data else None,
+                "valid": False,
+            }
+            try:
+                stats = _capture_call_stats(calls, data, max_records, pointer_size)
+                stream["stats"] = stats
+                stream["valid"] = stats["invalid_records"] == 0
+            except (ValueError, struct.error) as exc:
+                stream["error"] = str(exc)
+            streams.append(stream)
+    result["streams"] = streams
+    result["structural_valid"] = all(stream["valid"] for stream in streams)
+    result["valid"] = result["valid"] and result["structural_valid"]
+    return result
 
 
 @mcp.tool()
@@ -4193,6 +4231,7 @@ def _self_test() -> None:
         assert info["metadata"]["application"] == "API Monitor v2 Alpha-r13 64-bit"
         assert info["metadata"]["crc32_valid"]
         assert capture_validate(str(path))["valid"]
+        assert capture_validate(str(path), deep=True)["structural_valid"]
         invalid_prefix = Path(directory) / "invalid-prefix.apmx64"
         invalid_prefix.write_bytes(b"not-an-apmx" + path.read_bytes()[info["zip_offset"] :])
         assert not capture_validate(str(invalid_prefix))["valid"]
@@ -4333,6 +4372,7 @@ def _self_test() -> None:
         assert x86_records["records"][0]["definition"]["name"] == "CreateFileA"
         assert x86_records["records"][0]["data_refs"][0]["payload"]["text"] == "hello"
         assert capture_list_apis(str(x86_path))["apis"][0]["module"] == "kernel32.dll"
+        assert capture_validate(str(x86_path), deep=True)["structural_valid"]
         x86_processes = capture_list_processes(str(x86_path))
         assert x86_processes["processes"][0]["call_count"] == 1
         assert x86_processes["processes"][0]["metadata"]["pid"] == 4321
