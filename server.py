@@ -31,6 +31,7 @@ CAPTURE_SUFFIXES = {".apmx64", ".apmx86"}
 COMMAND_OPEN_CAPTURE = 32852
 COMMAND_SAVE_CAPTURE = 32854
 COMMAND_SAVE_CAPTURE_AS = 32954
+COMMAND_START_MONITORING = 32882
 ZIP_SIGNATURES = (b"PK\x03\x04", b"PK\x05\x06", b"PK\x07\x08")
 ASCII_STRINGS = re.compile(rb"[\x20-\x7e]{4,}")
 UTF16_STRINGS = re.compile(rb"(?:[\x20-\x7e]\x00){4,}")
@@ -692,6 +693,80 @@ def api_monitor_monitor_process(
         "arguments": arguments,
         "start_in": start_in,
     }
+
+
+@mcp.tool()
+def api_monitor_attach_process(
+    pid: int,
+    process_name: str = "",
+    architecture: str = "x64",
+    timeout_seconds: int = 10,
+) -> dict[str, Any]:
+    """Select a running process and start monitoring it in Rohitab's background GUI."""
+    if sys.platform != "win32":
+        raise RuntimeError("Attaching API Monitor sessions requires Windows")
+    if pid < 1:
+        raise ValueError("pid must be positive")
+    if timeout_seconds < 1 or timeout_seconds > 60:
+        raise ValueError("timeout_seconds must be between 1 and 60")
+    if architecture not in {"x86", "x64"}:
+        raise ValueError("architecture must be x86 or x64")
+
+    main_windows = [
+        window
+        for window in _find_api_monitor_windows()
+        if "api monitor v2" in window["title"].casefold()
+        and ((architecture == "x86" and "32-bit" in window["title"]) or
+             (architecture == "x64" and "64-bit" in window["title"]))
+    ]
+    if not main_windows:
+        api_monitor_launch(architecture)
+        window = _wait_for_api_monitor_window(
+            lambda candidate: "api monitor v2" in candidate["title"].casefold()
+            and ((architecture == "x86" and "32-bit" in candidate["title"]) or
+                 (architecture == "x64" and "64-bit" in candidate["title"])),
+            timeout_seconds,
+        )
+        main_windows = [window] if window else []
+    if not main_windows:
+        raise TimeoutError("API Monitor main window did not appear")
+
+    try:
+        from pywinauto import Desktop
+    except ImportError as exc:
+        raise RuntimeError("Install pywinauto to attach a running process") from exc
+
+    wanted_name = process_name.casefold()
+    for window in Desktop(backend="uia").windows():
+        if window.handle not in {item["handle"] for item in main_windows}:
+            continue
+        for control in window.descendants():
+            if control.element_info.control_type != "List":
+                continue
+            for item in control.children():
+                if item.element_info.control_type != "ListItem":
+                    continue
+                cells = [
+                    _uia_text(cell)
+                    for cell in item.descendants()
+                    if cell.element_info.control_type == "Text"
+                ]
+                if len(cells) < 2 or cells[1] != str(pid):
+                    continue
+                if wanted_name and cells[0].casefold() != wanted_name:
+                    continue
+                item.select()
+                _post_window_command(window.handle, COMMAND_START_MONITORING)
+                return {
+                    "submitted": True,
+                    "method": "background-gui",
+                    "process": cells[0],
+                    "pid": pid,
+                    "architecture": architecture,
+                    "window": {"handle": window.handle, "title": window.window_text()},
+                }
+    suffix = f" named {process_name!r}" if process_name else ""
+    raise LookupError(f"Process PID {pid}{suffix} was not found in API Monitor's process list")
 
 
 @mcp.tool()
