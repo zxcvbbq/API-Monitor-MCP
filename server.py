@@ -6058,11 +6058,20 @@ def main() -> None:
         default="stdio",
         help="MCP transport (default: stdio)",
     )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=mcp.settings.port,
+        help="HTTP/SSE port (default: 8000)",
+    )
     args = parser.parse_args()
+    if not 1 <= args.port <= 65_535:
+        parser.error("--port must be between 1 and 65535")
     if args.self_test:
         _self_test()
         print("ok")
         return
+    mcp.settings.port = args.port
     mcp.run(args.transport)
 
 

@@ -21,7 +21,7 @@ codex plugin add api-monitor-mcp@api-monitor-mcp
 
 ```powershell
 uv run python .\server.py --self-test
-uv run python .\server.py --transport streamable-http
+uv run python .\server.py --transport streamable-http --port 8745
 ```
 
 Set `APIMONITOR_HOME` if the app is installed elsewhere.
