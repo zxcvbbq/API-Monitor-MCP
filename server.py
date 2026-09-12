@@ -579,6 +579,10 @@ def _capture_type_info(
             structure_size = struct.unpack_from("<H", definitions, size_field)[0]
             if structure_size:
                 type_info["structure_size"] = structure_size
+            if pointer_size == 8 and size_field + 4 <= len(definitions):
+                alternate_size = struct.unpack_from("<H", definitions, size_field + 2)[0]
+                if alternate_size:
+                    type_info["structure_size_flagged"] = alternate_size
         alignment_field = relative + (45 if pointer_size == 8 else 25)
         flags_field = relative + (46 if pointer_size == 8 else 26)
         if flags_field < len(definitions):
@@ -1830,6 +1834,8 @@ def _capture_array_element_size(
         return 2
     if kind == 11:
         size = type_info.get("structure_size")
+        if machine_flag:
+            size = type_info.get("structure_size_flagged", size)
         return size if isinstance(size, int) and size > 0 else None
     if kind == 13:
         return 16
@@ -5286,6 +5292,7 @@ def _self_test() -> None:
             struct.pack_into("<I", definitions, fixed_struct_type_offset + 8, 11)
             struct.pack_into("<Q", definitions, fixed_struct_type_offset + 32, 320)
             struct.pack_into("<H", definitions, fixed_struct_type_offset + 40, 4)
+            struct.pack_into("<H", definitions, fixed_struct_type_offset + 42, 8)
             definitions[fixed_struct_type_offset + 44] = 1
             definitions[fixed_struct_type_offset + 45] = 4
             definitions[fixed_struct_type_offset + 46] = 2
@@ -5495,6 +5502,8 @@ def _self_test() -> None:
         assert prefixed_array_value and prefixed_array_value["count"] == 3
         fixed_struct_type = _capture_type_info(bytes(definitions), fixed_struct_type_offset)
         assert fixed_struct_type and fixed_struct_type["struct_flags"] == 2
+        assert fixed_struct_type["structure_size_flagged"] == 8
+        assert _capture_array_element_size(fixed_struct_type, machine_flag=True) == 8
         fixed_struct_value = _capture_exact_value(struct.pack("<I", 99), fixed_struct_type)
         assert fixed_struct_value and fixed_struct_value["representation"] == "fixed"
         assert fixed_struct_value["fields"][0]["typed"]["value"] == 99
