@@ -4484,6 +4484,70 @@ def capture_compare(
 
 
 @mcp.tool()
+def capture_compare_entry(
+    first_file: str,
+    second_file: str,
+    entry_name: str,
+    context_bytes: int = 32,
+    max_bytes: int = 64 * 1024 * 1024,
+) -> dict[str, Any]:
+    """Find the first bounded byte difference between two APMX ZIP entries."""
+    if not entry_name:
+        raise ValueError("entry_name must not be empty")
+    if not 0 <= context_bytes <= 4096:
+        raise ValueError("context_bytes must be between 0 and 4096")
+    max_bytes = _limit(max_bytes, "max_bytes", 256 * 1024 * 1024)
+
+    def read_entry(file_path: str) -> tuple[Path, zipfile.ZipInfo, bytes, bool]:
+        path = _capture_path(file_path)
+        archive, _, _ = _open_capture_zip(path)
+        with archive:
+            try:
+                info = archive.getinfo(entry_name)
+            except KeyError as exc:
+                raise FileNotFoundError(f"ZIP entry not found: {entry_name}") from exc
+            if info.is_dir():
+                raise IsADirectoryError(f"ZIP entry is a directory: {entry_name}")
+            with archive.open(info) as member:
+                data = member.read(max_bytes + 1)
+        return path, info, data[:max_bytes], len(data) > max_bytes or info.file_size > max_bytes
+
+    first, first_info, first_data, first_truncated = read_entry(first_file)
+    second, second_info, second_data, second_truncated = read_entry(second_file)
+    compared = min(len(first_data), len(second_data))
+    difference = next(
+        (offset for offset, (left, right) in enumerate(zip(first_data, second_data)) if left != right),
+        None,
+    )
+    if difference is None and len(first_data) != len(second_data):
+        difference = compared
+    truncated = first_truncated or second_truncated
+    same = difference is None and first_info.file_size == second_info.file_size and not truncated
+    result: dict[str, Any] = {
+        "first": str(first),
+        "second": str(second),
+        "entry": entry_name,
+        "first_size": first_info.file_size,
+        "second_size": second_info.file_size,
+        "compared_bytes": compared,
+        "max_bytes": max_bytes,
+        "same": same,
+        "truncated": truncated,
+        "first_difference": difference,
+    }
+    if difference is not None:
+        start = max(0, difference - context_bytes)
+        end = min(max(len(first_data), len(second_data)), difference + context_bytes + 1)
+        result["context"] = {
+            "offset": start,
+            "length": end - start,
+            "first_hex": first_data[start:end].hex(" "),
+            "second_hex": second_data[start:end].hex(" "),
+        }
+    return result
+
+
+@mcp.tool()
 def capture_compare_calls(
     first_file: str,
     second_file: str,
@@ -7106,6 +7170,12 @@ def _self_test() -> None:
         comparison = capture_compare(str(path), str(second_path))
         assert comparison["counts"] == {"added": 1, "removed": 8, "changed": 1}
         assert not comparison["same"]
+        same_entry = capture_compare_entry(str(path), str(path), "calls.bin")
+        assert same_entry["same"]
+        entry_diff = capture_compare_entry(str(path), str(second_path), "metadata.txt")
+        assert not entry_diff["same"]
+        assert entry_diff["first_difference"] is not None
+        assert entry_diff["context"]["first_hex"] != entry_diff["context"]["second_hex"]
         call_comparison = capture_compare_calls(
             str(path), str(second_path), resolve_definitions=True
         )
