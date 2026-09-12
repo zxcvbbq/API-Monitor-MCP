@@ -7352,6 +7352,57 @@ def capture_calls_around(
 
 
 @mcp.tool()
+def capture_read_call_bytes(
+    file_path: str,
+    process_index: int,
+    record_index: int,
+    max_bytes: int = 1_048_576,
+) -> dict[str, Any]:
+    """Read one complete saved call record as bounded raw bytes."""
+    if process_index < 0 or record_index < 0:
+        raise ValueError("process_index and record_index must be non-negative")
+    max_bytes = _limit(max_bytes, "max_bytes", 16 * 1024 * 1024)
+    context = capture_calls_around(
+        file_path,
+        process_index=process_index,
+        record_index=record_index,
+        before=0,
+        after=0,
+        include_data=False,
+    )
+    record = context["records"][0]
+    if not record.get("valid"):
+        raise ValueError(record.get("error", "saved call record is invalid"))
+    size = int(record["size"])
+    if size > max_bytes:
+        raise ValueError(f"call record exceeds max_bytes: {size}")
+    data = capture_read_process_data(
+        file_path,
+        process_index=process_index,
+        offset=int(record["offset"]),
+        length=size,
+    )
+    raw = _payload_bytes(data)
+    if len(raw) != size:
+        raise ValueError("call record bytes could not be read completely")
+    return {
+        "file": context["file"],
+        "process_index": process_index,
+        "record_index": record_index,
+        "offset": record["offset"],
+        "size": size,
+        "record": record,
+        "record_bytes": {
+            "size": len(raw),
+            "sha256": hashlib.sha256(raw).hexdigest(),
+            "hex_preview": raw[:256].hex(" "),
+            "hex_truncated": len(raw) > 256,
+            "base64": base64.b64encode(raw).decode("ascii"),
+        },
+    }
+
+
+@mcp.tool()
 def capture_extract_entry(
     file_path: str,
     entry_name: str,
@@ -8216,6 +8267,9 @@ def _self_test() -> None:
         assert call_records["count"] == 1
         assert call_records["start_index"] == 0
         assert call_records["records"][0]["data_refs"][0]["payload"]["text"] == "hello"
+        raw_call = capture_read_call_bytes(str(path), 0, 0)
+        assert raw_call["size"] == 160
+        assert base64.b64decode(raw_call["record_bytes"]["base64"]) == bytes(record)
         call_context = call_records["records"][0]["context"]
         assert call_context["thread_id"] == 0x1234
         assert call_context["thread_number"] == 7
