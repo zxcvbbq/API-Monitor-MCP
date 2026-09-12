@@ -4893,8 +4893,9 @@ def capture_compare_calls(
     max_data_bytes: int = 4096,
     resolve_definitions: bool = False,
     match_mode: str = "index",
+    compare_context: bool = False,
 ) -> dict[str, Any]:
-    """Compare saved calls by index or sequence alignment and bounded fingerprints."""
+    """Compare saved calls by alignment and bounded fingerprints, optionally including context."""
     if match_mode not in {"index", "sequence"}:
         raise ValueError("match_mode must be index or sequence")
     if process_index < 0:
@@ -4936,17 +4937,34 @@ def capture_compare_calls(
                     reference.get("valid"),
                 )
             )
-        return (
+        result = (
             record.get("flags"),
             definition.get("offset"),
             definition.get("name"),
             definition.get("module"),
             tuple(refs),
         )
+        if compare_context:
+            context = record.get("context", {})
+            duration = (
+                context.get("duration_seconds")
+                if context.get("duration_valid")
+                else None
+            )
+            result += (
+                (
+                    context.get("thread_id"),
+                    context.get("thread_number"),
+                    context.get("module_base"),
+                    context.get("error_code"),
+                    duration,
+                ),
+            )
+        return result
 
     def summary(record: dict[str, Any]) -> dict[str, Any]:
         definition = record.get("definition", {})
-        return {
+        result = {
             "index": record.get("index"),
             "flags": record.get("flags"),
             "definition": {
@@ -4964,6 +4982,21 @@ def capture_compare_calls(
                 for reference in record.get("data_refs", [])
             ],
         }
+        if compare_context:
+            context = record.get("context", {})
+            result["context"] = {
+                key: context.get(key)
+                for key in (
+                    "thread_id",
+                    "thread_number",
+                    "module_base",
+                    "error_code",
+                    "duration_valid",
+                    "duration_seconds",
+                )
+                if key in context
+            }
+        return result
 
     first = load(first_file)
     second = load(second_file)
@@ -5019,6 +5052,7 @@ def capture_compare_calls(
         "second": second.get("file"),
         "process_index": process_index,
         "match_mode": match_mode,
+        "compare_context": compare_context,
         "architectures": {
             "first": first.get("architecture"),
             "second": second.get("architecture"),
@@ -5048,6 +5082,7 @@ def capture_compare_all_calls(
     max_data_bytes: int = 4096,
     resolve_definitions: bool = False,
     match_mode: str = "index",
+    compare_context: bool = False,
 ) -> dict[str, Any]:
     """Compare saved call streams for every process in two APMX captures."""
     if match_mode not in {"index", "sequence"}:
@@ -5076,6 +5111,7 @@ def capture_compare_all_calls(
             max_data_bytes=max_data_bytes,
             resolve_definitions=resolve_definitions,
             match_mode=match_mode,
+            compare_context=compare_context,
         )
         for index in indices
     ]
@@ -5088,6 +5124,7 @@ def capture_compare_all_calls(
         "first": str(first),
         "second": str(second),
         "match_mode": match_mode,
+        "compare_context": compare_context,
         "process_indices": indices,
         "comparisons": comparisons,
         "counts": totals,
@@ -8630,6 +8667,11 @@ def _self_test() -> None:
         )
         assert call_comparison["counts"]["removed"] == 1
         assert call_comparison["counts"]["changed"] == 0
+        context_comparison = capture_compare_calls(
+            str(path), str(path), compare_context=True, resolve_definitions=True
+        )
+        assert context_comparison["compare_context"]
+        assert context_comparison["same"]
         sequence_comparison = capture_compare_calls(
             str(path), str(second_path), match_mode="sequence", resolve_definitions=True
         )
