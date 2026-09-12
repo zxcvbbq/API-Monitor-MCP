@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import base64
 import csv
 import ctypes
@@ -6049,11 +6050,20 @@ def _self_test() -> None:
 
 
 def main() -> None:
-    if "--self-test" in sys.argv:
+    parser = argparse.ArgumentParser(description="Rohitab API Monitor MCP server")
+    parser.add_argument("--self-test", action="store_true")
+    parser.add_argument(
+        "--transport",
+        choices=("stdio", "sse", "streamable-http"),
+        default="stdio",
+        help="MCP transport (default: stdio)",
+    )
+    args = parser.parse_args()
+    if args.self_test:
         _self_test()
         print("ok")
         return
-    mcp.run("stdio")
+    mcp.run(args.transport)
 
 
 if __name__ == "__main__":
