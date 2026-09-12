@@ -1308,10 +1308,15 @@ def capture_list_processes(file_path: str, limit: int = 200) -> dict[str, Any]:
             if not match:
                 continue
             data = archive.read(info)
-            strings = _scan_strings(data, ".exe", 200, 4)
+            strings = _scan_strings(data, "", 2000, 4)
+            modules = []
             executables = []
             for item in strings:
                 value = item["text"].strip("\x00")
+                if not value.casefold().endswith((".dll", ".exe")):
+                    continue
+                if value not in modules:
+                    modules.append(value)
                 if value.casefold().endswith(".exe") and value not in executables:
                     executables.append(value)
             processes.append(
@@ -1319,6 +1324,7 @@ def capture_list_processes(file_path: str, limit: int = 200) -> dict[str, Any]:
                     "index": int(match.group(1)),
                     "entry": info.filename,
                     "size": info.file_size,
+                    "modules": modules,
                     "executables": executables,
                 }
             )
