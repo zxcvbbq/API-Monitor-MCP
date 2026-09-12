@@ -215,6 +215,10 @@ def _capture_call_records(
             "header_hex": data[offset : offset + min(record_size, 112)].hex(" "),
             "data_refs": [],
         }
+        if not record["valid"]:
+            record["error"] = "record extends beyond process data"
+            records.append(record)
+            continue
         for slot, pointer_offset, length_offset in (
             (0, 112, 32),
             (1, 120, 88),
@@ -268,6 +272,10 @@ def _capture_call_stats(calls: bytes, data: bytes, max_records: int) -> dict[str
             continue
         stats["valid_records"] += 1
         record_size = _capture_record_size(offsets, index, data)
+        if offset + record_size > len(data):
+            stats["valid_records"] -= 1
+            stats["invalid_records"] += 1
+            continue
         size_key = str(record_size) if record_size in (144, 160) else "other"
         stats["record_sizes"][size_key] += 1
         flags = data[offset + 2]
@@ -2414,6 +2422,8 @@ def capture_call_records(
         except KeyError:
             data = b""
     count = len(calls) // 8
+    if start_index > count:
+        raise IndexError(f"start_index {start_index} is outside {count} saved calls")
     records = _capture_call_records(
         calls,
         data,
