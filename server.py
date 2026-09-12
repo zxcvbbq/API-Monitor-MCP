@@ -582,6 +582,33 @@ def api_monitor_gui_read(
 
 
 @mcp.tool()
+def api_monitor_gui_select_option(
+    control_id: int,
+    option: str,
+    window_title: str = "",
+) -> dict[str, Any]:
+    """Select a native Rohitab combo-box option without focusing the window."""
+    if sys.platform != "win32":
+        raise RuntimeError("Rohitab GUI selection requires Windows")
+    if not option:
+        raise ValueError("option must not be empty")
+    target = _find_ui_control(
+        _find_api_monitor_windows(), control_id, "", "ComboBox", window_title
+    )
+    if target is None:
+        raise LookupError("Rohitab combo box not found")
+    parent, control = target
+    _set_combo_selection(control["handle"], option)
+    return {
+        "selected": True,
+        "method": "background-win32",
+        "window": parent,
+        "control": control,
+        "option": option,
+    }
+
+
+@mcp.tool()
 def api_monitor_gui_lists(window_title: str = "", limit: int = 200) -> dict[str, Any]:
     """Read Rohitab list views through background Windows UI Automation."""
     if sys.platform != "win32":
