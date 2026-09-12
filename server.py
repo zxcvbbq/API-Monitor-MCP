@@ -2671,6 +2671,46 @@ def api_monitor_status() -> dict[str, Any]:
 
 
 @mcp.tool()
+def api_monitor_overview(
+    window_title: str = "",
+    window_handle: int | None = None,
+    limit: int = 500,
+) -> dict[str, Any]:
+    """Return one read-only snapshot of a background Rohitab monitoring session."""
+    if sys.platform != "win32":
+        return {
+            "supported": False,
+            "status": {"supported": False, "processes": []},
+            "windows": [],
+            "summaries": [],
+            "traffic": {"supported": False, "panes": []},
+            "lists": {"supported": False, "windows": []},
+        }
+    limit = _limit(limit, "limit", 2000)
+    ui = api_monitor_ui_tree()
+    windows = []
+    for window in ui["windows"]:
+        if window_title and window["title"] != window_title:
+            continue
+        if window_handle is not None and window["handle"] != window_handle:
+            continue
+        if not window_title and window_handle is None and "api monitor v2" not in window["title"].casefold():
+            continue
+        windows.append(window)
+    summaries = api_monitor_summary(window_title, window_handle)
+    traffic = api_monitor_traffic(window_title, limit, window_handle)
+    lists = api_monitor_gui_lists(window_title, limit, window_handle)
+    return {
+        "supported": True,
+        "status": api_monitor_status(),
+        "windows": windows,
+        "summaries": summaries.get("summaries", []),
+        "traffic": traffic,
+        "lists": lists,
+    }
+
+
+@mcp.tool()
 def api_monitor_target_processes(query: str = "", limit: int = 500) -> dict[str, Any]:
     """List current Windows processes that can be selected for API Monitor attach."""
     if sys.platform != "win32":
