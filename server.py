@@ -3682,6 +3682,7 @@ def api_monitor_gui_lists(
                 if item.element_info.control_type == "HeaderItem"
             ]
             rows: list[list[str]] = []
+            row_details: list[dict[str, Any]] = []
             for item in control.children():
                 if item.element_info.control_type != "ListItem":
                     continue
@@ -3690,7 +3691,34 @@ def api_monitor_gui_lists(
                     for cell in item.descendants()
                     if cell.element_info.control_type == "Text"
                 ]
+                row_index = len(rows)
                 rows.append(cells or [_uia_text(item)])
+                try:
+                    row_handle = int(item.handle) if item.handle is not None else None
+                except (AttributeError, TypeError, ValueError):
+                    row_handle = None
+                try:
+                    row_selected = bool(item.is_selected())
+                except (AttributeError, OSError, RuntimeError):
+                    row_selected = None
+                try:
+                    row_enabled = bool(item.is_enabled())
+                except (AttributeError, OSError, RuntimeError):
+                    row_enabled = None
+                try:
+                    row_rectangle = _uia_rect(item)
+                except (AttributeError, OSError, RuntimeError):
+                    row_rectangle = {}
+                row_details.append(
+                    {
+                        "row_index": row_index,
+                        "handle": row_handle,
+                        "cells": rows[-1],
+                        "selected": row_selected,
+                        "enabled": row_enabled,
+                        "rectangle": row_rectangle,
+                    }
+                )
                 if len(rows) > limit:
                     break
             truncated = len(rows) > limit
@@ -3701,6 +3729,7 @@ def api_monitor_gui_lists(
                     "headers": headers,
                     "rows": rows[:limit],
                     "records": _named_gui_rows(headers, rows[:limit]),
+                    "row_details": row_details[:limit],
                     "truncated": truncated,
                 }
             )
@@ -3803,6 +3832,7 @@ def api_monitor_traffic(
                     "headers": headers,
                     "rows": pane["rows"],
                     "records": _named_gui_rows(headers, pane["rows"]),
+                    "row_details": pane.get("row_details", []),
                     "truncated": pane["truncated"],
                 }
             )
@@ -3834,6 +3864,7 @@ def api_monitor_traffic_details(
             "headers": pane["headers"],
             "rows": pane["rows"],
             "records": _named_gui_rows(pane["headers"], pane["rows"]),
+            "row_details": pane.get("row_details", []),
             "truncated": pane["truncated"],
         }
         for window in refreshed.get("windows", [])
