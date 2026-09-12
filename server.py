@@ -4194,7 +4194,9 @@ def api_monitor_capture_process(
         timeout_seconds=timeout_seconds,
         window_handle=started["window"]["handle"],
     )
-    validation = capture_validate(str(path))
+    validation = saved.get("validation")
+    if validation is None:
+        validation = capture_validate(str(path))
     result: dict[str, Any] = {
         "captured": True,
         "ready": ready,
@@ -4256,7 +4258,9 @@ def api_monitor_capture_session(
         timeout_seconds=timeout_seconds,
         window_handle=window_handle,
     )
-    validation = capture_validate(str(path))
+    validation = saved.get("validation")
+    if validation is None:
+        validation = capture_validate(str(path))
     result = {
         "captured": validation["valid"],
         "ready": waited.get("ready", False),
@@ -4497,11 +4501,14 @@ def api_monitor_open_capture(
     file_path: str,
     install_root: str | None = None,
     window_handle: int | None = None,
+    timeout_seconds: int = 15,
 ) -> dict[str, Any]:
     """Open an APMX capture with the real Rohitab API Monitor application."""
     path = _capture_path(file_path)
     if sys.platform != "win32" or not hasattr(os, "startfile"):
         raise RuntimeError("Opening API Monitor captures requires Windows")
+    if timeout_seconds < 1 or timeout_seconds > 60:
+        raise ValueError("timeout_seconds must be between 1 and 60")
 
     architecture = "x86" if path.suffix.lower() == ".apmx86" else "x64"
     bitness = "32-bit" if architecture == "x86" else "64-bit"
@@ -4549,16 +4556,34 @@ def api_monitor_open_capture(
             ("&Open", "Open"),
             1148,
             path,
-            15,
+            timeout_seconds,
+        )
+        opened_window = _wait_for_api_monitor_window(
+            lambda window: path.name.casefold() in window["title"].casefold()
+            or path.stem.casefold() in window["title"].casefold(),
+            timeout_seconds,
         )
         return {
             "opened": True,
             "method": "background-gui",
             "file": str(path),
+            "verified": opened_window is not None,
+            "window": opened_window,
         }
     except (LookupError, OSError, RuntimeError, TimeoutError):
         os.startfile(str(path))
-        return {"opened": True, "method": "file-association-fallback", "file": str(path)}
+        opened_window = _wait_for_api_monitor_window(
+            lambda window: path.name.casefold() in window["title"].casefold()
+            or path.stem.casefold() in window["title"].casefold(),
+            timeout_seconds,
+        )
+        return {
+            "opened": True,
+            "method": "file-association-fallback",
+            "file": str(path),
+            "verified": opened_window is not None,
+            "window": opened_window,
+        }
 
 
 @mcp.tool()
@@ -4637,13 +4662,15 @@ def api_monitor_save_capture(
         ]
         if not dialogs and path.is_file():
             stat = path.stat()
-            return {
+            result = {
                 "saved": True,
                 "method": "background-gui",
                 "file": str(path),
                 "size": stat.st_size,
                 "modified_utc": _file_time(path),
             }
+            result["validation"] = capture_validate(str(path))
+            return result
         time.sleep(0.1)
     raise TimeoutError("API Monitor did not finish saving the capture")
 
