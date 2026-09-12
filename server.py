@@ -7526,6 +7526,84 @@ def capture_list_processes(file_path: str, limit: int = 200) -> dict[str, Any]:
 
 
 @mcp.tool()
+def capture_list_modules(
+    file_path: str,
+    process_index: int | None = None,
+    query: str = "",
+    limit: int = 1000,
+) -> dict[str, Any]:
+    """List loaded modules across captured processes with their occurrences and bases."""
+    if process_index is not None and process_index < 0:
+        raise ValueError("process_index must be non-negative")
+    limit = _limit(limit, "limit", 10_000)
+    source = capture_list_processes(file_path, limit=2000)
+    wanted = query.casefold()
+    modules: dict[str, dict[str, Any]] = {}
+    for process in source["processes"]:
+        index = process["index"]
+        if process_index is not None and index != process_index:
+            continue
+        metadata = process.get("metadata", {})
+        loaded = metadata.get("loaded_modules", []) if isinstance(metadata, dict) else []
+        seen_in_process: set[str] = set()
+        for item in loaded:
+            path = str(item.get("path") or "")
+            if not path or wanted not in path.casefold():
+                continue
+            key = path.casefold()
+            module = modules.setdefault(
+                key,
+                {
+                    "name": path.replace("/", "\\").rsplit("\\", 1)[-1],
+                    "path": path,
+                    "process_indices": [],
+                    "occurrences": [],
+                },
+            )
+            if key not in seen_in_process:
+                module["process_indices"].append(index)
+                seen_in_process.add(key)
+            module["occurrences"].append(
+                {
+                    "process_index": index,
+                    "index": item.get("index"),
+                    "base": item.get("base"),
+                    "field": item.get("field"),
+                    "source": "loaded_modules",
+                }
+            )
+        if loaded:
+            continue
+        for path in process.get("modules", []):
+            if not path or wanted not in path.casefold():
+                continue
+            key = path.casefold()
+            module = modules.setdefault(
+                key,
+                {
+                    "name": path.replace("/", "\\").rsplit("\\", 1)[-1],
+                    "path": path,
+                    "process_indices": [],
+                    "occurrences": [],
+                },
+            )
+            if index not in module["process_indices"]:
+                module["process_indices"].append(index)
+            module["occurrences"].append(
+                {"process_index": index, "source": "process_strings"}
+            )
+    returned = sorted(modules.values(), key=lambda item: (item["name"].casefold(), item["path"].casefold()))
+    return {
+        "file": source["file"],
+        "process_index": process_index,
+        "query": query,
+        "modules": returned[:limit],
+        "count": len(returned),
+        "truncated": len(returned) > limit or source["truncated"],
+    }
+
+
+@mcp.tool()
 def capture_hex(file_path: str, offset: int = 0, length: int = 256) -> dict[str, Any]:
     """Return a bounded hex/ASCII view of raw bytes from an APMX capture."""
     if offset < 0:
@@ -8412,6 +8490,9 @@ def _self_test() -> None:
         assert processes["processes"][0]["metadata"]["crc32_valid"]
         assert processes["processes"][0]["metadata"]["module_records"] == []
         assert processes["processes"][0]["call_count"] == 1
+        modules = capture_list_modules(str(path))
+        assert modules["count"] == 1
+        assert modules["modules"][0]["name"] == "sample.exe"
         call_stats = capture_call_stats(str(path), process_index=0)
         assert call_stats["processes"][0]["record_sizes"]["160"] == 1
         assert call_stats["totals"]["referenced_data_bytes"] == 9
@@ -8628,6 +8709,9 @@ def _self_test() -> None:
         assert x86_metadata["module_records"][0]["ansi_text"] == "kernel32.dll"
         assert x86_metadata["module_records"][0]["path"] == x86_module_path
         assert x86_metadata["loaded_modules"][0]["path"] == x86_module_path
+        x86_modules = capture_list_modules(str(x86_path), query="kernel32")
+        assert x86_modules["count"] == 1
+        assert x86_modules["modules"][0]["occurrences"][0]["base"] is None
         x86_decoded = capture_decode_call(str(x86_path), 0, 0, resolve_definitions=True)
         assert x86_decoded["argument_stream"]["arguments"][0]["typed"]["fields"][0]["typed"]["value"] == 77
         x86_array_type = _capture_type_info(bytes(x86_definitions), x86_array_type_offset, 4)
