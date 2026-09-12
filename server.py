@@ -8,13 +8,13 @@ import csv
 import ctypes
 import hashlib
 import io
-import math
 import json
+import math
 import mmap
 import os
 import re
-import subprocess
 import struct
+import subprocess
 import sys
 import time
 import uuid
@@ -27,7 +27,6 @@ from typing import Any
 from xml.etree import ElementTree
 
 from mcp.server.fastmcp import FastMCP
-
 
 DEFAULT_APP_ROOT = Path(r"C:\Program Files\rohitab.com\API Monitor")
 CAPTURE_SUFFIXES = {".apmx64", ".apmx86"}
@@ -42,19 +41,19 @@ COMMAND_TERMINATE_PROCESS = 32924
 ZIP_SIGNATURES = (b"PK\x03\x04", b"PK\x05\x06", b"PK\x07\x08")
 ASCII_STRINGS = re.compile(rb"[\x20-\x7e]{4,}")
 UTF16_STRINGS = re.compile(rb"(?:[\x20-\x7e]\x00){4,}")
-API_NAME = re.compile(r'<Api\b[^>]*\bName\s*=\s*["\']([^"\']+)', re.I)
-MODULE_NAME = re.compile(r'<Module\b[^>]*\bName\s*=\s*["\']([^"\']+)', re.I)
-PROCESS_INFO = re.compile(r"process/(\d+)/info$", re.I)
+API_NAME = re.compile(r'<Api\b[^>]*\bName\s*=\s*["\']([^"\']+)', re.IGNORECASE)
+MODULE_NAME = re.compile(r'<Module\b[^>]*\bName\s*=\s*["\']([^"\']+)', re.IGNORECASE)
+PROCESS_INFO = re.compile(r"process/(\d+)/info$", re.IGNORECASE)
 SUMMARY_TEXT = re.compile(
-    r"Summary\s*\|\s*([\d,]+)\s*calls\s*\|\s*([^|]+?)\s*\|\s*(.*)", re.I
+    r"Summary\s*\|\s*([\d,]+)\s*calls\s*\|\s*([^|]+?)\s*\|\s*(.*)", re.IGNORECASE
 )
 MODULE_EVENT = re.compile(
     r"^(?P<process>[^:]+): Monitoring Module (?P<address>0x[0-9a-f]+) -> (?P<module>.+)$",
-    re.I,
+    re.IGNORECASE,
 )
 CHILD_EVENT = re.compile(
     r"^(?P<process>[^:]+): Monitoring Child Process - PID: (?P<pid>\d+) \| Attach: (?P<attach>.+)$",
-    re.I,
+    re.IGNORECASE,
 )
 
 mcp = FastMCP(
@@ -1160,7 +1159,6 @@ def _find_api_monitor_windows() -> list[dict[str, Any]]:
 
     @window_callback_type
     def window_callback(handle: Any, _param: Any) -> bool:
-        title = _window_text(user32, handle)
         process_id = wintypes.DWORD()
         get_pid(handle, ctypes.byref(process_id))
         if process_id.value not in api_monitor_pids:
@@ -3679,7 +3677,7 @@ def api_monitor_capture_process(
             if remaining <= 0:
                 break
             time.sleep(min(0.25, remaining))
-    except Exception as exc:
+    except (LookupError, OSError, RuntimeError, TimeoutError) as exc:
         wait_error = str(exc)
     waited_seconds = round(time.monotonic() - started_at, 3)
     stopped = api_monitor_monitoring_control(
@@ -4029,11 +4027,8 @@ def api_monitor_open_capture(
             "file": str(path),
         }
     except (LookupError, OSError, RuntimeError, TimeoutError):
-        try:
-            os.startfile(str(path))
-            return {"opened": True, "method": "file-association-fallback", "file": str(path)}
-        except OSError:
-            raise
+        os.startfile(str(path))
+        return {"opened": True, "method": "file-association-fallback", "file": str(path)}
 
 
 @mcp.tool()
@@ -4255,7 +4250,7 @@ def capture_validate(
                 }
             )
         for name in sorted(entries):
-            match = re.fullmatch(r"process/(\d+)/calls", name, re.I)
+            match = re.fullmatch(r"process/(\d+)/calls", name, re.IGNORECASE)
             if not match:
                 continue
             index = int(match.group(1))
@@ -4511,7 +4506,7 @@ def capture_compare_all_calls(
         return {
             int(match.group(1))
             for entry in _zip_entries(path)
-            if (match := re.fullmatch(r"process/(\d+)/calls", entry["name"], re.I))
+            if (match := re.fullmatch(r"process/(\d+)/calls", entry["name"], re.IGNORECASE))
         }
 
     indices = sorted(process_indices(first) | process_indices(second))
@@ -4646,7 +4641,7 @@ def capture_export_all_calls(
         {
             int(match.group(1))
             for entry in _zip_entries(path)
-            if (match := re.fullmatch(r"process/(\d+)/calls", entry["name"], re.I))
+            if (match := re.fullmatch(r"process/(\d+)/calls", entry["name"], re.IGNORECASE))
         }
     )
     processes = []
@@ -5379,7 +5374,7 @@ def capture_call_stats(
         process_indices = sorted(
             int(match.group(1))
             for name in entries
-            if (match := re.fullmatch(r"process/(\d+)/calls", name, re.I))
+            if (match := re.fullmatch(r"process/(\d+)/calls", name, re.IGNORECASE))
             and (process_index is None or int(match.group(1)) == process_index)
         )
         processes = []
@@ -5450,7 +5445,7 @@ def capture_list_apis(
         process_indices = sorted(
             int(match.group(1))
             for name in entries
-            if (match := re.fullmatch(r"process/(\d+)/calls", name, re.I))
+            if (match := re.fullmatch(r"process/(\d+)/calls", name, re.IGNORECASE))
             and (process_index is None or int(match.group(1)) == process_index)
         )
         for index in process_indices:
@@ -5569,7 +5564,7 @@ def capture_search_calls(
     with archive:
         entries = {info.filename: info for info in archive.infolist()}
         for name in entries:
-            match = re.fullmatch(r"process/(\d+)/calls", name, re.I)
+            match = re.fullmatch(r"process/(\d+)/calls", name, re.IGNORECASE)
             if match and (process_index is None or int(match.group(1)) == process_index):
                 process_indices.add(int(match.group(1)))
         for index in sorted(process_indices):
@@ -5770,7 +5765,7 @@ def capture_filter_calls(
         process_indices = sorted(
             int(match.group(1))
             for name in entries
-            if (match := re.fullmatch(r"process/(\d+)/calls", name, re.I))
+            if (match := re.fullmatch(r"process/(\d+)/calls", name, re.IGNORECASE))
             and (process_index is None or int(match.group(1)) == process_index)
         )
         for index in process_indices:
