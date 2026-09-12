@@ -24,6 +24,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any
+from xml.etree import ElementTree
 
 from mcp.server.fastmcp import FastMCP
 
@@ -1866,14 +1867,7 @@ def api_monitor_search_apis(
     return {"query": query, "results": results, "count": len(results), "truncated": False}
 
 
-@mcp.tool()
-def api_monitor_read_api_definition(
-    definition_path: str,
-    max_chars: int = 100_000,
-    install_root: str | None = None,
-) -> dict[str, Any]:
-    """Read a bounded Rohitab XML API definition returned by the API search tool."""
-    max_chars = _limit(max_chars, "max_chars", 2_000_000)
+def _api_definition_path(definition_path: str, install_root: str | None = None) -> Path:
     api_root = (_app_root(install_root) / "API").resolve()
     path = Path(definition_path).expanduser().resolve()
     try:
@@ -1882,6 +1876,76 @@ def api_monitor_read_api_definition(
         raise ValueError("definition_path must be inside Rohitab's API directory") from exc
     if path.suffix.lower() != ".xml" or not path.is_file():
         raise FileNotFoundError(f"API definition not found: {path}")
+    return path
+
+
+@mcp.tool()
+def api_monitor_parse_api_definition(
+    definition_path: str,
+    api_name: str = "",
+    limit: int = 200,
+    install_root: str | None = None,
+) -> dict[str, Any]:
+    """Return structured Rohitab API signatures from one XML definition."""
+    limit = _limit(limit, "limit", 5000)
+    path = _api_definition_path(definition_path, install_root)
+    try:
+        root = ElementTree.parse(path).getroot()
+    except ElementTree.ParseError as exc:
+        raise ValueError(f"Invalid API definition XML: {path}") from exc
+
+    parents = {child: parent for parent in root.iter() for child in parent}
+    needle = api_name.casefold()
+    results: list[dict[str, Any]] = []
+    for api in root.iter("Api"):
+        name = api.get("Name", "")
+        if needle and needle not in name.casefold():
+            continue
+        ancestor = parents.get(api)
+        module = None
+        interface = None
+        module_attributes: dict[str, str] = {}
+        interface_attributes: dict[str, str] = {}
+        while ancestor is not None:
+            if ancestor.tag == "Module" and module is None:
+                module = ancestor.get("Name")
+                module_attributes = dict(ancestor.attrib)
+            if ancestor.tag == "Interface" and interface is None:
+                interface = ancestor.get("Name")
+                interface_attributes = dict(ancestor.attrib)
+            ancestor = parents.get(ancestor)
+        results.append(
+            {
+                "name": name,
+                "api_attributes": dict(api.attrib),
+                "module": module,
+                "module_attributes": module_attributes,
+                "interface": interface,
+                "interface_attributes": interface_attributes,
+                "params": [dict(param.attrib) for param in api.findall("Param")],
+                "returns": [dict(return_value.attrib) for return_value in api.findall("Return")],
+                "definition": str(path),
+            }
+        )
+    returned = results[:limit]
+    return {
+        "definition": str(path),
+        "api_name": api_name,
+        "apis": returned,
+        "count": len(returned),
+        "truncated": len(results) > limit,
+    }
+
+
+@mcp.tool()
+def api_monitor_read_api_definition(
+    definition_path: str,
+    max_chars: int = 100_000,
+    install_root: str | None = None,
+) -> dict[str, Any]:
+    """Read a bounded Rohitab XML API definition returned by the API search tool."""
+    max_chars = _limit(max_chars, "max_chars", 2_000_000)
+    path = _api_definition_path(definition_path, install_root)
     text = path.read_text(encoding="utf-8-sig", errors="replace")
     return {
         "definition": str(path),
@@ -1930,6 +1994,20 @@ def _self_test() -> None:
         }
         listed = capture_list_directory(directory, recursive=False, limit=10)
         assert listed["count"] == 1
+
+        app_root = Path(directory) / "app"
+        definition_root = app_root / "API"
+        definition_root.mkdir(parents=True)
+        definition = definition_root / "sample.xml"
+        definition.write_text(
+            '<ApiMonitor><Module Name="sample.dll" CallingConvention="STDCALL">'
+            '<Api Name="OpenThing"><Param Type="HANDLE" Name="hThing" />'
+            '<Return Type="BOOL" /></Api></Module></ApiMonitor>',
+            encoding="utf-8",
+        )
+        parsed = api_monitor_parse_api_definition(str(definition), install_root=str(app_root))
+        assert parsed["apis"][0]["module"] == "sample.dll"
+        assert parsed["apis"][0]["params"] == [{"Type": "HANDLE", "Name": "hThing"}]
 
 
 def main() -> None:
