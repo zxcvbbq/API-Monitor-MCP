@@ -410,6 +410,39 @@ def _post_scroll(handle: int, direction: str, amount: int) -> None:
             raise OSError(ctypes.get_last_error(), "Could not scroll API Monitor control")
 
 
+def _post_key(handle: int, key: str) -> None:
+    keys = {
+        "backspace": 0x08,
+        "tab": 0x09,
+        "enter": 0x0D,
+        "escape": 0x1B,
+        "space": 0x20,
+        "page_up": 0x21,
+        "page_down": 0x22,
+        "end": 0x23,
+        "home": 0x24,
+        "left": 0x25,
+        "up": 0x26,
+        "right": 0x27,
+        "down": 0x28,
+        "insert": 0x2D,
+        "delete": 0x2E,
+    }
+    if len(key) == 1:
+        value = ord(key.upper())
+        if not 0x20 <= value <= 0x7E:
+            raise ValueError("key must be one supported named key or one ASCII character")
+    else:
+        value = keys.get(key.casefold())
+        if value is None:
+            raise ValueError("key must be one supported named key or one ASCII character")
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+    if not user32.PostMessageW(handle, 0x0100, value, 0):  # WM_KEYDOWN
+        raise OSError(ctypes.get_last_error(), "Could not send API Monitor key")
+    if not user32.PostMessageW(handle, 0x0101, value, 0):  # WM_KEYUP
+        raise OSError(ctypes.get_last_error(), "Could not release API Monitor key")
+
+
 def _uia_text(control: Any) -> str:
     try:
         return control.window_text() or control.element_info.name or ""
@@ -876,6 +909,32 @@ def api_monitor_gui_scroll(
         "method": "background-win32",
         "direction": direction,
         "amount": amount,
+        "window": target[0],
+        "control": target[1],
+    }
+
+
+@mcp.tool()
+def api_monitor_gui_key(
+    control_handle: int,
+    key: str,
+    window_title: str = "",
+) -> dict[str, Any]:
+    """Send one navigation key to an exact Rohitab control in the background."""
+    if sys.platform != "win32":
+        raise RuntimeError("Rohitab GUI key input requires Windows")
+    if control_handle < 1 or not key:
+        raise ValueError("control_handle and key are required")
+    target = _find_ui_control(
+        _find_api_monitor_windows(), None, "", "", window_title, control_handle
+    )
+    if target is None:
+        raise LookupError(f"Rohitab GUI control {control_handle} was not found")
+    _post_key(control_handle, key)
+    return {
+        "sent": True,
+        "method": "background-win32",
+        "key": key,
         "window": target[0],
         "control": target[1],
     }
