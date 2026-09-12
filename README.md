@@ -7,6 +7,7 @@ Features:
 - Launch/status, live background capture, process attach, native filter-tree inspection, and GUI actions
 - Open, validate, decode, search, inspect, and export `.apmx86`/`.apmx64` captures, including x86/x64 call streams and API names
 - Deep-validate saved call streams and payload references on demand
+- Compare saved traffic by call index and payload fingerprint
 - Inspect/search capture ZIPs, XML filters, logs, process metadata/modules, strings, raw hex, and payloads
 - Resolve saved API names and decode saved parameters/returns plus exact primitive values
 - List saved API frequency across processes

@@ -2934,6 +2934,130 @@ def capture_compare(
 
 
 @mcp.tool()
+def capture_compare_calls(
+    first_file: str,
+    second_file: str,
+    process_index: int = 0,
+    limit: int = 200,
+    max_records: int = 10_000,
+    max_data_bytes: int = 4096,
+    resolve_definitions: bool = False,
+) -> dict[str, Any]:
+    """Compare saved call traffic by index and bounded payload fingerprints."""
+    if process_index < 0:
+        raise ValueError("process_index must be non-negative")
+    limit = _limit(limit, "limit", 10_000)
+    max_records = _limit(max_records, "max_records", 10_000)
+    max_data_bytes = _limit(max_data_bytes, "max_data_bytes", 16 * 1024 * 1024)
+
+    def load(file_path: str) -> dict[str, Any]:
+        try:
+            return capture_call_records(
+                file_path,
+                process_index=process_index,
+                limit=max_records,
+                include_data=True,
+                max_data_bytes=max_data_bytes,
+                resolve_definitions=resolve_definitions,
+            )
+        except FileNotFoundError:
+            path = _capture_path(file_path)
+            return {
+                "file": str(path),
+                "architecture": "x86" if path.suffix.lower() == ".apmx86" else "x64",
+                "count": 0,
+                "records": [],
+                "truncated": False,
+            }
+
+    def signature(record: dict[str, Any]) -> tuple[Any, ...]:
+        definition = record.get("definition", {})
+        refs = []
+        for reference in record.get("data_refs", []):
+            payload = reference.get("payload", {})
+            refs.append(
+                (
+                    reference.get("slot"),
+                    reference.get("length"),
+                    payload.get("sha256"),
+                    reference.get("valid"),
+                )
+            )
+        return (
+            record.get("flags"),
+            definition.get("offset"),
+            definition.get("name"),
+            definition.get("module"),
+            tuple(refs),
+        )
+
+    def summary(record: dict[str, Any]) -> dict[str, Any]:
+        definition = record.get("definition", {})
+        return {
+            "index": record.get("index"),
+            "flags": record.get("flags"),
+            "definition": {
+                key: definition.get(key)
+                for key in ("offset", "name", "module", "ordinal")
+                if key in definition
+            },
+            "data_refs": [
+                {
+                    key: reference.get(key)
+                    for key in ("slot", "offset", "length", "valid", "error")
+                    if key in reference
+                }
+                | ({"sha256": reference["payload"]["sha256"]} if reference.get("payload") else {})
+                for reference in record.get("data_refs", [])
+            ],
+        }
+
+    first = load(first_file)
+    second = load(second_file)
+    first_records = first.get("records", [])
+    second_records = second.get("records", [])
+    added = []
+    removed = []
+    changed = []
+    for index in range(min(len(first_records), len(second_records))):
+        if signature(first_records[index]) != signature(second_records[index]):
+            changed.append(
+                {
+                    "index": index,
+                    "first": summary(first_records[index]),
+                    "second": summary(second_records[index]),
+                }
+            )
+    for index in range(len(first_records), len(second_records)):
+        added.append(summary(second_records[index]))
+    for index in range(len(second_records), len(first_records)):
+        removed.append(summary(first_records[index]))
+    return {
+        "first": first.get("file"),
+        "second": second.get("file"),
+        "process_index": process_index,
+        "architectures": {
+            "first": first.get("architecture"),
+            "second": second.get("architecture"),
+        },
+        "counts": {
+            "first": first.get("count", len(first_records)),
+            "second": second.get("count", len(second_records)),
+            "added": len(added),
+            "removed": len(removed),
+            "changed": len(changed),
+        },
+        "added": added[:limit],
+        "removed": removed[:limit],
+        "changed": changed[:limit],
+        "truncated": any(
+            len(items) > limit for items in (added, removed, changed)
+        ) or first.get("truncated", False) or second.get("truncated", False),
+        "payload_fingerprint": "sha256 when payload is within max_data_bytes",
+    }
+
+
+@mcp.tool()
 def capture_list_entries(file_path: str, limit: int = 200) -> dict[str, Any]:
     """List files stored inside an APMX capture container."""
     limit = _limit(limit, "limit", 2000)
@@ -4344,6 +4468,11 @@ def _self_test() -> None:
         comparison = capture_compare(str(path), str(second_path))
         assert comparison["counts"] == {"added": 1, "removed": 8, "changed": 1}
         assert not comparison["same"]
+        call_comparison = capture_compare_calls(
+            str(path), str(second_path), resolve_definitions=True
+        )
+        assert call_comparison["counts"]["removed"] == 1
+        assert call_comparison["counts"]["changed"] == 0
 
         x86_path = Path(directory) / "sample.apmx86"
         x86_record = bytearray(120)
