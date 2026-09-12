@@ -3380,6 +3380,29 @@ def capture_read_definition(file_path: str, definition_offset: int) -> dict[str,
 
 
 @mcp.tool()
+def capture_read_type(file_path: str, type_offset: int) -> dict[str, Any]:
+    """Resolve one type descriptor from an APMX definitions entry."""
+    if type_offset < 0:
+        raise ValueError("type_offset must be non-negative")
+    path = _capture_path(file_path)
+    pointer_size = 4 if path.suffix.lower() == ".apmx86" else 8
+    archive, _, _ = _open_capture_zip(path)
+    with archive:
+        try:
+            definitions = archive.read("definitions")
+        except KeyError as exc:
+            raise FileNotFoundError("Capture definitions entry not found") from exc
+    type_info = _capture_type_info(definitions, type_offset, pointer_size)
+    return {
+        "file": str(path),
+        "architecture": "x86" if pointer_size == 4 else "x64",
+        "definitions_bytes": len(definitions),
+        "type": type_info,
+        "valid": type_info is not None,
+    }
+
+
+@mcp.tool()
 def capture_export_calls(
     file_path: str,
     output_path: str,
@@ -4531,6 +4554,7 @@ def _self_test() -> None:
         assert deep_validation["structural_valid"]
         assert deep_validation["process_infos"][0]["valid"]
         assert deep_validation["streams"][0]["definitions"]["resolved"] == 1
+        assert capture_read_type(str(path), 160)["type"]["kind"] == 2
         invalid_prefix = Path(directory) / "invalid-prefix.apmx64"
         invalid_prefix.write_bytes(b"not-an-apmx" + path.read_bytes()[info["zip_offset"] :])
         assert not capture_validate(str(invalid_prefix))["valid"]
