@@ -3239,6 +3239,63 @@ def api_monitor_capture_process(
 
 
 @mcp.tool()
+def api_monitor_capture_session(
+    output_path: str,
+    architecture: str = "x64",
+    duration_seconds: int = 10,
+    minimum_calls: int = 0,
+    timeout_seconds: int = 15,
+    window_handle: int | None = None,
+    overwrite: bool = False,
+) -> dict[str, Any]:
+    """Stop and save an already-attached Rohitab monitoring session."""
+    if sys.platform != "win32":
+        raise RuntimeError("Live API Monitor captures require Windows")
+    if architecture not in {"x86", "x64"}:
+        raise ValueError("architecture must be x86 or x64")
+    if duration_seconds < 1 or duration_seconds > 300:
+        raise ValueError("duration_seconds must be between 1 and 300")
+    if minimum_calls < 0:
+        raise ValueError("minimum_calls must be non-negative")
+    if timeout_seconds < 1 or timeout_seconds > 60:
+        raise ValueError("timeout_seconds must be between 1 and 60")
+    path = _capture_output_path(output_path, architecture)
+    if path.exists() and not overwrite:
+        raise FileExistsError(f"Capture already exists: {path}")
+
+    waited = api_monitor_wait_for_traffic(
+        minimum_calls=minimum_calls,
+        timeout_seconds=duration_seconds,
+        window_handle=window_handle,
+    )
+    stopped = api_monitor_monitoring_control(
+        "stop",
+        architecture=architecture,
+        timeout_seconds=timeout_seconds,
+        window_handle=window_handle,
+    )
+    saved = api_monitor_save_capture(
+        str(path),
+        overwrite=overwrite,
+        timeout_seconds=timeout_seconds,
+        window_handle=window_handle,
+    )
+    validation = capture_validate(str(path))
+    result = {
+        "captured": validation["valid"],
+        "ready": waited.get("ready", False),
+        "minimum_calls": minimum_calls,
+        "waited": waited,
+        "stopped": stopped,
+        "saved": saved,
+        "validation": validation,
+    }
+    if validation["valid"]:
+        result["capture"] = capture_info(str(path))
+    return result
+
+
+@mcp.tool()
 def api_monitor_attach_process(
     pid: int,
     process_name: str = "",
