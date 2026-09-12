@@ -3365,14 +3365,24 @@ def api_monitor_gui_uia(
     text: str = "",
     limit: int = 2000,
     max_depth: int = 8,
+    automation_id: str = "",
+    class_name: str = "",
 ) -> dict[str, Any]:
     """Read or invoke Rohitab controls through background Windows UI Automation."""
     if sys.platform != "win32":
         return {"supported": False, "windows": []}
     if action not in {"read", "click", "set_text", "select"}:
         raise ValueError("action must be read, click, set_text, or select")
-    if action != "read" and not control_name and control_handle is None:
-        raise ValueError("an action requires control_name or control_handle")
+    if (
+        action != "read"
+        and not control_name
+        and control_handle is None
+        and not automation_id
+        and not class_name
+    ):
+        raise ValueError(
+            "an action requires control_name, control_handle, automation_id, or class_name"
+        )
     if control_handle is not None and control_handle < 1:
         raise ValueError("control_handle must be positive")
     limit = _limit(limit, "limit", 20_000)
@@ -3417,6 +3427,14 @@ def api_monitor_gui_uia(
         except (AttributeError, TypeError, ValueError):
             handle = None
         try:
+            automation = control.element_info.automation_id or ""
+        except (AttributeError, OSError, RuntimeError):
+            automation = ""
+        try:
+            native_class = control.element_info.class_name or ""
+        except (AttributeError, OSError, RuntimeError):
+            native_class = ""
+        try:
             rectangle = _uia_rect(control)
         except (OSError, RuntimeError):
             rectangle = {}
@@ -3432,6 +3450,8 @@ def api_monitor_gui_uia(
             "handle": handle,
             "control_type": kind,
             "name": name,
+            "automation_id": automation,
+            "class_name": native_class,
             "rectangle": rectangle,
             "visible": visible,
             "enabled": enabled,
@@ -3495,6 +3515,10 @@ def api_monitor_gui_uia(
             if control_name and info["name"] != control_name:
                 continue
             if control_type and info["control_type"] != control_type:
+                continue
+            if automation_id and info["automation_id"] != automation_id:
+                continue
+            if class_name and info["class_name"] != class_name:
                 continue
             matches.append((window, control, info))
     if len(matches) != 1:
