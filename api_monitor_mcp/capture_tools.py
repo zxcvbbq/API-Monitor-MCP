@@ -89,6 +89,53 @@ def _capture_records_without_data(
         )
 
 
+def _capture_validate_stream(
+    calls: bytes,
+    data_size: int,
+    definitions: bytes | None,
+    max_records: int,
+    pointer_size: int,
+    data_reader: Any = None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    stats = _capture_call_stats(
+        calls,
+        b"",
+        max_records,
+        pointer_size,
+        data_size=data_size,
+        data_reader=data_reader,
+    )
+    if definitions is None:
+        return stats, {"available": False}
+    records = _capture_call_records(
+        calls,
+        b"",
+        min(len(calls) // pointer_size, max_records),
+        False,
+        0,
+        definitions=definitions,
+        pointer_size=pointer_size,
+        data_size=data_size,
+        data_reader=data_reader,
+    )
+    definition_checks = {
+        "available": True,
+        "resolved": 0,
+        "unknown": 0,
+        "invalid": 0,
+        "truncated": len(calls) // pointer_size > max_records,
+    }
+    for record in records:
+        definition_offset = record.get("definition_offset", 0)
+        if not definition_offset:
+            definition_checks["unknown"] += 1
+        elif record.get("definition", {}).get("valid"):
+            definition_checks["resolved"] += 1
+        else:
+            definition_checks["invalid"] += 1
+    return stats, definition_checks
+
+
 @mcp.tool()
 def capture_info(file_path: str) -> dict[str, Any]:
     """Inspect an APMX file header and list its ZIP container entries."""
@@ -227,47 +274,46 @@ def capture_validate(
             index = int(match.group(1))
             calls = archive.read(name)
             data_name = f"process/{index}/data"
-            data = archive.read(data_name) if data_name in entries else b""
+            data_info = entries.get(data_name)
+            data_size = data_info.file_size if data_info is not None else 0
             stream: dict[str, Any] = {
                 "process_index": index,
                 "architecture": "x86" if pointer_size == 4 else "x64",
                 "calls_entry": name,
-                "data_entry": data_name if data else None,
+                "data_entry": data_name if data_size else None,
                 "valid": False,
             }
+
             try:
-                stats = _capture_call_stats(calls, data, max_records, pointer_size)
+                if data_info is None:
+                    stats, definition_checks = _capture_validate_stream(
+                        calls,
+                        data_size,
+                        definitions,
+                        max_records,
+                        pointer_size,
+                    )
+                else:
+                    with archive.open(data_info) as data_stream:
+                        def read_data(
+                            offset: int, size: int, data_stream: Any = data_stream
+                        ) -> bytes:
+                            data_stream.seek(offset)
+                            return data_stream.read(size)
+
+                        stats, definition_checks = _capture_validate_stream(
+                            calls,
+                            data_size,
+                            definitions,
+                            max_records,
+                            pointer_size,
+                            read_data,
+                        )
                 stream["stats"] = stats
                 stream["valid"] = stats["invalid_records"] == 0
+                stream["definitions"] = definition_checks
                 if definitions is not None:
-                    records = _capture_call_records(
-                        calls,
-                        data,
-                        min(len(calls) // pointer_size, max_records),
-                        False,
-                        0,
-                        definitions=definitions,
-                        pointer_size=pointer_size,
-                    )
-                    definition_checks = {
-                        "available": True,
-                        "resolved": 0,
-                        "unknown": 0,
-                        "invalid": 0,
-                        "truncated": len(calls) // pointer_size > max_records,
-                    }
-                    for record in records:
-                        definition_offset = record.get("definition_offset", 0)
-                        if not definition_offset:
-                            definition_checks["unknown"] += 1
-                        elif record.get("definition", {}).get("valid"):
-                            definition_checks["resolved"] += 1
-                        else:
-                            definition_checks["invalid"] += 1
-                    stream["definitions"] = definition_checks
                     stream["valid"] = stream["valid"] and not definition_checks["invalid"]
-                else:
-                    stream["definitions"] = {"available": False}
             except (ValueError, struct.error) as exc:
                 stream["error"] = str(exc)
             streams.append(stream)
