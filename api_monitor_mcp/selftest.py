@@ -76,6 +76,7 @@ from .capture_values import (
     _read_payload,
 )
 from .definition_tools import (
+    api_monitor_list_api_files,
     api_monitor_parse_api_definition,
     api_monitor_search_apis,
     api_monitor_search_variables,
@@ -899,6 +900,11 @@ def _self_test() -> None:
         environment = api_monitor_environment(install_root=str(app_root))
         assert environment["installed"]
         assert environment["api_directory"]["xml_count"] == 2
+        listed_api_files = api_monitor_list_api_files(
+            query="sample.xml", install_root=str(app_root)
+        )
+        assert listed_api_files["count"] == 1
+        assert listed_api_files["files"][0]["api_count"] == 1
         searched_apis = api_monitor_search_apis("OpenThing", install_root=str(app_root))
         assert searched_apis["count"] == 1
         assert searched_apis["results"][0]["module"] == "sample.dll"

@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 from xml.etree import ElementTree
 
-from .capture_format import _limit
+from .capture_format import _file_time, _limit
 from .gui_runtime import _app_root
 from .runtime import API_NAME, MODULE_NAME, mcp
 
@@ -48,6 +48,83 @@ def api_monitor_search_apis(
             if len(results) >= limit:
                 return {"query": query, "results": results, "count": len(results), "truncated": True}
     return {"query": query, "results": results, "count": len(results), "truncated": False}
+
+
+@mcp.tool()
+def api_monitor_list_api_files(
+    query: str = "",
+    limit: int = 500,
+    install_root: str | None = None,
+    include_counts: bool = True,
+) -> dict[str, Any]:
+    """List installed Rohitab XML API definitions and their bounded contents."""
+    if len(query) > 4096:
+        raise ValueError("query must not exceed 4096 characters")
+    limit = _limit(limit, "limit", 5000)
+    api_root = _app_root(install_root) / "API"
+    if not api_root.is_dir():
+        raise FileNotFoundError(f"API definition directory not found: {api_root}")
+
+    wanted = query.casefold()
+    results: list[dict[str, Any]] = []
+    for xml_path in sorted(api_root.rglob("*.xml")):
+        try:
+            text = xml_path.read_text(encoding="utf-8-sig", errors="replace")
+            relative = str(xml_path.relative_to(api_root))
+            module_match = MODULE_NAME.search(text)
+            module = module_match.group(1) if module_match else xml_path.stem
+        except (OSError, ValueError):
+            continue
+        if wanted and wanted not in relative.casefold() and wanted not in module.casefold():
+            continue
+        item: dict[str, Any] = {
+            "definition": str(xml_path),
+            "relative_path": relative,
+            "module": module,
+            "size": xml_path.stat().st_size,
+            "modified_utc": _file_time(xml_path),
+        }
+        if include_counts:
+            try:
+                root = ElementTree.fromstring(text)
+            except ElementTree.ParseError as exc:
+                item.update({"valid": False, "error": str(exc), "api_count": 0, "variable_count": 0})
+            else:
+                item.update(
+                    {
+                        "valid": True,
+                        "api_count": sum(
+                            1
+                            for node in root.iter()
+                            if isinstance(node.tag, str)
+                            and node.tag.rsplit("}", 1)[-1].casefold() == "api"
+                        ),
+                        "variable_count": sum(
+                            1
+                            for node in root.iter()
+                            if isinstance(node.tag, str)
+                            and node.tag.rsplit("}", 1)[-1].casefold() == "variable"
+                        ),
+                    }
+                )
+        results.append(item)
+        if len(results) >= limit:
+            return {
+                "query": query,
+                "api_directory": str(api_root),
+                "files": results,
+                "count": len(results),
+                "truncated": True,
+                "counts_included": include_counts,
+            }
+    return {
+        "query": query,
+        "api_directory": str(api_root),
+        "files": results,
+        "count": len(results),
+        "truncated": False,
+        "counts_included": include_counts,
+    }
 
 
 def _api_definition_path(definition_path: str, install_root: str | None = None) -> Path:
