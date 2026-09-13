@@ -8,8 +8,11 @@ import math
 import mmap
 import re
 import struct
+import sys
 import zipfile
 import zlib
+from array import array
+from collections.abc import Sequence
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -494,7 +497,7 @@ def _capture_layout(pointer_size: int) -> dict[str, Any]:
 
 
 def _capture_record_size(
-    offsets: list[int], index: int, data: bytes, pointer_size: int = 8
+    offsets: Sequence[int], index: int, data: bytes, pointer_size: int = 8
 ) -> int:
     layout = _capture_layout(pointer_size)
     offset = offsets[index]
@@ -502,6 +505,18 @@ def _capture_record_size(
     minimum = layout["minimum_record_size"]
     full = layout["full_record_size"]
     return next_offset - offset if minimum <= next_offset - offset <= full else full if data[offset + 2] else minimum
+
+
+def _capture_offsets(calls: bytes, pointer_size: int) -> array:
+    if len(calls) % pointer_size:
+        raise ValueError(f"process calls entry is not an array of {pointer_size * 8}-bit offsets")
+    offsets = array("I" if pointer_size == 4 else "Q")
+    if offsets.itemsize != pointer_size:
+        raise ValueError(f"unsupported native offset size for {pointer_size * 8}-bit captures")
+    offsets.frombytes(calls)
+    if sys.byteorder != "little":
+        offsets.byteswap()
+    return offsets
 
 
 def _capture_call_context(data: bytes, offset: int, pointer_size: int = 8) -> dict[str, Any]:
@@ -789,13 +804,8 @@ def _capture_call_records(
     pointer_size: int = 8,
 ) -> list[dict[str, Any]]:
     layout = _capture_layout(pointer_size)
-    if len(calls) % pointer_size:
-        raise ValueError(f"process calls entry is not an array of {pointer_size * 8}-bit offsets")
+    offsets = _capture_offsets(calls, pointer_size)
     offset_format = layout["offset_format"]
-    offsets = [
-        struct.unpack_from(offset_format, calls, index)[0]
-        for index in range(0, len(calls), pointer_size)
-    ]
     minimum = layout["minimum_record_size"]
     records: list[dict[str, Any]] = []
     for index, offset in enumerate(offsets[start_index : start_index + limit], start=start_index):
@@ -852,13 +862,8 @@ def _capture_call_stats(
     calls: bytes, data: bytes, max_records: int, pointer_size: int = 8
 ) -> dict[str, Any]:
     layout = _capture_layout(pointer_size)
-    if len(calls) % pointer_size:
-        raise ValueError(f"process calls entry is not an array of {pointer_size * 8}-bit offsets")
+    offsets = _capture_offsets(calls, pointer_size)
     offset_format = layout["offset_format"]
-    offsets = [
-        struct.unpack_from(offset_format, calls, index)[0]
-        for index in range(0, len(calls), pointer_size)
-    ]
     scanned = min(len(offsets), max_records)
     stats: dict[str, Any] = {
         "count": len(offsets),
