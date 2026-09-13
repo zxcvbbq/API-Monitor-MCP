@@ -49,6 +49,46 @@ from .capture_values import (
 from .runtime import CAPTURE_SUFFIXES, PROCESS_INFO, mcp
 
 
+def _capture_records_without_data(
+    archive: zipfile.ZipFile,
+    data_info: zipfile.ZipInfo | None,
+    calls: bytes,
+    limit: int,
+    *,
+    start_index: int = 0,
+    definitions: bytes | None = None,
+    pointer_size: int = 8,
+) -> list[dict[str, Any]]:
+    if data_info is None:
+        return _capture_call_records(
+            calls,
+            b"",
+            limit,
+            False,
+            0,
+            start_index=start_index,
+            definitions=definitions,
+            pointer_size=pointer_size,
+        )
+    with archive.open(data_info) as data_stream:
+        def read_data(offset: int, size: int) -> bytes:
+            data_stream.seek(offset)
+            return data_stream.read(size)
+
+        return _capture_call_records(
+            calls,
+            b"",
+            limit,
+            False,
+            0,
+            start_index=start_index,
+            definitions=definitions,
+            pointer_size=pointer_size,
+            data_size=data_info.file_size,
+            data_reader=read_data,
+        )
+
+
 @mcp.tool()
 def capture_info(file_path: str) -> dict[str, Any]:
     """Inspect an APMX file header and list its ZIP container entries."""
@@ -1084,23 +1124,15 @@ def capture_call_records(
         if start_index > count:
             raise IndexError(f"start_index {start_index} is outside {count} saved calls")
         if data_info is not None and not include_data:
-            with archive.open(data_info) as data_stream:
-                def read_data(offset: int, size: int) -> bytes:
-                    data_stream.seek(offset)
-                    return data_stream.read(size)
-
-                records = _capture_call_records(
-                    calls,
-                    data,
-                    limit,
-                    include_data,
-                    max_data_bytes,
-                    start_index=start_index,
-                    definitions=definitions,
-                    pointer_size=pointer_size,
-                    data_size=data_entry_bytes,
-                    data_reader=read_data,
-                )
+            records = _capture_records_without_data(
+                archive,
+                data_info,
+                calls,
+                limit,
+                start_index=start_index,
+                definitions=definitions,
+                pointer_size=pointer_size,
+            )
         else:
             records = _capture_call_records(
                 calls,
@@ -1207,7 +1239,7 @@ def capture_list_types(
     scanned = 0
     resolved_definitions: set[int] = set()
     with archive:
-        entries = {info.filename for info in archive.infolist()}
+        entries = {info.filename: info for info in archive.infolist()}
         if "definitions" not in entries:
             return {
                 "file": str(path),
@@ -1282,7 +1314,7 @@ def capture_list_types(
                 break
             calls = archive.read(f"process/{index}/calls")
             data_name = f"process/{index}/data"
-            data = archive.read(data_name) if data_name in entries else b""
+            data_info = entries.get(data_name)
             process_pid = _capture_process_pid(archive, entries, index, pointer_size)
             if pid is not None and process_pid != pid:
                 continue
@@ -1292,12 +1324,11 @@ def capture_list_types(
                 )
             record_count = len(calls) // pointer_size
             page_count = min(record_count, max_records - scanned)
-            records = _capture_call_records(
+            records = _capture_records_without_data(
+                archive,
+                data_info,
                 calls,
-                data,
                 page_count,
-                False,
-                0,
                 definitions=definitions,
                 pointer_size=pointer_size,
             )
@@ -2062,7 +2093,7 @@ def capture_list_apis(
     scanned = 0
     truncated = False
     with archive:
-        entries = {info.filename for info in archive.infolist()}
+        entries = {info.filename: info for info in archive.infolist()}
         if "definitions" not in entries:
             return {
                 "file": str(path),
@@ -2084,7 +2115,7 @@ def capture_list_apis(
         for index in process_indices:
             calls = archive.read(f"process/{index}/calls")
             data_name = f"process/{index}/data"
-            data = archive.read(data_name) if data_name in entries else b""
+            data_info = entries.get(data_name)
             process_pid = _capture_process_pid(archive, entries, index, pointer_size)
             if pid is not None and process_pid != pid:
                 continue
@@ -2095,12 +2126,11 @@ def capture_list_apis(
             record_count = len(calls) // pointer_size
             page_count = min(record_count, max_records - scanned)
             truncated |= page_count < record_count
-            records = _capture_call_records(
+            records = _capture_records_without_data(
+                archive,
+                data_info,
                 calls,
-                data,
                 page_count,
-                False,
-                0,
                 definitions=definitions,
                 pointer_size=pointer_size,
             )
@@ -2200,7 +2230,7 @@ def capture_list_definitions(
     invalid_records = 0
     truncated = False
     with archive:
-        entries = {info.filename for info in archive.infolist()}
+        entries = {info.filename: info for info in archive.infolist()}
         if "definitions" not in entries:
             return {
                 "file": str(path),
@@ -2226,7 +2256,7 @@ def capture_list_definitions(
             calls_name = f"process/{index}/calls"
             data_name = f"process/{index}/data"
             calls = archive.read(calls_name)
-            data = archive.read(data_name) if data_name in entries else b""
+            data_info = entries.get(data_name)
             process_pid = _capture_process_pid(archive, entries, index, pointer_size)
             if pid is not None and process_pid != pid:
                 continue
@@ -2237,12 +2267,11 @@ def capture_list_definitions(
             record_count = len(calls) // pointer_size
             page_count = min(record_count, max_records - scanned)
             truncated |= page_count < record_count
-            records = _capture_call_records(
+            records = _capture_records_without_data(
+                archive,
+                data_info,
                 calls,
-                data,
                 page_count,
-                False,
-                0,
                 definitions=definitions,
                 pointer_size=pointer_size,
             )
@@ -2935,7 +2964,7 @@ def capture_filter_calls(
     scanned = 0
     scan_truncated = False
     with archive:
-        entries = {info.filename for info in archive.infolist()}
+        entries = {info.filename: info for info in archive.infolist()}
         definitions = archive.read("definitions") if resolve_definitions and "definitions" in entries else None
         process_entries = []
         for name in entries:
@@ -2962,7 +2991,8 @@ def capture_filter_calls(
         for index, process_pid in process_entries:
             calls = archive.read(f"process/{index}/calls")
             data_name = f"process/{index}/data"
-            data = archive.read(data_name) if data_name in entries else b""
+            data_info = entries.get(data_name)
+            data = archive.read(data_info) if include_data and data_info is not None else b""
             if len(calls) % pointer_size:
                 raise ValueError(
                     f"process/{index}/calls is not an array of {pointer_size * 8}-bit offsets"
@@ -2970,15 +3000,25 @@ def capture_filter_calls(
             record_count = len(calls) // pointer_size
             page_count = min(record_count, max_records - scanned)
             scan_truncated |= page_count < record_count
-            records = _capture_call_records(
-                calls,
-                data,
-                page_count,
-                include_data,
-                max_data_bytes,
-                definitions=definitions,
-                pointer_size=pointer_size,
-            )
+            if data_info is not None and not include_data:
+                records = _capture_records_without_data(
+                    archive,
+                    data_info,
+                    calls,
+                    page_count,
+                    definitions=definitions,
+                    pointer_size=pointer_size,
+                )
+            else:
+                records = _capture_call_records(
+                    calls,
+                    data,
+                    page_count,
+                    include_data,
+                    max_data_bytes,
+                    definitions=definitions,
+                    pointer_size=pointer_size,
+                )
             scanned += len(records)
             for record in records:
                 context = record.get("context")
