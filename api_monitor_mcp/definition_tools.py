@@ -136,12 +136,12 @@ def api_monitor_list_api_files(
             if key != "api_names" and (include_counts or key not in {"valid", "error", "api_count", "variable_count"})
         }
         results.append(item)
-        if len(results) >= limit:
+        if len(results) > limit:
             return {
                 "query": query,
                 "api_directory": str(api_root),
-                "files": results,
-                "count": len(results),
+                "files": results[:limit],
+                "count": limit,
                 "truncated": True,
                 "counts_included": include_counts,
             }

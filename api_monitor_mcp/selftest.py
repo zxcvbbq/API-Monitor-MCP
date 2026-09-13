@@ -900,6 +900,8 @@ def _self_test() -> None:
         environment = api_monitor_environment(install_root=str(app_root))
         assert environment["installed"]
         assert environment["api_directory"]["xml_count"] == 2
+        exact_limit = api_monitor_list_api_files(install_root=str(app_root), limit=2)
+        assert exact_limit["count"] == 2 and not exact_limit["truncated"]
         listed_api_files = api_monitor_list_api_files(
             query="sample.xml", install_root=str(app_root)
         )
