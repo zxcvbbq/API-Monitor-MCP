@@ -79,6 +79,7 @@ from .capture_values import (
 from .definition_tools import (
     api_monitor_list_api_files,
     api_monitor_parse_api_definition,
+    api_monitor_search_api_details,
     api_monitor_search_apis,
     api_monitor_search_variables,
 )
@@ -941,6 +942,14 @@ def _self_test() -> None:
         searched_apis = api_monitor_search_apis("OpenThing", install_root=str(app_root))
         assert searched_apis["count"] == 1
         assert searched_apis["results"][0]["module"] == "sample.dll"
+        detailed_apis = api_monitor_search_api_details(
+            "OpenThing", install_root=str(app_root)
+        )
+        assert detailed_apis["count"] == 1
+        assert detailed_apis["results"][0]["params"] == [
+            {"Type": "HANDLE", "Name": "hThing"}
+        ]
+        assert detailed_apis["results"][0]["returns"] == [{"Type": "BOOL"}]
         cache_probe = definition_root / "cache_probe.xml"
         cache_probe.write_text(
             '<ApiMonitor><Module Name="probe.dll"><Api Name="SecondThing" /></Module></ApiMonitor>',

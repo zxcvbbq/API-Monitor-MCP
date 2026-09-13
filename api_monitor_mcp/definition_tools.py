@@ -115,6 +115,57 @@ def api_monitor_search_apis(
 
 
 @mcp.tool()
+def api_monitor_search_api_details(
+    query: str,
+    limit: int = 100,
+    resolve_includes: bool = False,
+    install_root: str | None = None,
+) -> dict[str, Any]:
+    """Search installed APIs and return their bounded signatures in one call."""
+    limit = _limit(limit, "limit", 2000)
+    matches = api_monitor_search_apis(
+        query,
+        limit=limit,
+        install_root=install_root,
+    )
+    parsed_by_definition: dict[str, dict[str, Any]] = {}
+    results: list[dict[str, Any]] = []
+    for match in matches["results"]:
+        definition_path = str(match["definition"])
+        if definition_path not in parsed_by_definition:
+            parsed_by_definition[definition_path] = api_monitor_parse_api_definition(
+                definition_path,
+                api_name=str(match["name"]),
+                limit=5000,
+                resolve_includes=resolve_includes,
+                install_root=install_root,
+            )
+        parsed = parsed_by_definition[definition_path]
+        exact = [
+            api
+            for api in parsed["apis"]
+            if str(api.get("name", "")).casefold() == str(match["name"]).casefold()
+        ]
+        for api in exact or parsed["apis"][:1]:
+            results.append({**api, "search": match})
+            if len(results) >= limit:
+                return {
+                    "query": query,
+                    "resolve_includes": resolve_includes,
+                    "results": results,
+                    "count": len(results),
+                    "truncated": True,
+                }
+    return {
+        "query": query,
+        "resolve_includes": resolve_includes,
+        "results": results,
+        "count": len(results),
+        "truncated": matches["truncated"],
+    }
+
+
+@mcp.tool()
 def api_monitor_list_api_files(
     query: str = "",
     limit: int = 500,
