@@ -881,7 +881,12 @@ def _capture_call_records(
 
 
 def _capture_call_stats(
-    calls: bytes, data: bytes, max_records: int, pointer_size: int = 8
+    calls: bytes,
+    data: bytes,
+    max_records: int,
+    pointer_size: int = 8,
+    data_size: int | None = None,
+    data_reader: Any = None,
 ) -> dict[str, Any]:
     layout = _capture_layout(pointer_size)
     if len(calls) % pointer_size:
@@ -890,6 +895,11 @@ def _capture_call_stats(
     count = len(calls) // pointer_size
     scanned = min(count, max_records)
     offsets = _capture_offsets(calls[: (scanned + 1) * pointer_size], pointer_size)
+    data_length = len(data) if data_size is None else data_size
+
+    def read_data(offset: int, size: int) -> bytes:
+        return data_reader(offset, size) if data_reader is not None else data[offset : offset + size]
+
     stats: dict[str, Any] = {
         "count": count,
         "scanned_records": scanned,
@@ -906,7 +916,7 @@ def _capture_call_stats(
             str(slot): {"references": 0, "bytes": 0, "invalid_references": 0}
             for slot in range(5)
         },
-        "data_bytes": len(data),
+        "data_bytes": data_length,
         "referenced_data_bytes": 0,
     }
     thread_ids: set[int] = set()
@@ -916,25 +926,34 @@ def _capture_call_stats(
     error_codes_truncated = False
     error_count = 0
     for index, offset in enumerate(offsets[:scanned]):
-        if offset > len(data) - layout["minimum_record_size"]:
+        if offset > data_length - layout["minimum_record_size"]:
+            stats["invalid_records"] += 1
+            continue
+        next_offset = offsets[index + 1] if index + 1 < len(offsets) else data_length
+        size_from_offsets = next_offset - offset
+        if layout["minimum_record_size"] <= size_from_offsets <= layout["full_record_size"]:
+            record_size = size_from_offsets
+        else:
+            header = read_data(offset + 2, 1)
+            if not header:
+                stats["invalid_records"] += 1
+                continue
+            record_size = layout["full_record_size"] if header[0] else layout["minimum_record_size"]
+        record = read_data(offset, record_size)
+        if len(record) < record_size:
             stats["invalid_records"] += 1
             continue
         stats["valid_records"] += 1
-        record_size = _capture_record_size(offsets, index, data, pointer_size)
-        if offset + record_size > len(data):
-            stats["valid_records"] -= 1
-            stats["invalid_records"] += 1
-            continue
         size_key = (
             str(record_size)
             if record_size in (layout["minimum_record_size"], layout["full_record_size"])
             else "other"
         )
         stats["record_sizes"][size_key] += 1
-        flags = data[offset + 2]
+        flags = record[2]
         flag_key = f"0x{flags:02x}"
         stats["flags"][flag_key] = stats["flags"].get(flag_key, 0) + 1
-        context = _capture_call_context(data, offset, pointer_size)
+        context = _capture_call_context(record, 0, pointer_size)
         thread_ids.add(context["thread_id"])
         error_code = context["error_code"]
         if error_code:
@@ -952,13 +971,13 @@ def _capture_call_stats(
             if pointer_offset + pointer_size > record_size or length_offset + 4 > record_size:
                 continue
             relative = struct.unpack_from(
-                offset_format, data, offset + pointer_offset
+                offset_format, record, pointer_offset
             )[0]
-            length = struct.unpack_from("<I", data, offset + length_offset)[0]
+            length = struct.unpack_from("<I", record, length_offset)[0]
             reference_stats = stats["payload_slots"][str(slot)]
             if not relative and not length:
                 continue
-            if relative + length > len(data):
+            if relative + length > data_length:
                 reference_stats["invalid_references"] += 1
                 continue
             reference_stats["references"] += 1
@@ -980,7 +999,7 @@ def _capture_call_stats(
             "average": sum(durations) / len(durations),
         }
     stats["context"] = context_stats
-    stats["unreferenced_data_bytes"] = max(0, len(data) - stats["referenced_data_bytes"])
+    stats["unreferenced_data_bytes"] = max(0, data_length - stats["referenced_data_bytes"])
     return stats
 
 

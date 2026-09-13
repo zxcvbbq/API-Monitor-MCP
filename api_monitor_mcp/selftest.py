@@ -287,6 +287,12 @@ def _self_test() -> None:
         limited_stats = _capture_call_stats(bounded_calls, bytes(bounded_records), 1)
         assert limited_stats["count"] == 257
         assert limited_stats["scanned_records"] == 1 and limited_stats["truncated"]
+        sized_stats = _capture_call_stats(
+            struct.pack("<Q", 0), b"", 1, data_size=len(record),
+            data_reader=lambda offset, size: record[offset : offset + size],
+        )
+        assert sized_stats["data_bytes"] == len(record)
+        assert sized_stats["valid_records"] == 1
         partial_records = _capture_call_records(
             bounded_calls,
             bytes(bounded_records),

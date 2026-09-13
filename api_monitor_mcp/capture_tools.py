@@ -1922,7 +1922,7 @@ def capture_call_stats(
     pointer_size = 4 if path.suffix.lower() == ".apmx86" else 8
     archive, _, _ = _open_capture_zip(path)
     with archive:
-        entries = {info.filename for info in archive.infolist()}
+        entries = {info.filename: info for info in archive.infolist()}
         process_indices = sorted(
             int(match.group(1))
             for name in entries
@@ -1934,14 +1934,29 @@ def capture_call_stats(
             calls_name = f"process/{index}/calls"
             data_name = f"process/{index}/data"
             calls = archive.read(calls_name)
-            data = archive.read(data_name) if data_name in entries else b""
-            stats = _capture_call_stats(calls, data, max_records, pointer_size)
+            data_size = entries[data_name].file_size if data_name in entries else 0
+            if data_size:
+                with archive.open(data_name) as data_stream:
+                    def read_data(offset: int, size: int) -> bytes:
+                        data_stream.seek(offset)
+                        return data_stream.read(size)
+
+                    stats = _capture_call_stats(
+                        calls,
+                        b"",
+                        max_records,
+                        pointer_size,
+                        data_size=data_size,
+                        data_reader=read_data,
+                    )
+            else:
+                stats = _capture_call_stats(calls, b"", max_records, pointer_size)
             processes.append(
                 {
                     "process_index": index,
                     "process_pid": _capture_process_pid(archive, entries, index, pointer_size),
                     "calls_entry": calls_name,
-                    "data_entry": data_name if data else None,
+                    "data_entry": data_name if data_size else None,
                     **stats,
                 }
             )
