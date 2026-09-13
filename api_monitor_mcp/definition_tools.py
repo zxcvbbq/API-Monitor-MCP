@@ -48,34 +48,38 @@ def _cached_api_definition_index(
             "modified_utc": _file_time(path),
             "api_names": api_names,
         }
-        try:
-            root = ElementTree.fromstring(text)
-        except ElementTree.ParseError as exc:
-            item.update({"valid": False, "error": str(exc), "api_count": 0, "variable_count": 0})
-        else:
-            item.update(
-                {
-                    "valid": True,
-                    "api_count": sum(
-                        1
-                        for node in root.iter()
-                        if isinstance(node.tag, str)
-                        and node.tag.rsplit("}", 1)[-1].casefold() == "api"
-                    ),
-                    "variable_count": sum(
-                        1
-                        for node in root.iter()
-                        if isinstance(node.tag, str)
-                        and node.tag.rsplit("}", 1)[-1].casefold() == "variable"
-                    ),
-                }
-            )
         index.append(item)
     return tuple(index)
 
 
 def _api_definition_index(api_root: Path) -> tuple[dict[str, Any], ...]:
     return _cached_api_definition_index(str(api_root), _api_definition_signature(api_root))
+
+
+def _api_definition_counts(indexed: dict[str, Any]) -> dict[str, Any]:
+    path = Path(indexed["definition"])
+    try:
+        text = path.read_text(encoding="utf-8-sig", errors="replace")
+        root = ElementTree.fromstring(text)
+    except OSError as exc:
+        return {"valid": False, "error": str(exc), "api_count": 0, "variable_count": 0}
+    except ElementTree.ParseError as exc:
+        return {"valid": False, "error": str(exc), "api_count": 0, "variable_count": 0}
+    return {
+        "valid": True,
+        "api_count": sum(
+            1
+            for node in root.iter()
+            if isinstance(node.tag, str)
+            and node.tag.rsplit("}", 1)[-1].casefold() == "api"
+        ),
+        "variable_count": sum(
+            1
+            for node in root.iter()
+            if isinstance(node.tag, str)
+            and node.tag.rsplit("}", 1)[-1].casefold() == "variable"
+        ),
+    }
 
 
 @mcp.tool()
@@ -139,6 +143,8 @@ def api_monitor_list_api_files(
             for key, value in indexed.items()
             if key != "api_names" and (include_counts or key not in {"valid", "error", "api_count", "variable_count"})
         }
+        if include_counts:
+            item.update(_api_definition_counts(indexed))
         results.append(item)
         if len(results) > limit:
             return {
