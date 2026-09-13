@@ -308,53 +308,96 @@ def capture_compare_entry(
         raise ValueError("context_bytes must be between 0 and 4096")
     max_bytes = _limit(max_bytes, "max_bytes", 256 * 1024 * 1024)
 
-    def read_entry(file_path: str) -> tuple[Path, zipfile.ZipInfo, bytes, bool]:
+    def open_entry(file_path: str) -> tuple[Path, zipfile.ZipFile, zipfile.ZipInfo]:
         path = _capture_path(file_path)
         archive, _, _ = _open_capture_zip(path)
-        with archive:
-            try:
-                info = archive.getinfo(entry_name)
-            except KeyError as exc:
-                raise FileNotFoundError(f"ZIP entry not found: {entry_name}") from exc
-            if info.is_dir():
-                raise IsADirectoryError(f"ZIP entry is a directory: {entry_name}")
-            with archive.open(info) as member:
-                data = member.read(max_bytes + 1)
-        return path, info, data[:max_bytes], len(data) > max_bytes or info.file_size > max_bytes
+        try:
+            info = archive.getinfo(entry_name)
+        except KeyError as exc:
+            archive.close()
+            raise FileNotFoundError(f"ZIP entry not found: {entry_name}") from exc
+        if info.is_dir():
+            archive.close()
+            raise IsADirectoryError(f"ZIP entry is a directory: {entry_name}")
+        return path, archive, info
 
-    first, first_info, first_data, first_truncated = read_entry(first_file)
-    second, second_info, second_data, second_truncated = read_entry(second_file)
-    compared = min(len(first_data), len(second_data))
-    difference = next(
-        (offset for offset, (left, right) in enumerate(zip(first_data, second_data)) if left != right),
-        None,
-    )
-    if difference is None and len(first_data) != len(second_data):
-        difference = compared
-    truncated = first_truncated or second_truncated
-    same = difference is None and first_info.file_size == second_info.file_size and not truncated
-    result: dict[str, Any] = {
-        "first": str(first),
-        "second": str(second),
-        "entry": entry_name,
-        "first_size": first_info.file_size,
-        "second_size": second_info.file_size,
-        "compared_bytes": compared,
-        "max_bytes": max_bytes,
-        "same": same,
-        "truncated": truncated,
-        "first_difference": difference,
-    }
-    if difference is not None:
-        start = max(0, difference - context_bytes)
-        end = min(max(len(first_data), len(second_data)), difference + context_bytes + 1)
-        result["context"] = {
-            "offset": start,
-            "length": end - start,
-            "first_hex": first_data[start:end].hex(" "),
-            "second_hex": second_data[start:end].hex(" "),
+    def find_difference(
+        first_archive: zipfile.ZipFile,
+        first_info: zipfile.ZipInfo,
+        second_archive: zipfile.ZipFile,
+        second_info: zipfile.ZipInfo,
+        compare_bytes: int,
+    ) -> int | None:
+        compared = 0
+        chunk_size = 1024 * 1024
+        with first_archive.open(first_info) as first_stream, second_archive.open(
+            second_info
+        ) as second_stream:
+            while compared < compare_bytes:
+                size = min(chunk_size, compare_bytes - compared)
+                first_chunk = first_stream.read(size)
+                second_chunk = second_stream.read(size)
+                for offset, (left, right) in enumerate(zip(first_chunk, second_chunk)):
+                    if left != right:
+                        return compared + offset
+                compared += min(len(first_chunk), len(second_chunk))
+                if len(first_chunk) != len(second_chunk):
+                    return compared
+                if not first_chunk:
+                    break
+        return None
+
+    def read_context(
+        archive: zipfile.ZipFile, info: zipfile.ZipInfo, start: int, length: int
+    ) -> bytes:
+        with archive.open(info) as member:
+            member.seek(start)
+            return member.read(length)
+
+    first, first_archive, first_info = open_entry(first_file)
+    try:
+        second, second_archive, second_info = open_entry(second_file)
+    except Exception:
+        first_archive.close()
+        raise
+    try:
+        first_visible = min(first_info.file_size, max_bytes)
+        second_visible = min(second_info.file_size, max_bytes)
+        compared = min(first_visible, second_visible)
+        difference = find_difference(
+            first_archive, first_info, second_archive, second_info, compared
+        )
+        if difference is None and first_visible != second_visible:
+            difference = compared
+        truncated = first_info.file_size > max_bytes or second_info.file_size > max_bytes
+        same = difference is None and first_info.file_size == second_info.file_size and not truncated
+        result: dict[str, Any] = {
+            "first": str(first),
+            "second": str(second),
+            "entry": entry_name,
+            "first_size": first_info.file_size,
+            "second_size": second_info.file_size,
+            "compared_bytes": compared,
+            "max_bytes": max_bytes,
+            "same": same,
+            "truncated": truncated,
+            "first_difference": difference,
         }
-    return result
+        if difference is not None:
+            start = max(0, difference - context_bytes)
+            end = min(max(first_visible, second_visible), difference + context_bytes + 1)
+            first_context = read_context(first_archive, first_info, start, end - start)
+            second_context = read_context(second_archive, second_info, start, end - start)
+            result["context"] = {
+                "offset": start,
+                "length": end - start,
+                "first_hex": first_context.hex(" "),
+                "second_hex": second_context.hex(" "),
+            }
+        return result
+    finally:
+        first_archive.close()
+        second_archive.close()
 
 
 @mcp.tool()

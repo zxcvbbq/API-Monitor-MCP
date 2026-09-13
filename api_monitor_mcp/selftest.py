@@ -670,6 +670,11 @@ def _self_test() -> None:
         assert not entry_diff["same"]
         assert entry_diff["first_difference"] is not None
         assert entry_diff["context"]["first_hex"] != entry_diff["context"]["second_hex"]
+        capped_entry_diff = capture_compare_entry(
+            str(path), str(second_path), "metadata.txt", max_bytes=2
+        )
+        assert capped_entry_diff["compared_bytes"] == 2
+        assert capped_entry_diff["truncated"] and not capped_entry_diff["same"]
         call_comparison = capture_compare_calls(
             str(path), str(second_path), resolve_definitions=True
         )
