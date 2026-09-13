@@ -908,6 +908,12 @@ def _self_test() -> None:
         searched_apis = api_monitor_search_apis("OpenThing", install_root=str(app_root))
         assert searched_apis["count"] == 1
         assert searched_apis["results"][0]["module"] == "sample.dll"
+        cache_probe = definition_root / "cache_probe.xml"
+        cache_probe.write_text(
+            '<ApiMonitor><Module Name="probe.dll"><Api Name="SecondThing" /></Module></ApiMonitor>',
+            encoding="utf-8",
+        )
+        assert api_monitor_search_apis("SecondThing", install_root=str(app_root))["count"] == 1
         parsed = api_monitor_parse_api_definition(str(definition), install_root=str(app_root))
         assert parsed["apis"][0]["module"] == "sample.dll"
         assert parsed["apis"][0]["params"] == [{"Type": "HANDLE", "Name": "hThing"}]

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 from xml.etree import ElementTree
@@ -10,6 +11,71 @@ from xml.etree import ElementTree
 from .capture_format import _file_time, _limit
 from .gui_runtime import _app_root
 from .runtime import API_NAME, MODULE_NAME, mcp
+
+
+def _api_definition_signature(api_root: Path) -> tuple[tuple[str, int, int], ...]:
+    signature: list[tuple[str, int, int]] = []
+    for path in sorted(api_root.rglob("*.xml")):
+        try:
+            stat = path.stat()
+        except OSError:
+            continue
+        signature.append((str(path), stat.st_size, stat.st_mtime_ns))
+    return tuple(signature)
+
+
+@lru_cache(maxsize=2)
+def _cached_api_definition_index(
+    api_root_name: str, signature: tuple[tuple[str, int, int], ...]
+) -> tuple[dict[str, Any], ...]:
+    api_root = Path(api_root_name)
+    index: list[dict[str, Any]] = []
+    for path_name, size, _modified_ns in signature:
+        path = Path(path_name)
+        try:
+            text = path.read_text(encoding="utf-8-sig", errors="replace")
+            relative = str(path.relative_to(api_root))
+            module_match = MODULE_NAME.search(text)
+            module = module_match.group(1) if module_match else path.stem
+        except (OSError, ValueError):
+            continue
+        api_names = tuple(match.group(1) for match in API_NAME.finditer(text))
+        item: dict[str, Any] = {
+            "definition": str(path),
+            "relative_path": relative,
+            "module": module,
+            "size": size,
+            "modified_utc": _file_time(path),
+            "api_names": api_names,
+        }
+        try:
+            root = ElementTree.fromstring(text)
+        except ElementTree.ParseError as exc:
+            item.update({"valid": False, "error": str(exc), "api_count": 0, "variable_count": 0})
+        else:
+            item.update(
+                {
+                    "valid": True,
+                    "api_count": sum(
+                        1
+                        for node in root.iter()
+                        if isinstance(node.tag, str)
+                        and node.tag.rsplit("}", 1)[-1].casefold() == "api"
+                    ),
+                    "variable_count": sum(
+                        1
+                        for node in root.iter()
+                        if isinstance(node.tag, str)
+                        and node.tag.rsplit("}", 1)[-1].casefold() == "variable"
+                    ),
+                }
+            )
+        index.append(item)
+    return tuple(index)
+
+
+def _api_definition_index(api_root: Path) -> tuple[dict[str, Any], ...]:
+    return _cached_api_definition_index(str(api_root), _api_definition_signature(api_root))
 
 
 @mcp.tool()
@@ -29,22 +95,16 @@ def api_monitor_search_apis(
     needle = query.casefold()
     results: list[dict[str, str]] = []
     seen: set[tuple[str, str]] = set()
-    for xml_path in sorted(api_root.rglob("*.xml")):
-        try:
-            text = xml_path.read_text(encoding="utf-8-sig", errors="replace")
-        except OSError:
-            continue
-        module_match = MODULE_NAME.search(text)
-        module = module_match.group(1) if module_match else xml_path.stem
-        for match in API_NAME.finditer(text):
-            name = match.group(1)
+    for item in _api_definition_index(api_root):
+        module = str(item["module"])
+        for name in item["api_names"]:
             if needle not in name.casefold() and needle not in module.casefold():
                 continue
             key = (module, name)
             if key in seen:
                 continue
             seen.add(key)
-            results.append({"name": name, "module": module, "definition": str(xml_path)})
+            results.append({"name": name, "module": module, "definition": item["definition"]})
             if len(results) >= limit:
                 return {"query": query, "results": results, "count": len(results), "truncated": True}
     return {"query": query, "results": results, "count": len(results), "truncated": False}
@@ -67,46 +127,14 @@ def api_monitor_list_api_files(
 
     wanted = query.casefold()
     results: list[dict[str, Any]] = []
-    for xml_path in sorted(api_root.rglob("*.xml")):
-        try:
-            text = xml_path.read_text(encoding="utf-8-sig", errors="replace")
-            relative = str(xml_path.relative_to(api_root))
-            module_match = MODULE_NAME.search(text)
-            module = module_match.group(1) if module_match else xml_path.stem
-        except (OSError, ValueError):
+    for indexed in _api_definition_index(api_root):
+        if wanted and wanted not in indexed["relative_path"].casefold() and wanted not in indexed["module"].casefold():
             continue
-        if wanted and wanted not in relative.casefold() and wanted not in module.casefold():
-            continue
-        item: dict[str, Any] = {
-            "definition": str(xml_path),
-            "relative_path": relative,
-            "module": module,
-            "size": xml_path.stat().st_size,
-            "modified_utc": _file_time(xml_path),
+        item = {
+            key: value
+            for key, value in indexed.items()
+            if key != "api_names" and (include_counts or key not in {"valid", "error", "api_count", "variable_count"})
         }
-        if include_counts:
-            try:
-                root = ElementTree.fromstring(text)
-            except ElementTree.ParseError as exc:
-                item.update({"valid": False, "error": str(exc), "api_count": 0, "variable_count": 0})
-            else:
-                item.update(
-                    {
-                        "valid": True,
-                        "api_count": sum(
-                            1
-                            for node in root.iter()
-                            if isinstance(node.tag, str)
-                            and node.tag.rsplit("}", 1)[-1].casefold() == "api"
-                        ),
-                        "variable_count": sum(
-                            1
-                            for node in root.iter()
-                            if isinstance(node.tag, str)
-                            and node.tag.rsplit("}", 1)[-1].casefold() == "variable"
-                        ),
-                    }
-                )
         results.append(item)
         if len(results) >= limit:
             return {
