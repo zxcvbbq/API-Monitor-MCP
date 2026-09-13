@@ -38,6 +38,7 @@ from .capture_tools import (
     capture_decode_all_calls,
     capture_decode_call,
     capture_decode_calls,
+    capture_decode_process_data,
     capture_export_all_calls,
     capture_export_calls,
     capture_export_decoded_calls,
@@ -270,6 +271,8 @@ def _self_test() -> None:
         assert raw_call["size"] == 160
         assert raw_call["process_pid"] == 1234
         assert base64.b64decode(raw_call["record_bytes"]["base64"]) == bytes(record)
+        decoded_data = capture_decode_process_data(str(path), 0, offset=160, length=5)
+        assert decoded_data["decoding"]["strings"][0]["text"] == "hello"
         call_context = call_records["records"][0]["context"]
         assert call_context["thread_id"] == 0x1234
         assert call_context["thread_number"] == 7

@@ -1695,6 +1695,30 @@ def capture_read_process_data(
     }
 
 
+@mcp.tool()
+def capture_decode_process_data(
+    file_path: str,
+    process_index: int,
+    offset: int = 0,
+    length: int = 4096,
+    max_items: int = 64,
+) -> dict[str, Any]:
+    """Decode a bounded arbitrary process-data slice with heuristic candidates."""
+    if max_items < 1 or max_items > 4096:
+        raise ValueError("max_items must be between 1 and 4096")
+    result = capture_read_process_data(
+        file_path,
+        process_index=process_index,
+        offset=offset,
+        length=length,
+    )
+    raw = _payload_bytes(result)
+    return {
+        **result,
+        "decoding": _capture_payload_candidates(raw, max_items),
+    }
+
+
 def _capture_decode_record(
     record: dict[str, Any], max_data_bytes: int, max_items: int
 ) -> tuple[dict[str, Any], dict[str, Any]]:
