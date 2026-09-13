@@ -1038,7 +1038,7 @@ def api_monitor_gui_lists(
         for process in api_monitor_status().get("processes", [])
         if isinstance(process.get("pid"), int)
     }
-    native_windows = {window["handle"]: window for window in _find_api_monitor_windows()}
+    native_windows = {window["handle"]: window for window in _find_api_monitor_windows(pids)}
     result: list[dict[str, Any]] = []
     for window in Desktop(backend="uia").windows():
         if window.process_id() not in pids:

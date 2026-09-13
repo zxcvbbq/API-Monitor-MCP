@@ -104,7 +104,7 @@ def _ui_window(handle: Any, user32: Any) -> dict[str, Any]:
     }
 
 
-def _find_api_monitor_windows() -> list[dict[str, Any]]:
+def _find_api_monitor_windows(api_monitor_pids: set[int] | None = None) -> list[dict[str, Any]]:
     if sys.platform != "win32":
         return []
     from ctypes import wintypes
@@ -124,13 +124,14 @@ def _find_api_monitor_windows() -> list[dict[str, Any]]:
     ]
     enum_children.restype = ctypes.c_bool
 
-    from . import gui_tools
+    if api_monitor_pids is None:
+        from . import gui_tools
 
-    api_monitor_pids = {
-        int(process["pid"])
-        for process in gui_tools.api_monitor_status().get("processes", [])
-        if isinstance(process.get("pid"), int)
-    }
+        api_monitor_pids = {
+            int(process["pid"])
+            for process in gui_tools.api_monitor_status().get("processes", [])
+            if isinstance(process.get("pid"), int)
+        }
     windows: list[dict[str, Any]] = []
     child_callback_type = ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)
     window_callback_type = ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)
