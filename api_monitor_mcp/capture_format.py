@@ -14,6 +14,7 @@ import zlib
 from array import array
 from collections.abc import Sequence
 from datetime import datetime, timedelta, timezone
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -61,7 +62,7 @@ def _zip_offset(data: bytes) -> int | None:
     return min(offsets) if offsets else None
 
 
-def _capture_zip_offset(path: Path) -> int | None:
+def _scan_capture_zip_offset(path: Path) -> int | None:
     tail = b""
     consumed = 0
     with path.open("rb") as handle:
@@ -73,6 +74,20 @@ def _capture_zip_offset(path: Path) -> int | None:
             consumed += len(chunk)
             tail = window[-3:]
     return None
+
+
+@lru_cache(maxsize=128)
+def _cached_capture_zip_offset(
+    path_name: str, size: int, modified_ns: int, changed_ns: int
+) -> int | None:
+    return _scan_capture_zip_offset(Path(path_name))
+
+
+def _capture_zip_offset(path: Path) -> int | None:
+    stat = path.stat()
+    return _cached_capture_zip_offset(
+        str(path), stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns
+    )
 
 
 class _CaptureZipReader(io.RawIOBase):
