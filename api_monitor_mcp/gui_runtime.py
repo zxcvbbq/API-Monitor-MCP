@@ -61,6 +61,15 @@ def _app_executable(root: Path, architecture: str) -> Path:
     return executable
 
 
+def _background_startupinfo() -> subprocess.STARTUPINFO | None:
+    if sys.platform != "win32":
+        return None
+    startupinfo = subprocess.STARTUPINFO()
+    startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+    startupinfo.wShowWindow = 4  # SW_SHOWNOACTIVATE
+    return startupinfo
+
+
 def _window_text(user32: Any, handle: Any) -> str:
     length = user32.GetWindowTextLengthW(handle)
     buffer = ctypes.create_unicode_buffer(length + 1)

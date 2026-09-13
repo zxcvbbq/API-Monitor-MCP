@@ -23,6 +23,7 @@ from .gui_runtime import (
     _api_monitor_window_by_handle,
     _app_executable,
     _app_root,
+    _background_startupinfo,
     _capture_window_png,
     _detect_executable_architecture,
     _detect_process_architecture,
@@ -1865,6 +1866,7 @@ def api_monitor_launch(
         [str(executable)],
         cwd=str(root),
         creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
+        startupinfo=_background_startupinfo(),
     )
     bitness = "32-bit" if architecture == "x86" else "64-bit"
     window = _wait_for_api_monitor_window(
@@ -1957,7 +1959,7 @@ def api_monitor_open_capture(
             "window": opened_window,
         }
     except (LookupError, OSError, RuntimeError, TimeoutError):
-        os.startfile(str(path))
+        os.startfile(str(path), "open", None, None, 4)  # SW_SHOWNOACTIVATE
         opened_window = _wait_for_api_monitor_window(
             lambda window: path.name.casefold() in window["title"].casefold()
             or path.stem.casefold() in window["title"].casefold(),
