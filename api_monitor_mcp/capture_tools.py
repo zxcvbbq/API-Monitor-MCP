@@ -1071,37 +1071,55 @@ def capture_call_records(
             calls = archive.read(calls_name)
         except KeyError as exc:
             raise FileNotFoundError(f"Capture call entry not found: {calls_name}") from exc
-        try:
-            data = archive.read(data_name)
-        except KeyError:
-            data = b""
+        data_info = archive.getinfo(data_name) if data_name in entries else None
+        data = archive.read(data_info) if include_data and data_info is not None else b""
+        data_entry_bytes = data_info.file_size if data_info is not None else 0
         definitions = archive.read("definitions") if resolve_definitions and "definitions" in entries else None
         process_pid = _capture_process_pid(archive, entries, process_index, pointer_size)
-    if len(calls) % pointer_size:
-        raise ValueError(
-            f"process calls entry is not an array of {pointer_size * 8}-bit offsets"
-        )
-    count = len(calls) // pointer_size
-    if start_index > count:
-        raise IndexError(f"start_index {start_index} is outside {count} saved calls")
-    records = _capture_call_records(
-        calls,
-        data,
-        limit,
-        include_data,
-        max_data_bytes,
-        start_index=start_index,
-        definitions=definitions,
-        pointer_size=pointer_size,
-    )
+        if len(calls) % pointer_size:
+            raise ValueError(
+                f"process calls entry is not an array of {pointer_size * 8}-bit offsets"
+            )
+        count = len(calls) // pointer_size
+        if start_index > count:
+            raise IndexError(f"start_index {start_index} is outside {count} saved calls")
+        if data_info is not None and not include_data:
+            with archive.open(data_info) as data_stream:
+                def read_data(offset: int, size: int) -> bytes:
+                    data_stream.seek(offset)
+                    return data_stream.read(size)
+
+                records = _capture_call_records(
+                    calls,
+                    data,
+                    limit,
+                    include_data,
+                    max_data_bytes,
+                    start_index=start_index,
+                    definitions=definitions,
+                    pointer_size=pointer_size,
+                    data_size=data_entry_bytes,
+                    data_reader=read_data,
+                )
+        else:
+            records = _capture_call_records(
+                calls,
+                data,
+                limit,
+                include_data,
+                max_data_bytes,
+                start_index=start_index,
+                definitions=definitions,
+                pointer_size=pointer_size,
+            )
     return {
         "file": str(path),
         "process_index": process_index,
         "process_pid": process_pid,
         "calls_entry": calls_name,
-        "data_entry": data_name if data else None,
+        "data_entry": data_name if data_entry_bytes else None,
         "call_entry_bytes": len(calls),
-        "data_entry_bytes": len(data),
+        "data_entry_bytes": data_entry_bytes,
         "definitions_available": definitions is not None,
         "architecture": "x86" if pointer_size == 4 else "x64",
         "count": count,

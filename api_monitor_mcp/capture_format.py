@@ -817,12 +817,19 @@ def _capture_call_records(
     start_index: int = 0,
     definitions: bytes | None = None,
     pointer_size: int = 8,
+    data_size: int | None = None,
+    data_reader: Any = None,
 ) -> list[dict[str, Any]]:
     layout = _capture_layout(pointer_size)
     if len(calls) % pointer_size:
         raise ValueError(f"process calls entry is not an array of {pointer_size * 8}-bit offsets")
     offset_format = layout["offset_format"]
     minimum = layout["minimum_record_size"]
+    data_length = len(data) if data_size is None else data_size
+
+    def read_data(offset: int, size: int) -> bytes:
+        return data_reader(offset, size) if data_reader is not None else data[offset : offset + size]
+
     records: list[dict[str, Any]] = []
     count = len(calls) // pointer_size
     end_index = min(count, start_index + limit)
@@ -831,22 +838,35 @@ def _capture_call_records(
     )
     for local_index, offset in enumerate(window[: end_index - start_index]):
         index = start_index + local_index
-        if offset > len(data) - minimum:
+        if offset > data_length - minimum:
             records.append({"index": index, "offset": offset, "valid": False, "error": "record offset is outside process data"})
             continue
-        record_size = _capture_record_size(window, local_index, data, pointer_size)
+        next_offset = window[local_index + 1] if local_index + 1 < len(window) else data_length
+        size_from_offsets = next_offset - offset
+        if minimum <= size_from_offsets <= layout["full_record_size"]:
+            record_size = size_from_offsets
+        else:
+            header = read_data(offset + 2, 1)
+            if not header:
+                records.append({"index": index, "offset": offset, "valid": False, "error": "record header is outside process data"})
+                continue
+            record_size = layout["full_record_size"] if header[0] else minimum
+        record_bytes = read_data(offset, record_size)
         record = {
             "index": index,
             "offset": offset,
             "size": record_size,
-            "valid": offset + record_size <= len(data),
-            "flags": data[offset + 2],
-            "header_hex": data[offset : offset + min(record_size, 112)].hex(" "),
+            "valid": len(record_bytes) >= record_size,
+            "flags": record_bytes[2] if len(record_bytes) > 2 else None,
+            "header_hex": record_bytes[: min(record_size, 112)].hex(" "),
             "data_refs": [],
         }
-        definition_offset = struct.unpack_from(
-            offset_format, data, offset + (40 if pointer_size == 8 else 36)
-        )[0]
+        definition_field_offset = 40 if pointer_size == 8 else 36
+        if len(record_bytes) < definition_field_offset + pointer_size:
+            record["error"] = "record is truncated before definition offset"
+            records.append(record)
+            continue
+        definition_offset = struct.unpack_from(offset_format, record_bytes, definition_field_offset)[0]
         record["definition_offset"] = definition_offset
         if definitions is not None:
             record["definition"] = _capture_definition_info(
@@ -856,23 +876,28 @@ def _capture_call_records(
             record["error"] = "record extends beyond process data"
             records.append(record)
             continue
-        record["context"] = _capture_call_context(data, offset, pointer_size)
+        record["context"] = _capture_call_context(record_bytes, 0, pointer_size)
         for slot, pointer_offset, length_offset in layout["pointer_refs"]:
             if pointer_offset + pointer_size > record_size or length_offset + 4 > record_size:
                 continue
             relative = struct.unpack_from(
-                offset_format, data, offset + pointer_offset
+                offset_format, record_bytes, pointer_offset
             )[0]
-            length = struct.unpack_from("<I", data, offset + length_offset)[0]
+            length = struct.unpack_from("<I", record_bytes, length_offset)[0]
             reference: dict[str, Any] = {"slot": slot, "offset": relative, "length": length}
             end = relative + length
-            if end > len(data):
+            if end > data_length:
                 reference["valid"] = False
                 reference["error"] = "data reference is outside process data"
             else:
                 reference["valid"] = True
                 if include_data and length <= max_data_bytes:
-                    reference["payload"] = _read_payload(data[relative:end])
+                    payload = read_data(relative, length)
+                    if len(payload) < length:
+                        reference["valid"] = False
+                        reference["error"] = "data reference could not be fully read"
+                    else:
+                        reference["payload"] = _read_payload(payload)
                 elif include_data:
                     reference["truncated"] = True
             record["data_refs"].append(reference)

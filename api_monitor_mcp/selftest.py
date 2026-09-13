@@ -261,6 +261,10 @@ def _self_test() -> None:
         assert call_records["process_pid"] == 1234
         assert call_records["start_index"] == 0
         assert call_records["records"][0]["data_refs"][0]["payload"]["text"] == "hello"
+        lazy_call_records = capture_call_records(str(path), include_data=False)
+        assert lazy_call_records["data_entry_bytes"] == len(record) + 9
+        assert lazy_call_records["records"][0]["valid"]
+        assert "payload" not in lazy_call_records["records"][0]["data_refs"][0]
         raw_call = capture_read_call_bytes(str(path), 0, 0)
         assert raw_call["size"] == 160
         assert raw_call["process_pid"] == 1234
