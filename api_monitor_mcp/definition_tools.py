@@ -12,6 +12,7 @@ from .gui_runtime import _app_root
 from .runtime import API_NAME, MODULE_NAME, mcp
 
 
+@mcp.tool()
 def api_monitor_search_apis(
     query: str,
     limit: int = 100,

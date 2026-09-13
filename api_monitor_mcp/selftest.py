@@ -76,6 +76,7 @@ from .capture_values import (
 )
 from .definition_tools import (
     api_monitor_parse_api_definition,
+    api_monitor_search_apis,
     api_monitor_search_variables,
 )
 from .gui_runtime import (
@@ -892,6 +893,9 @@ def _self_test() -> None:
             '<Return Type="BOOL" /></Api></Module></ApiMonitor>',
             encoding="utf-8",
         )
+        searched_apis = api_monitor_search_apis("OpenThing", install_root=str(app_root))
+        assert searched_apis["count"] == 1
+        assert searched_apis["results"][0]["module"] == "sample.dll"
         parsed = api_monitor_parse_api_definition(str(definition), install_root=str(app_root))
         assert parsed["apis"][0]["module"] == "sample.dll"
         assert parsed["apis"][0]["params"] == [{"Type": "HANDLE", "Name": "hThing"}]
