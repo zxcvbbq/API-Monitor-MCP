@@ -47,6 +47,7 @@ from .capture_tools import (
     capture_extract_entry,
     capture_filter_calls,
     capture_find_bytes,
+    capture_info,
     capture_list_apis,
     capture_list_definitions,
     capture_list_directory,
@@ -202,6 +203,7 @@ def _self_test() -> None:
         second_path.write_bytes(b"\r\nAPI Monitor 64-bit Capture\r\nRBAPM" + second_payload.getvalue())
 
         info = _capture_info(path)
+        assert capture_info(str(path))["architecture"] == "x64"
         assert _capture_zip_offset(path) == info["zip_offset"]
         assert info["extension"] == ".apmx64"
         assert info["format_marker"] == "RBAPM"

@@ -49,6 +49,7 @@ from .capture_values import (
 from .runtime import CAPTURE_SUFFIXES, PROCESS_INFO, mcp
 
 
+@mcp.tool()
 def capture_info(file_path: str) -> dict[str, Any]:
     """Inspect an APMX file header and list its ZIP container entries."""
     return _capture_info(_capture_path(file_path))
