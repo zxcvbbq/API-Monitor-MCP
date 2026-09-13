@@ -819,15 +819,22 @@ def _capture_call_records(
     pointer_size: int = 8,
 ) -> list[dict[str, Any]]:
     layout = _capture_layout(pointer_size)
-    offsets = _capture_offsets(calls, pointer_size)
+    if len(calls) % pointer_size:
+        raise ValueError(f"process calls entry is not an array of {pointer_size * 8}-bit offsets")
     offset_format = layout["offset_format"]
     minimum = layout["minimum_record_size"]
     records: list[dict[str, Any]] = []
-    for index, offset in enumerate(offsets[start_index : start_index + limit], start=start_index):
+    count = len(calls) // pointer_size
+    end_index = min(count, start_index + limit)
+    window = _capture_offsets(
+        calls[start_index * pointer_size : (end_index + 1) * pointer_size], pointer_size
+    )
+    for local_index, offset in enumerate(window[: end_index - start_index]):
+        index = start_index + local_index
         if offset > len(data) - minimum:
             records.append({"index": index, "offset": offset, "valid": False, "error": "record offset is outside process data"})
             continue
-        record_size = _capture_record_size(offsets, index, data, pointer_size)
+        record_size = _capture_record_size(window, local_index, data, pointer_size)
         record = {
             "index": index,
             "offset": offset,
@@ -877,13 +884,16 @@ def _capture_call_stats(
     calls: bytes, data: bytes, max_records: int, pointer_size: int = 8
 ) -> dict[str, Any]:
     layout = _capture_layout(pointer_size)
-    offsets = _capture_offsets(calls, pointer_size)
+    if len(calls) % pointer_size:
+        raise ValueError(f"process calls entry is not an array of {pointer_size * 8}-bit offsets")
     offset_format = layout["offset_format"]
-    scanned = min(len(offsets), max_records)
+    count = len(calls) // pointer_size
+    scanned = min(count, max_records)
+    offsets = _capture_offsets(calls[: (scanned + 1) * pointer_size], pointer_size)
     stats: dict[str, Any] = {
-        "count": len(offsets),
+        "count": count,
         "scanned_records": scanned,
-        "truncated": scanned < len(offsets),
+        "truncated": scanned < count,
         "valid_records": 0,
         "invalid_records": 0,
         "record_sizes": {

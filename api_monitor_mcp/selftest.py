@@ -15,6 +15,7 @@ from tempfile import TemporaryDirectory
 
 from . import gui_tools
 from .capture_format import (
+    _capture_call_records,
     _capture_call_stats,
     _capture_info,
     _capture_output_path,
@@ -283,6 +284,18 @@ def _self_test() -> None:
         bounded_stats = _capture_call_stats(bounded_calls, bytes(bounded_records), 1000)
         assert bounded_stats["context"]["error_count"] == 257
         assert bounded_stats["context"]["error_codes_truncated"]
+        limited_stats = _capture_call_stats(bounded_calls, bytes(bounded_records), 1)
+        assert limited_stats["count"] == 257
+        assert limited_stats["scanned_records"] == 1 and limited_stats["truncated"]
+        partial_records = _capture_call_records(
+            bounded_calls,
+            bytes(bounded_records),
+            1,
+            False,
+            0,
+            start_index=256,
+        )
+        assert partial_records[0]["index"] == 256 and partial_records[0]["size"] == 160
         filtered = capture_filter_calls(
             str(path),
             thread_id=0x1234,
