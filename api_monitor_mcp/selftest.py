@@ -87,6 +87,7 @@ from .gui_runtime import (
     _named_gui_rows,
 )
 from .gui_tools import (
+    api_monitor_environment,
     api_monitor_process_architecture,
     api_monitor_wait_for_new_traffic,
 )
@@ -895,6 +896,9 @@ def _self_test() -> None:
             '<Return Type="BOOL" /></Api></Module></ApiMonitor>',
             encoding="utf-8",
         )
+        environment = api_monitor_environment(install_root=str(app_root))
+        assert environment["installed"]
+        assert environment["api_directory"]["xml_count"] == 2
         searched_apis = api_monitor_search_apis("OpenThing", install_root=str(app_root))
         assert searched_apis["count"] == 1
         assert searched_apis["results"][0]["module"] == "sample.dll"

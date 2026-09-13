@@ -89,6 +89,51 @@ def api_monitor_status() -> dict[str, Any]:
 
 
 @mcp.tool()
+def api_monitor_environment(install_root: str | None = None) -> dict[str, Any]:
+    """Report the installed Rohitab API Monitor paths without starting the GUI."""
+    supported = sys.platform == "win32"
+    try:
+        root = _app_root(install_root)
+    except FileNotFoundError as exc:
+        return {
+            "supported": supported,
+            "installed": False,
+            "root": None,
+            "error": str(exc),
+            "executables": {},
+            "api_directory": {"path": None, "exists": False, "xml_count": 0},
+        }
+
+    executables: dict[str, dict[str, Any]] = {}
+    for architecture in ("x86", "x64"):
+        path = root / f"apimonitor-{architecture}.exe"
+        item: dict[str, Any] = {"path": str(path), "exists": path.is_file()}
+        if item["exists"]:
+            try:
+                item["size"] = path.stat().st_size
+            except OSError as exc:
+                item["error"] = str(exc)
+        executables[architecture] = item
+
+    api_directory = root / "API"
+    try:
+        xml_count = sum(1 for path in api_directory.rglob("*.xml")) if api_directory.is_dir() else 0
+    except OSError:
+        xml_count = 0
+    return {
+        "supported": supported,
+        "installed": True,
+        "root": str(root),
+        "executables": executables,
+        "api_directory": {
+            "path": str(api_directory),
+            "exists": api_directory.is_dir(),
+            "xml_count": xml_count,
+        },
+    }
+
+
+@mcp.tool()
 def api_monitor_overview(
     window_title: str = "",
     window_handle: int | None = None,
