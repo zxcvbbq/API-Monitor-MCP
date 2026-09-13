@@ -128,7 +128,11 @@ def api_monitor_list_api_files(
     wanted = query.casefold()
     results: list[dict[str, Any]] = []
     for indexed in _api_definition_index(api_root):
-        if wanted and wanted not in indexed["relative_path"].casefold() and wanted not in indexed["module"].casefold():
+        if wanted and not (
+            wanted in indexed["relative_path"].casefold()
+            or wanted in indexed["module"].casefold()
+            or any(wanted in name.casefold() for name in indexed["api_names"])
+        ):
             continue
         item = {
             key: value

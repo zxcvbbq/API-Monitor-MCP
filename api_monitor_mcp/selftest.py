@@ -907,6 +907,9 @@ def _self_test() -> None:
         )
         assert listed_api_files["count"] == 1
         assert listed_api_files["files"][0]["api_count"] == 1
+        assert api_monitor_list_api_files(
+            query="OpenThing", install_root=str(app_root)
+        )["count"] == 1
         searched_apis = api_monitor_search_apis("OpenThing", install_root=str(app_root))
         assert searched_apis["count"] == 1
         assert searched_apis["results"][0]["module"] == "sample.dll"
