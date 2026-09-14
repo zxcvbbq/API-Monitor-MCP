@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import base64
+import csv
 import ctypes
+import io
+import json
 import os
 import re
 import subprocess
@@ -1365,6 +1368,79 @@ def api_monitor_traffic(
                 }
             )
     return {"supported": lists.get("supported", False), "panes": traffic}
+
+
+@mcp.tool()
+def api_monitor_export_traffic(
+    output_path: str,
+    window_title: str = "",
+    limit: int = 500,
+    output_format: str = "json",
+    window_handle: int | None = None,
+    overwrite: bool = False,
+) -> dict[str, Any]:
+    """Export a bounded live API Monitor traffic snapshot as JSON or CSV."""
+    output_format = output_format.casefold()
+    if output_format not in {"json", "csv"}:
+        raise ValueError("output_format must be json or csv")
+    path = Path(output_path).expanduser()
+    if not path.parent.is_dir():
+        raise FileNotFoundError(f"Output directory not found: {path.parent}")
+    existed = path.exists()
+    if existed and not overwrite:
+        raise FileExistsError(f"Output already exists: {path}")
+
+    traffic = api_monitor_traffic(window_title, limit, window_handle)
+    panes = traffic.get("panes", [])
+    records = [
+        {
+            **(record if isinstance(record, dict) else {"value": record}),
+            "pane_title": pane.get("pane_title"),
+            "list_handle": pane.get("list_handle"),
+            "row_index": row_index,
+        }
+        for pane in panes
+        for row_index, record in enumerate(pane.get("records", []))
+    ]
+    if output_format == "json":
+        payload = (json.dumps(traffic, indent=2, ensure_ascii=False) + "\n").encode("utf-8")
+    else:
+        base_fields = ["pane_title", "list_handle", "row_index"]
+        fields = set().union(*(record.keys() for record in records)) if records else set()
+        fieldnames = base_fields + sorted(fields.difference(base_fields))
+        stream = io.StringIO(newline="")
+        writer = csv.DictWriter(stream, fieldnames=fieldnames)
+        writer.writeheader()
+        for record in records:
+            writer.writerow(
+                {
+                    key: json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+                    if isinstance(value, (dict, list))
+                    else value
+                    for key, value in record.items()
+                }
+            )
+        payload = stream.getvalue().encode("utf-8")
+    try:
+        if overwrite:
+            path.write_bytes(payload)
+        else:
+            with path.open("xb") as stream:
+                stream.write(payload)
+    except Exception:
+        if not existed and path.is_file():
+            path.unlink()
+        raise
+    return {
+        "exported": True,
+        "output": str(path),
+        "format": output_format,
+        "supported": traffic.get("supported", False),
+        "panes": len(panes),
+        "rows": len(records),
+        "truncated": any(pane.get("truncated", False) for pane in panes),
+        "size": len(payload),
+    }
 
 
 @mcp.tool()

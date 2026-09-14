@@ -107,6 +107,7 @@ from .gui_runtime import (
 from .gui_tools import (
     api_monitor_call_stack,
     api_monitor_environment,
+    api_monitor_export_traffic,
     api_monitor_gui_tree_check_query,
     api_monitor_process_architecture,
     api_monitor_process_details,
@@ -1178,6 +1179,32 @@ def _self_test() -> None:
         assert waited_new["ready"]
         assert waited_new["current_calls"] == 4
         assert waited_new["new_calls"] == 2
+        original_traffic = gui_tools.api_monitor_traffic
+        gui_tools.api_monitor_traffic = lambda *_args, **_kwargs: {
+            "supported": True,
+            "panes": [
+                {
+                    "list_handle": 7,
+                    "pane_title": "API Calls",
+                    "records": [{"API": "CreateFileW", "Arguments": {"path": "x"}}],
+                    "truncated": False,
+                }
+            ],
+        }
+        try:
+            live_json = Path(directory) / "live-traffic.json"
+            live_csv = Path(directory) / "live-traffic.csv"
+            live_json_export = api_monitor_export_traffic(str(live_json))
+            live_csv_export = api_monitor_export_traffic(
+                str(live_csv), output_format="csv"
+            )
+        finally:
+            gui_tools.api_monitor_traffic = original_traffic
+        assert live_json_export["rows"] == 1
+        assert json.loads(live_json.read_text())["panes"][0]["records"][0]["API"] == "CreateFileW"
+        assert live_csv_export["format"] == "csv"
+        assert "pane_title,list_handle,row_index" in live_csv.read_text().splitlines()[0]
+        assert "CreateFileW" in live_csv.read_text()
         original_tree = gui_tools.api_monitor_gui_tree
         original_check = gui_tools._set_tree_item_check
         checked_items = []
