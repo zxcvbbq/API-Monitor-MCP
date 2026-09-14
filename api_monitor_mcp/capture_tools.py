@@ -6845,6 +6845,92 @@ def capture_extract_entry(
 
 
 @mcp.tool()
+def capture_extract_entries(
+    file_path: str,
+    output_directory: str,
+    limit: int = 2000,
+    max_entry_bytes: int = 64 * 1024 * 1024,
+    max_total_bytes: int = 256 * 1024 * 1024,
+    overwrite: bool = False,
+) -> dict[str, Any]:
+    """Safely extract bounded non-directory entries from an APMX capture."""
+    limit = _limit(limit, "limit", 20_000)
+    max_entry_bytes = _limit(max_entry_bytes, "max_entry_bytes", 256 * 1024 * 1024)
+    max_total_bytes = _limit(max_total_bytes, "max_total_bytes", 1 * 1024 * 1024 * 1024)
+    path = _capture_path(file_path)
+    destination = Path(output_directory).expanduser()
+    if not destination.is_dir():
+        raise NotADirectoryError(f"Output directory not found: {destination}")
+    destination = destination.resolve()
+    extracted: list[dict[str, Any]] = []
+    errors: list[dict[str, str]] = []
+    total_size = 0
+    archive, _, _ = _open_capture_zip(path)
+    with archive:
+        files = [info for info in archive.infolist() if not info.is_dir()]
+        truncated = len(files) > limit
+        for info in files[:limit]:
+            if info.file_size > max_entry_bytes:
+                errors.append(
+                    {
+                        "entry": info.filename,
+                        "error": f"entry exceeds max_entry_bytes: {info.file_size}",
+                    }
+                )
+                continue
+            if total_size + info.file_size > max_total_bytes:
+                truncated = True
+                break
+            target = (destination / info.filename).resolve()
+            try:
+                target.relative_to(destination)
+            except ValueError:
+                errors.append(
+                    {"entry": info.filename, "error": "entry path escapes output directory"}
+                )
+                continue
+            if target == path:
+                errors.append(
+                    {"entry": info.filename, "error": "entry output matches capture file"}
+                )
+                continue
+            if target.is_symlink():
+                errors.append({"entry": info.filename, "error": "entry output is a symlink"})
+                continue
+            if target.exists() and not overwrite:
+                errors.append({"entry": info.filename, "error": "output already exists"})
+                continue
+            try:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                written, digest = _copy_capture_slice(
+                    archive, info, 0, info.file_size, target, overwrite
+                )
+            except (OSError, RuntimeError, ValueError) as exc:
+                errors.append({"entry": info.filename, "error": str(exc)})
+                continue
+            extracted.append(
+                {
+                    "entry": info.filename,
+                    "output": str(target),
+                    "size": written,
+                    "sha256": digest,
+                }
+            )
+            total_size += written
+    return {
+        "extracted": True,
+        "file": str(path),
+        "output_directory": str(destination),
+        "entry_count": len(files),
+        "count": len(extracted),
+        "total_size": total_size,
+        "files": extracted,
+        "errors": errors,
+        "truncated": truncated,
+    }
+
+
+@mcp.tool()
 def capture_monitoring_log(
     file_path: str,
     query: str = "",

@@ -79,6 +79,7 @@ from .capture_tools import (
     capture_export_types,
     capture_export_xml_entry,
     capture_extract_call_payload,
+    capture_extract_entries,
     capture_extract_entry,
     capture_extract_process_data,
     capture_filter_calls,
@@ -1030,6 +1031,24 @@ def _self_test() -> None:
         exported = capture_extract_entry(str(path), "calls.bin", str(extracted))
         assert exported["size"] == len(b"CreateFileW\x00https://example.test\x00")
         assert extracted.read_bytes().startswith(b"CreateFileW")
+        extracted_directory = Path(directory) / "all-entries"
+        extracted_directory.mkdir()
+        extracted_all = capture_extract_entries(str(path), str(extracted_directory), limit=20)
+        expected_files = [entry for entry in _zip_entries(path) if not entry["is_dir"]]
+        assert extracted_all["count"] == len(expected_files)
+        assert extracted_all["errors"] == []
+        assert (extracted_directory / "metadata.txt").read_text() == "process=sample.exe\n"
+        unsafe_source = Path(directory) / "unsafe-source"
+        unsafe_source.mkdir()
+        unsafe_path = unsafe_source / "unsafe.apmx64"
+        with zipfile.ZipFile(unsafe_path, "w") as unsafe_archive:
+            unsafe_archive.writestr("../escape.txt", "must not extract")
+        unsafe_output = Path(directory) / "unsafe-out"
+        unsafe_output.mkdir()
+        unsafe_result = capture_extract_entries(str(unsafe_path), str(unsafe_output))
+        assert unsafe_result["count"] == 0
+        assert unsafe_result["errors"][0]["error"] == "entry path escapes output directory"
+        assert not (Path(directory) / "escape.txt").exists()
         found = capture_find_bytes(str(path), "43 72 65 61 74 65", 10)
         assert found["offsets"]
         assert not found["truncated"]
