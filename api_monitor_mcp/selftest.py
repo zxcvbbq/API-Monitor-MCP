@@ -43,6 +43,7 @@ from .capture_tools import (
     capture_decode_process_data,
     capture_error_summary,
     capture_export_all_calls,
+    capture_export_api_summary,
     capture_export_call_graph,
     capture_export_calls,
     capture_export_decoded_calls,
@@ -834,6 +835,17 @@ def _self_test() -> None:
         assert api_list["apis"][0]["count"] == 1
         assert api_list["apis"][0]["context"]["error_count"] == 1
         assert api_list["apis"][0]["context"]["duration_seconds"]["average"] == 0.125
+        api_json_path = Path(directory) / "apis.json"
+        api_export = capture_export_api_summary(str(path), str(api_json_path))
+        assert api_export["count"] == 1
+        assert json.loads(api_json_path.read_text())["apis"][0]["name"] == "CreateFileW"
+        api_csv_path = Path(directory) / "apis.csv"
+        api_csv_export = capture_export_api_summary(
+            str(path), str(api_csv_path), output_format="csv"
+        )
+        assert api_csv_export["format"] == "csv"
+        assert "process_indices" in api_csv_path.read_text().splitlines()[0]
+        assert "CreateFileW" in api_csv_path.read_text()
         error_summary = capture_error_summary(str(path))
         assert error_summary["error_count"] == 1
         assert error_summary["errors"][0]["hex"] == "0x00000005"

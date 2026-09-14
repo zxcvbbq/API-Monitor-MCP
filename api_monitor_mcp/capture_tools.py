@@ -3030,6 +3030,92 @@ def capture_list_apis(
 
 
 @mcp.tool()
+def capture_export_api_summary(
+    file_path: str,
+    output_path: str,
+    process_index: int | None = None,
+    pid: int | None = None,
+    limit: int = 1000,
+    max_records: int = 1_000_000,
+    output_format: str = "json",
+    overwrite: bool = False,
+) -> dict[str, Any]:
+    """Export API frequency summaries as JSON or CSV."""
+    if output_format not in {"json", "csv"}:
+        raise ValueError("output_format must be json or csv")
+    output = Path(output_path).expanduser()
+    if not output.parent.is_dir():
+        raise NotADirectoryError(f"Output directory not found: {output.parent}")
+    output = output.resolve()
+    if output.exists() and not overwrite:
+        raise FileExistsError(f"Output already exists: {output}")
+
+    result = capture_list_apis(
+        file_path,
+        process_index=process_index,
+        limit=limit,
+        max_records=max_records,
+        pid=pid,
+    )
+    if output_format == "json":
+        content = json.dumps(result, indent=2, ensure_ascii=False) + "\n"
+    else:
+        stream = io.StringIO(newline="")
+        writer = csv.writer(stream)
+        writer.writerow(
+            [
+                "offset",
+                "name",
+                "module",
+                "ordinal",
+                "count",
+                "process_indices",
+                "pids",
+                "first_record",
+                "last_record",
+                "context",
+            ]
+        )
+        for api in result["apis"]:
+            writer.writerow(
+                [
+                    api.get("offset", ""),
+                    api.get("name", ""),
+                    api.get("module", ""),
+                    api.get("ordinal", ""),
+                    api.get("count", ""),
+                    json.dumps(api.get("process_indices", []), ensure_ascii=False),
+                    json.dumps(api.get("pids", []), ensure_ascii=False),
+                    api.get("first_record", ""),
+                    api.get("last_record", ""),
+                    json.dumps(api.get("context", {}), ensure_ascii=False),
+                ]
+            )
+        content = stream.getvalue()
+    encoded = content.encode("utf-8")
+    digest = hashlib.sha256(encoded).hexdigest()
+    try:
+        mode = "wb" if overwrite else "xb"
+        with output.open(mode) as handle:
+            handle.write(encoded)
+    except Exception:
+        if output.exists() and not overwrite:
+            output.unlink()
+        raise
+    return {
+        "exported": True,
+        "file": result["file"],
+        "output": str(output),
+        "format": output_format,
+        "count": result["count"],
+        "scanned_records": result["scanned_records"],
+        "truncated": result["truncated"],
+        "size": len(encoded),
+        "sha256": digest,
+    }
+
+
+@mcp.tool()
 def capture_error_summary(
     file_path: str,
     process_index: int | None = None,
