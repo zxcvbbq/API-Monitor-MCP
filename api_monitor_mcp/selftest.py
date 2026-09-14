@@ -271,6 +271,13 @@ def _self_test() -> None:
         )
         assert log_csv_export["count"] == 1
         assert "C:\\sample.dll" in log_csv.read_text()
+        summary_csv = Path(directory) / "summary.csv"
+        summary_csv_export = capture_export_monitoring_log(
+            str(path), str(summary_csv), query="summary", output_format="csv"
+        )
+        assert summary_csv_export["count"] == 1
+        assert "calls" in summary_csv.read_text().splitlines()[0]
+        assert ",1,5%" in summary_csv.read_text()
         searched = capture_search_entries(str(path), "CreateFile", 10)
         assert searched["entries"][0]["entry"] == "calls.bin"
         assert not searched["truncated"]

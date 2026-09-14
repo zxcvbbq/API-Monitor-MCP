@@ -4311,7 +4311,9 @@ def capture_export_monitoring_log(
     else:
         stream = io.StringIO(newline="")
         writer = csv.writer(stream)
-        writer.writerow(["line", "type", "process", "address", "module", "pid", "attach"])
+        writer.writerow(
+            ["line", "type", "process", "address", "module", "pid", "attach", "calls", "usage"]
+        )
         for event in result["events"]:
             writer.writerow(
                 [
@@ -4322,6 +4324,8 @@ def capture_export_monitoring_log(
                     event.get("module", ""),
                     event.get("pid", ""),
                     event.get("attach", ""),
+                    event.get("calls", ""),
+                    event.get("usage", ""),
                 ]
             )
         content = stream.getvalue()
