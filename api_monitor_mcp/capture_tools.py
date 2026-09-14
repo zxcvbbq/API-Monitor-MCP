@@ -6525,6 +6525,56 @@ def capture_read_call_bytes(
 
 
 @mcp.tool()
+def capture_export_call_bytes(
+    file_path: str,
+    process_index: int,
+    record_index: int,
+    output_path: str,
+    max_bytes: int = 16 * 1024 * 1024,
+    overwrite: bool = False,
+) -> dict[str, Any]:
+    """Export one complete saved call record as raw bytes."""
+    if process_index < 0 or record_index < 0:
+        raise ValueError("process_index and record_index must be non-negative")
+    max_bytes = _limit(max_bytes, "max_bytes", 16 * 1024 * 1024)
+    path = _capture_path(file_path)
+    output = Path(output_path).expanduser()
+    if not output.parent.is_dir():
+        raise NotADirectoryError(f"Output directory not found: {output.parent}")
+    output = output.resolve()
+    if output == path:
+        raise ValueError("output_path must differ from the capture file")
+    if output.exists() and not overwrite:
+        raise FileExistsError(f"Output already exists: {output}")
+    result = capture_read_call_bytes(
+        str(path),
+        process_index=process_index,
+        record_index=record_index,
+        max_bytes=max_bytes,
+    )
+    raw = base64.b64decode(result["record_bytes"]["base64"])
+    created = False
+    try:
+        with output.open("wb" if overwrite else "xb") as handle:
+            created = True
+            handle.write(raw)
+    except Exception:
+        if created and not overwrite and output.exists():
+            output.unlink()
+        raise
+    return {
+        "exported": True,
+        "file": str(path),
+        "process_index": process_index,
+        "process_pid": result.get("process_pid"),
+        "record_index": record_index,
+        "output": str(output),
+        "size": len(raw),
+        "sha256": hashlib.sha256(raw).hexdigest(),
+    }
+
+
+@mcp.tool()
 def capture_extract_entry(
     file_path: str,
     entry_name: str,

@@ -44,6 +44,7 @@ from .capture_tools import (
     capture_error_summary,
     capture_export_all_calls,
     capture_export_api_summary,
+    capture_export_call_bytes,
     capture_export_call_graph,
     capture_export_call_stats,
     capture_export_calls,
@@ -553,6 +554,12 @@ def _self_test() -> None:
         assert raw_call["size"] == 160
         assert raw_call["process_pid"] == 1234
         assert base64.b64decode(raw_call["record_bytes"]["base64"]) == bytes(record)
+        raw_call_path = Path(directory) / "call-record.bin"
+        raw_call_export = capture_export_call_bytes(
+            str(path), 0, 0, str(raw_call_path)
+        )
+        assert raw_call_export["size"] == raw_call["size"]
+        assert raw_call_path.read_bytes() == base64.b64decode(raw_call["record_bytes"]["base64"])
         decoded_data = capture_decode_process_data(str(path), 0, offset=160, length=5)
         assert decoded_data["decoding"]["strings"][0]["text"] == "hello"
         call_context = call_records["records"][0]["context"]
