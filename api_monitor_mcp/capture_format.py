@@ -534,22 +534,29 @@ def _capture_offsets(calls: bytes, pointer_size: int) -> array:
     return offsets
 
 
-def _capture_call_context(data: bytes, offset: int, pointer_size: int = 8) -> dict[str, Any]:
+def _capture_call_context(
+    data: bytes,
+    offset: int,
+    pointer_size: int = 8,
+    include_details: bool = True,
+) -> dict[str, Any]:
     if pointer_size == 8:
         module_base_offset, timestamp_offset, duration_offset, error_offset = 48, 72, 96, 84
     else:
         module_base_offset, timestamp_offset, duration_offset, error_offset = 40, 56, 80, 68
     context: dict[str, Any] = {
         "thread_id": struct.unpack_from("<I", data, offset + 16)[0],
-        "thread_number": struct.unpack_from("<I", data, offset + 20)[0],
-        "module_base": f"0x{int.from_bytes(data[offset + module_base_offset : offset + module_base_offset + pointer_size], 'little'):0{pointer_size * 2}x}",
         "error_code": struct.unpack_from("<I", data, offset + error_offset)[0],
     }
+    if include_details:
+        context["thread_number"] = struct.unpack_from("<I", data, offset + 20)[0]
+        context["module_base"] = f"0x{int.from_bytes(data[offset + module_base_offset : offset + module_base_offset + pointer_size], 'little'):0{pointer_size * 2}x}"
     timestamp = int.from_bytes(
         data[offset + timestamp_offset : offset + timestamp_offset + 8], "little"
     )
     context["timestamp_filetime"] = timestamp
-    context["timestamp_utc"] = _windows_filetime(timestamp)
+    if include_details:
+        context["timestamp_utc"] = _windows_filetime(timestamp)
     duration_valid = bool(data[offset])
     context["duration_valid"] = duration_valid
     if duration_valid:
@@ -819,6 +826,9 @@ def _capture_call_records(
     pointer_size: int = 8,
     data_size: int | None = None,
     data_reader: Any = None,
+    context_details: bool = True,
+    summary_only: bool = False,
+    definition_cache: dict[int, dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     layout = _capture_layout(pointer_size)
     if len(calls) % pointer_size:
@@ -831,7 +841,7 @@ def _capture_call_records(
         return data_reader(offset, size) if data_reader is not None else data[offset : offset + size]
 
     records: list[dict[str, Any]] = []
-    definition_cache: dict[int, dict[str, Any]] = {}
+    definition_cache = definition_cache if definition_cache is not None else {}
     count = len(calls) // pointer_size
     end_index = min(count, start_index + limit)
     window = _capture_offsets(
@@ -858,10 +868,15 @@ def _capture_call_records(
             "offset": offset,
             "size": record_size,
             "valid": len(record_bytes) >= record_size,
-            "flags": record_bytes[2] if len(record_bytes) > 2 else None,
-            "header_hex": record_bytes[: min(record_size, 112)].hex(" "),
-            "data_refs": [],
         }
+        if not summary_only:
+            record.update(
+                {
+                    "flags": record_bytes[2] if len(record_bytes) > 2 else None,
+                    "header_hex": record_bytes[: min(record_size, 112)].hex(" "),
+                    "data_refs": [],
+                }
+            )
         definition_field_offset = 40 if pointer_size == 8 else 36
         if len(record_bytes) < definition_field_offset + pointer_size:
             record["error"] = "record is truncated before definition offset"
@@ -881,7 +896,12 @@ def _capture_call_records(
             record["error"] = "record extends beyond process data"
             records.append(record)
             continue
-        record["context"] = _capture_call_context(record_bytes, 0, pointer_size)
+        record["context"] = _capture_call_context(
+            record_bytes, 0, pointer_size, include_details=context_details
+        )
+        if summary_only:
+            records.append(record)
+            continue
         for slot, pointer_offset, length_offset in layout["pointer_refs"]:
             if pointer_offset + pointer_size > record_size or length_offset + 4 > record_size:
                 continue
@@ -983,7 +1003,7 @@ def _capture_call_stats(
         flags = record[2]
         flag_key = f"0x{flags:02x}"
         stats["flags"][flag_key] = stats["flags"].get(flag_key, 0) + 1
-        context = _capture_call_context(record, 0, pointer_size)
+        context = _capture_call_context(record, 0, pointer_size, include_details=False)
         thread_ids.add(context["thread_id"])
         error_code = context["error_code"]
         if error_code:

@@ -307,6 +307,9 @@ def _capture_records_without_data(
     start_index: int = 0,
     definitions: bytes | None = None,
     pointer_size: int = 8,
+    context_details: bool = True,
+    summary_only: bool = False,
+    definition_cache: dict[int, dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     if data_info is None:
         return _capture_call_records(
@@ -318,6 +321,9 @@ def _capture_records_without_data(
             start_index=start_index,
             definitions=definitions,
             pointer_size=pointer_size,
+            context_details=context_details,
+            summary_only=summary_only,
+            definition_cache=definition_cache,
         )
     if data_info.file_size <= _SEARCH_DATA_MEMORY_LIMIT:
         return _capture_call_records(
@@ -330,6 +336,9 @@ def _capture_records_without_data(
             definitions=definitions,
             pointer_size=pointer_size,
             data_size=data_info.file_size,
+            context_details=context_details,
+            summary_only=summary_only,
+            definition_cache=definition_cache,
         )
     with archive.open(data_info) as data_stream:
         def read_data(offset: int, size: int) -> bytes:
@@ -347,6 +356,9 @@ def _capture_records_without_data(
             pointer_size=pointer_size,
             data_size=data_info.file_size,
             data_reader=read_data,
+            context_details=context_details,
+            summary_only=summary_only,
+            definition_cache=definition_cache,
         )
 
 
@@ -4594,6 +4606,7 @@ def capture_list_apis(
     pointer_size = 4 if path.suffix.lower() == ".apmx86" else 8
     archive, _, _ = _open_capture_zip(path)
     apis: dict[int, dict[str, Any]] = {}
+    definition_cache: dict[int, dict[str, Any]] = {}
     scanned = 0
     truncated = False
     with archive:
@@ -4637,6 +4650,9 @@ def capture_list_apis(
                 page_count,
                 definitions=definitions,
                 pointer_size=pointer_size,
+                context_details=False,
+                summary_only=True,
+                definition_cache=definition_cache,
             )
             for record in records:
                 scanned += 1
@@ -4644,9 +4660,9 @@ def capture_list_apis(
                 if not definition.get("valid"):
                     continue
                 offset = definition["offset"]
-                item = apis.setdefault(
-                    offset,
-                    {
+                item = apis.get(offset)
+                if item is None:
+                    item = {
                         "offset": offset,
                         "name": definition.get("name"),
                         "module": definition.get("module"),
@@ -4656,12 +4672,16 @@ def capture_list_apis(
                         "_pids": set(),
                         "first_record": record["index"],
                         "last_record": record["index"],
-                        "_thread_ids": set(),
-                        "_timestamps": [],
-                        "_durations": [],
-                        "_error_count": 0,
-                    },
-                )
+                    }
+                    item.update(
+                        {
+                            "_thread_ids": set(),
+                            "_timestamps": [],
+                            "_durations": [],
+                            "_error_count": 0,
+                        }
+                    )
+                    apis[offset] = item
                 item["count"] += 1
                 if index not in item["process_indices"]:
                     item["process_indices"].append(index)
@@ -4786,24 +4806,12 @@ def capture_export_api_summary(
     }
 
 
-@mcp.tool()
-def capture_behavior_summary(
-    file_path: str,
-    process_index: int | None = None,
-    pid: int | None = None,
-    limit: int = 1000,
-    max_records: int = 100_000,
+def _behavior_summary_from_api_result(
+    result: dict[str, Any],
+    process_index: int | None,
+    pid: int | None,
+    limit: int,
 ) -> dict[str, Any]:
-    """Summarize heuristic behavior signals from observed API names."""
-    limit = _limit(limit, "limit", 10_000)
-    max_records = _limit(max_records, "max_records", 1_000_000)
-    result = capture_list_apis(
-        file_path,
-        process_index=process_index,
-        limit=10_000,
-        max_records=max_records,
-        pid=pid,
-    )
     findings: list[dict[str, Any]] = []
     category_counts: dict[str, dict[str, Any]] = {}
     for api in result["apis"]:
@@ -4866,6 +4874,27 @@ def capture_behavior_summary(
         "scanned_records": result["scanned_records"],
         "truncated": result["truncated"] or len(findings) >= limit,
     }
+
+
+@mcp.tool()
+def capture_behavior_summary(
+    file_path: str,
+    process_index: int | None = None,
+    pid: int | None = None,
+    limit: int = 1000,
+    max_records: int = 100_000,
+) -> dict[str, Any]:
+    """Summarize heuristic behavior signals from observed API names."""
+    limit = _limit(limit, "limit", 10_000)
+    max_records = _limit(max_records, "max_records", 1_000_000)
+    result = capture_list_apis(
+        file_path,
+        process_index=process_index,
+        limit=10_000,
+        max_records=max_records,
+        pid=pid,
+    )
+    return _behavior_summary_from_api_result(result, process_index, pid, limit)
 
 
 @mcp.tool()
@@ -4967,11 +4996,18 @@ def capture_security_report(
     report = capture_overview(
         file_path,
         process_limit=process_limit,
-        api_limit=api_limit,
+        # Keep all resolved APIs available so behavior analysis does not rescan calls.
+        api_limit=10_000,
         max_records=max_records,
         include_log=include_log,
         log_limit=log_limit,
     )
+    api_report = report["apis"]
+    report["behavior"] = _behavior_summary_from_api_result(
+        api_report, None, None, api_limit
+    )
+    api_report["apis"] = api_report["apis"][:api_limit]
+    api_report["truncated"] = api_report["truncated"] or api_report["count"] > api_limit
     if deep_validation:
         report["validation"] = capture_validate(
             file_path, deep=True, max_records=max_records
@@ -4987,9 +5023,6 @@ def capture_security_report(
     )
     report["entropy"] = capture_entropy(
         file_path, max_total_bytes=max_indicator_bytes
-    )
-    report["behavior"] = capture_behavior_summary(
-        file_path, limit=api_limit, max_records=max_records
     )
     report["security"] = {
         "valid": report["validation"].get("valid", False),
@@ -5105,6 +5138,7 @@ def capture_error_summary(
     pointer_size = 4 if path.suffix.lower() == ".apmx86" else 8
     archive, _, _ = _open_capture_zip(path)
     errors: dict[int, dict[str, Any]] = {}
+    definition_cache: dict[int, dict[str, Any]] = {}
     scanned = 0
     truncated = False
     with archive:
@@ -5138,6 +5172,9 @@ def capture_error_summary(
                 page_count,
                 definitions=definitions,
                 pointer_size=pointer_size,
+                context_details=False,
+                summary_only=True,
+                definition_cache=definition_cache,
             )
             scanned += len(records)
             for record in records:
