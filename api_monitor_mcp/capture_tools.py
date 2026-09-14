@@ -1949,6 +1949,95 @@ def capture_list_types(
 
 
 @mcp.tool()
+def capture_export_types(
+    file_path: str,
+    output_path: str,
+    process_index: int | None = None,
+    query: str = "",
+    kind: int | None = None,
+    limit: int = 1000,
+    max_records: int = 1_000_000,
+    include_details: bool = False,
+    pid: int | None = None,
+    output_format: str = "json",
+    overwrite: bool = False,
+) -> dict[str, Any]:
+    """Export captured API type descriptors as JSON or CSV."""
+    if output_format not in {"json", "csv"}:
+        raise ValueError("output_format must be json or csv")
+    output = Path(output_path).expanduser()
+    if not output.parent.is_dir():
+        raise NotADirectoryError(f"Output directory not found: {output.parent}")
+    output = output.resolve()
+    if output.exists() and not overwrite:
+        raise FileExistsError(f"Output already exists: {output}")
+    result = capture_list_types(
+        file_path,
+        process_index=process_index,
+        query=query,
+        kind=kind,
+        limit=limit,
+        max_records=max_records,
+        include_details=include_details,
+        pid=pid,
+    )
+    if output_format == "json":
+        content = json.dumps(result, indent=2, ensure_ascii=False) + "\n"
+    else:
+        stream = io.StringIO(newline="")
+        writer = csv.writer(stream)
+        writer.writerow(
+            [
+                "offset",
+                "kind",
+                "size",
+                "flags",
+                "pointer_size",
+                "name",
+                "alias",
+                "usage_count",
+                "usage_truncated",
+                "uses",
+                "type",
+            ]
+        )
+        for item in result["types"]:
+            writer.writerow(
+                [
+                    item.get("offset", ""),
+                    item.get("kind", ""),
+                    item.get("size", ""),
+                    item.get("flags", ""),
+                    item.get("pointer_size", ""),
+                    item.get("name", ""),
+                    item.get("alias", ""),
+                    item.get("usage_count", ""),
+                    item.get("usage_truncated", ""),
+                    json.dumps(item.get("uses", []), ensure_ascii=False),
+                    json.dumps(item.get("type", {}), ensure_ascii=False),
+                ]
+            )
+        content = stream.getvalue()
+    encoded, digest = _write_text_export(output, content, overwrite)
+    return {
+        "exported": True,
+        "file": result["file"],
+        "output": str(output),
+        "format": output_format,
+        "process_index": process_index,
+        "pid": pid,
+        "query": query,
+        "kind": kind,
+        "count": result["count"],
+        "scanned_records": result["scanned_records"],
+        "resolved_definitions": result["resolved_definitions"],
+        "truncated": result["truncated"],
+        "size": len(encoded),
+        "sha256": digest,
+    }
+
+
+@mcp.tool()
 def capture_export_calls(
     file_path: str,
     output_path: str,

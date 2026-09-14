@@ -59,6 +59,7 @@ from .capture_tools import (
     capture_export_slowest_calls,
     capture_export_threads,
     capture_export_timeline,
+    capture_export_types,
     capture_extract_call_payload,
     capture_extract_entry,
     capture_extract_process_data,
@@ -1154,6 +1155,23 @@ def _self_test() -> None:
         }
         assert capture_list_types(str(x86_path), kind=11)["count"] == 1
         assert capture_list_types(str(x86_path), query="dwValue")["count"] == 1
+        types_json_path = Path(directory) / "types.json"
+        types_export = capture_export_types(
+            str(x86_path), str(types_json_path), query="dwValue", include_details=True
+        )
+        assert types_export["count"] == 1
+        assert "dwValue" in types_json_path.read_text()
+        types_csv_path = Path(directory) / "types.csv"
+        types_csv_export = capture_export_types(
+            str(x86_path),
+            str(types_csv_path),
+            query="dwValue",
+            include_details=True,
+            output_format="csv",
+        )
+        assert types_csv_export["format"] == "csv"
+        assert "offset,kind,size" in types_csv_path.read_text().splitlines()[0]
+        assert "dwValue" in types_csv_path.read_text()
         assert capture_list_apis(str(x86_path))["apis"][0]["module"] == "kernel32.dll"
         assert capture_list_apis(str(x86_path))["apis"][0]["pids"] == [4321]
         x86_deep_validation = capture_validate(str(x86_path), deep=True)
