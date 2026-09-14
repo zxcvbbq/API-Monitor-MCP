@@ -2363,6 +2363,154 @@ def capture_list_apis(
 
 
 @mcp.tool()
+def capture_error_summary(
+    file_path: str,
+    process_index: int | None = None,
+    pid: int | None = None,
+    limit: int = 1000,
+    max_records: int = 1_000_000,
+) -> dict[str, Any]:
+    """Aggregate nonzero saved call error codes and their affected APIs."""
+    if process_index is not None and process_index < 0:
+        raise ValueError("process_index must be non-negative")
+    if pid is not None and not 1 <= pid <= 0xFFFFFFFF:
+        raise ValueError("pid must be between 1 and 4294967295")
+    limit = _limit(limit, "limit", 10_000)
+    max_records = _limit(max_records, "max_records", 1_000_000)
+    path = _capture_path(file_path)
+    pointer_size = 4 if path.suffix.lower() == ".apmx86" else 8
+    archive, _, _ = _open_capture_zip(path)
+    errors: dict[int, dict[str, Any]] = {}
+    scanned = 0
+    truncated = False
+    with archive:
+        entries = {info.filename: info for info in archive.infolist()}
+        definitions = archive.read("definitions") if "definitions" in entries else None
+        process_indices = sorted(
+            int(match.group(1))
+            for name in entries
+            if (match := re.fullmatch(r"process/(\d+)/calls", name, re.IGNORECASE))
+            and (process_index is None or int(match.group(1)) == process_index)
+        )
+        for index in process_indices:
+            if scanned >= max_records:
+                truncated = True
+                break
+            calls = archive.read(f"process/{index}/calls")
+            if len(calls) % pointer_size:
+                raise ValueError(
+                    f"process/{index}/calls is not an array of {pointer_size * 8}-bit offsets"
+                )
+            process_pid = _capture_process_pid(archive, entries, index, pointer_size)
+            if pid is not None and process_pid != pid:
+                continue
+            record_count = len(calls) // pointer_size
+            page_count = min(record_count, max_records - scanned)
+            truncated |= page_count < record_count
+            records = _capture_records_without_data(
+                archive,
+                entries.get(f"process/{index}/data"),
+                calls,
+                page_count,
+                definitions=definitions,
+                pointer_size=pointer_size,
+            )
+            scanned += len(records)
+            for record in records:
+                context = record.get("context")
+                if not context:
+                    continue
+                error_code = int(context.get("error_code", 0))
+                if not error_code:
+                    continue
+                item = errors.setdefault(
+                    error_code,
+                    {
+                        "error_code": error_code,
+                        "hex": f"0x{error_code:08x}",
+                        "count": 0,
+                        "process_indices": [],
+                        "pids": set(),
+                        "thread_ids": set(),
+                        "apis": {},
+                        "first_record": {"process_index": index, "index": record["index"]},
+                        "last_record": {"process_index": index, "index": record["index"]},
+                        "_timestamps": [],
+                        "_durations": [],
+                    },
+                )
+                item["count"] += 1
+                if index not in item["process_indices"]:
+                    item["process_indices"].append(index)
+                if process_pid is not None:
+                    item["pids"].add(process_pid)
+                item["thread_ids"].add(int(context.get("thread_id", 0)))
+                definition = record.get("definition", {})
+                api_key = int(definition.get("offset", 0)) if definition else 0
+                api = item["apis"].setdefault(
+                    api_key,
+                    {
+                        "offset": api_key,
+                        "name": definition.get("name"),
+                        "module": definition.get("module"),
+                        "count": 0,
+                    },
+                )
+                api["count"] += 1
+                location = (index, record["index"])
+                if location < (
+                    item["first_record"]["process_index"],
+                    item["first_record"]["index"],
+                ):
+                    item["first_record"] = {"process_index": index, "index": record["index"]}
+                if location > (
+                    item["last_record"]["process_index"],
+                    item["last_record"]["index"],
+                ):
+                    item["last_record"] = {"process_index": index, "index": record["index"]}
+                timestamp = context.get("timestamp_filetime")
+                if timestamp:
+                    item["_timestamps"].append(timestamp)
+                duration = context.get("duration_seconds")
+                if context.get("duration_valid") and isinstance(duration, (int, float)) and math.isfinite(duration):
+                    item["_durations"].append(duration)
+            if scanned >= max_records:
+                break
+
+    returned: list[dict[str, Any]] = []
+    for item in errors.values():
+        timestamps = item.pop("_timestamps")
+        durations = item.pop("_durations")
+        item["pids"] = sorted(item["pids"])
+        item["thread_ids"] = sorted(item["thread_ids"])
+        item["apis"] = sorted(item["apis"].values(), key=lambda api: (-api["count"], api["name"] or ""))
+        item["context"] = {
+            "api_count": len(item["apis"]),
+            "thread_count": len(item["thread_ids"]),
+            "first_timestamp_utc": _windows_filetime(min(timestamps)) if timestamps else None,
+            "last_timestamp_utc": _windows_filetime(max(timestamps)) if timestamps else None,
+        }
+        if durations:
+            item["context"]["duration_seconds"] = {
+                "minimum": min(durations),
+                "maximum": max(durations),
+                "average": sum(durations) / len(durations),
+            }
+        returned.append(item)
+    returned.sort(key=lambda item: (-item["count"], item["error_code"]))
+    return {
+        "file": str(path),
+        "process_index": process_index,
+        "pid": pid,
+        "errors": returned[:limit],
+        "count": len(returned),
+        "error_count": sum(item["count"] for item in returned),
+        "scanned_records": scanned,
+        "truncated": truncated or len(returned) > limit,
+    }
+
+
+@mcp.tool()
 def capture_list_definitions(
     file_path: str,
     process_index: int | None = None,

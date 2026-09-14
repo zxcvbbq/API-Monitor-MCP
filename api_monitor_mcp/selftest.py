@@ -39,6 +39,7 @@ from .capture_tools import (
     capture_decode_call,
     capture_decode_calls,
     capture_decode_process_data,
+    capture_error_summary,
     capture_export_all_calls,
     capture_export_calls,
     capture_export_decoded_calls,
@@ -668,6 +669,11 @@ def _self_test() -> None:
         assert api_list["apis"][0]["count"] == 1
         assert api_list["apis"][0]["context"]["error_count"] == 1
         assert api_list["apis"][0]["context"]["duration_seconds"]["average"] == 0.125
+        error_summary = capture_error_summary(str(path))
+        assert error_summary["error_count"] == 1
+        assert error_summary["errors"][0]["hex"] == "0x00000005"
+        assert error_summary["errors"][0]["apis"][0]["name"] == "CreateFileW"
+        assert capture_error_summary(str(path), pid=1234)["count"] == 1
         definitions_list = capture_list_definitions(str(path), include_details=True)
         assert definitions_list["count"] == 1
         assert definitions_list["definitions"][0]["name"] == "CreateFileW"
