@@ -798,6 +798,114 @@ def capture_compare_calls(
 
 
 @mcp.tool()
+def capture_export_compare_calls(
+    first_file: str,
+    second_file: str,
+    output_path: str,
+    process_index: int = 0,
+    limit: int = 200,
+    max_records: int = 10_000,
+    max_data_bytes: int = 4096,
+    resolve_definitions: bool = False,
+    match_mode: str = "index",
+    compare_context: bool = False,
+    output_format: str = "json",
+    overwrite: bool = False,
+) -> dict[str, Any]:
+    """Export one-process call differences as JSON or CSV."""
+    if output_format not in {"json", "csv"}:
+        raise ValueError("output_format must be json or csv")
+    output = Path(output_path).expanduser()
+    if not output.parent.is_dir():
+        raise NotADirectoryError(f"Output directory not found: {output.parent}")
+    output = output.resolve()
+    if output.exists() and not overwrite:
+        raise FileExistsError(f"Output already exists: {output}")
+    result = capture_compare_calls(
+        first_file,
+        second_file,
+        process_index=process_index,
+        limit=limit,
+        max_records=max_records,
+        max_data_bytes=max_data_bytes,
+        resolve_definitions=resolve_definitions,
+        match_mode=match_mode,
+        compare_context=compare_context,
+    )
+    if output_format == "json":
+        content = json.dumps(result, indent=2, ensure_ascii=False) + "\n"
+    else:
+        stream = io.StringIO(newline="")
+        writer = csv.writer(stream)
+        writer.writerow(
+            [
+                "kind",
+                "index",
+                "first_index",
+                "second_index",
+                "first_api",
+                "first_module",
+                "second_api",
+                "second_module",
+                "first_thread_id",
+                "second_thread_id",
+                "first_error_code",
+                "second_error_code",
+                "first",
+                "second",
+            ]
+        )
+        rows = [("added", item, {}, item) for item in result["added"]]
+        rows.extend(("removed", item, item, {}) for item in result["removed"])
+        rows.extend(
+            ("changed", item, item.get("first", {}), item.get("second", {}))
+            for item in result["changed"]
+        )
+        for kind, item, first, second in rows:
+            first_definition = first.get("definition", {})
+            second_definition = second.get("definition", {})
+            first_context = first.get("context", {})
+            second_context = second.get("context", {})
+            first_index = item.get("first_index", first.get("index", ""))
+            second_index = item.get("second_index", second.get("index", ""))
+            writer.writerow(
+                [
+                    kind,
+                    item.get("index", second.get("index", first.get("index", ""))),
+                    first_index if kind == "changed" else "",
+                    second_index if kind == "changed" else "",
+                    first_definition.get("name", ""),
+                    first_definition.get("module", ""),
+                    second_definition.get("name", ""),
+                    second_definition.get("module", ""),
+                    first_context.get("thread_id", ""),
+                    second_context.get("thread_id", ""),
+                    first_context.get("error_code", ""),
+                    second_context.get("error_code", ""),
+                    json.dumps(first, ensure_ascii=False) if first else "",
+                    json.dumps(second, ensure_ascii=False) if second else "",
+                ]
+            )
+        content = stream.getvalue()
+    encoded, digest = _write_text_export(output, content, overwrite)
+    return {
+        "exported": True,
+        "first": result["first"],
+        "second": result["second"],
+        "output": str(output),
+        "format": output_format,
+        "process_index": process_index,
+        "match_mode": match_mode,
+        "compare_context": compare_context,
+        "counts": result["counts"],
+        "same": result["same"],
+        "truncated": result["truncated"],
+        "size": len(encoded),
+        "sha256": digest,
+    }
+
+
+@mcp.tool()
 def capture_compare_all_calls(
     first_file: str,
     second_file: str,

@@ -48,6 +48,7 @@ from .capture_tools import (
     capture_export_call_stats,
     capture_export_calls,
     capture_export_compare_apis,
+    capture_export_compare_calls,
     capture_export_decoded_calls,
     capture_export_definitions,
     capture_export_error_summary,
@@ -981,6 +982,22 @@ def _self_test() -> None:
         assert call_comparison["process_pids"] == {"first": 1234, "second": None}
         assert call_comparison["counts"]["removed"] == 1
         assert call_comparison["counts"]["changed"] == 0
+        call_compare_json_path = Path(directory) / "call-compare.json"
+        call_compare_export = capture_export_compare_calls(
+            str(path), str(path), str(call_compare_json_path), resolve_definitions=True
+        )
+        assert call_compare_export["same"]
+        assert json.loads(call_compare_json_path.read_text())["counts"]["changed"] == 0
+        call_compare_csv_path = Path(directory) / "call-compare.csv"
+        call_compare_csv_export = capture_export_compare_calls(
+            str(path),
+            str(path),
+            str(call_compare_csv_path),
+            resolve_definitions=True,
+            output_format="csv",
+        )
+        assert call_compare_csv_export["format"] == "csv"
+        assert call_compare_csv_path.read_text().startswith("kind,index,first_index")
         context_comparison = capture_compare_calls(
             str(path), str(path), compare_context=True, resolve_definitions=True
         )
