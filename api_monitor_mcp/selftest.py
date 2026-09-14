@@ -56,6 +56,7 @@ from .capture_tools import (
     capture_list_directory,
     capture_list_modules,
     capture_list_processes,
+    capture_list_threads,
     capture_list_types,
     capture_monitoring_log,
     capture_overview,
@@ -648,6 +649,10 @@ def _self_test() -> None:
         assert modules["modules"][0]["name"] == "sample.exe"
         assert modules["modules"][0]["pids"] == [1234]
         assert capture_list_modules(str(path), pid=1234)["count"] == 1
+        threads = capture_list_threads(str(path))
+        assert threads["count"] == 1
+        assert threads["threads"][0]["thread_id"] == 0x1234
+        assert threads["threads"][0]["error_count"] == 1
         call_stats = capture_call_stats(str(path), process_index=0)
         assert call_stats["processes"][0]["record_sizes"]["160"] == 1
         assert call_stats["totals"]["referenced_data_bytes"] == 9
