@@ -78,6 +78,7 @@ from .capture_tools import (
     capture_export_threads,
     capture_export_timeline,
     capture_export_types,
+    capture_export_validate,
     capture_export_xml_entry,
     capture_extract_call_payload,
     capture_extract_entries,
@@ -323,6 +324,18 @@ def _self_test() -> None:
         invalid_prefix.write_bytes(b"not-an-apmx" + path.read_bytes()[info["zip_offset"] :])
         assert not capture_validate(str(invalid_prefix))["valid"]
         invalid_prefix.unlink()
+        validation_json_path = Path(directory) / "validation.json"
+        validation_export = capture_export_validate(
+            str(path), str(validation_json_path), deep=True
+        )
+        assert validation_export["valid"]
+        assert json.loads(validation_json_path.read_text())["structural_valid"]
+        validation_csv_path = Path(directory) / "validation.csv"
+        validation_csv_export = capture_export_validate(
+            str(path), str(validation_csv_path), deep=True, output_format="csv"
+        )
+        assert validation_csv_export["format"] == "csv"
+        assert validation_csv_path.read_text().startswith("section,key,value")
         assert info["entries"][0]["name"] == "metadata.txt"
         strings = _capture_strings(path, "CreateFile", 10, 4)
         assert strings and "CreateFileW" in strings[0]["text"]
