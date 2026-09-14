@@ -971,6 +971,96 @@ def capture_compare_all_calls(
 
 
 @mcp.tool()
+def capture_export_compare_all_calls(
+    first_file: str,
+    second_file: str,
+    output_path: str,
+    limit: int = 200,
+    max_records: int = 10_000,
+    max_data_bytes: int = 4096,
+    resolve_definitions: bool = False,
+    match_mode: str = "index",
+    compare_context: bool = False,
+    output_format: str = "json",
+    overwrite: bool = False,
+) -> dict[str, Any]:
+    """Export all-process call differences as JSON or CSV."""
+    if output_format not in {"json", "csv"}:
+        raise ValueError("output_format must be json or csv")
+    output = Path(output_path).expanduser()
+    if not output.parent.is_dir():
+        raise NotADirectoryError(f"Output directory not found: {output.parent}")
+    output = output.resolve()
+    if output.exists() and not overwrite:
+        raise FileExistsError(f"Output already exists: {output}")
+    result = capture_compare_all_calls(
+        first_file,
+        second_file,
+        limit=limit,
+        max_records=max_records,
+        max_data_bytes=max_data_bytes,
+        resolve_definitions=resolve_definitions,
+        match_mode=match_mode,
+        compare_context=compare_context,
+    )
+    if output_format == "json":
+        content = json.dumps(result, indent=2, ensure_ascii=False) + "\n"
+    else:
+        stream = io.StringIO(newline="")
+        writer = csv.writer(stream)
+        writer.writerow(
+            [
+                "process_index",
+                "first_pid",
+                "second_pid",
+                "first_count",
+                "second_count",
+                "added",
+                "removed",
+                "changed",
+                "same",
+                "truncated",
+                "comparison",
+            ]
+        )
+        for comparison in result["comparisons"]:
+            counts = comparison.get("counts", {})
+            pids = comparison.get("process_pids", {})
+            writer.writerow(
+                [
+                    comparison.get("process_index", ""),
+                    pids.get("first", ""),
+                    pids.get("second", ""),
+                    counts.get("first", ""),
+                    counts.get("second", ""),
+                    counts.get("added", ""),
+                    counts.get("removed", ""),
+                    counts.get("changed", ""),
+                    comparison.get("same", ""),
+                    comparison.get("truncated", ""),
+                    json.dumps(comparison, ensure_ascii=False),
+                ]
+            )
+        content = stream.getvalue()
+    encoded, digest = _write_text_export(output, content, overwrite)
+    return {
+        "exported": True,
+        "first": result["first"],
+        "second": result["second"],
+        "output": str(output),
+        "format": output_format,
+        "match_mode": match_mode,
+        "compare_context": compare_context,
+        "process_indices": result["process_indices"],
+        "counts": result["counts"],
+        "same": result["same"],
+        "truncated": result["truncated"],
+        "size": len(encoded),
+        "sha256": digest,
+    }
+
+
+@mcp.tool()
 def capture_compare_apis(
     first_file: str,
     second_file: str,

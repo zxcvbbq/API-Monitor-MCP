@@ -47,6 +47,7 @@ from .capture_tools import (
     capture_export_call_graph,
     capture_export_call_stats,
     capture_export_calls,
+    capture_export_compare_all_calls,
     capture_export_compare_apis,
     capture_export_compare_calls,
     capture_export_decoded_calls,
@@ -1015,6 +1016,18 @@ def _self_test() -> None:
         assert all_call_comparison["process_indices"] == [0]
         assert all_call_comparison["process_pids"]["0"] == {"first": 1234, "second": 1234}
         assert all_call_comparison["same"]
+        all_compare_json_path = Path(directory) / "all-compare.json"
+        all_compare_export = capture_export_compare_all_calls(
+            str(path), str(path), str(all_compare_json_path)
+        )
+        assert all_compare_export["same"]
+        assert json.loads(all_compare_json_path.read_text())["process_indices"] == [0]
+        all_compare_csv_path = Path(directory) / "all-compare.csv"
+        all_compare_csv_export = capture_export_compare_all_calls(
+            str(path), str(path), str(all_compare_csv_path), output_format="csv"
+        )
+        assert all_compare_csv_export["format"] == "csv"
+        assert all_compare_csv_path.read_text().startswith("process_index,first_pid")
         api_compare_json_path = Path(directory) / "api-compare.json"
         api_compare_export = capture_export_compare_apis(
             str(path), str(path), str(api_compare_json_path)
