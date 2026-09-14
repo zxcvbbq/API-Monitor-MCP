@@ -1044,6 +1044,10 @@ def _self_test() -> None:
         assert environment["api_directory"]["xml_count"] == 2
         exact_limit = api_monitor_list_api_files(install_root=str(app_root), limit=2)
         assert exact_limit["count"] == 2 and not exact_limit["truncated"]
+        lazy_limit = api_monitor_list_api_files(
+            install_root=str(app_root), limit=1, include_counts=False
+        )
+        assert lazy_limit["count"] == 1 and lazy_limit["truncated"]
         listed_api_files = api_monitor_list_api_files(
             query="sample.xml", install_root=str(app_root)
         )

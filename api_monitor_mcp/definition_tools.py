@@ -190,6 +190,43 @@ def api_monitor_list_api_files(
 
     wanted = query.casefold()
     results: list[dict[str, Any]] = []
+    if not wanted:
+        for path in sorted(api_root.rglob("*.xml")):
+            try:
+                stat = path.stat()
+                text = path.read_text(encoding="utf-8-sig", errors="replace")
+                relative = str(path.relative_to(api_root))
+                module_match = MODULE_NAME.search(text)
+                indexed = {
+                    "definition": str(path),
+                    "relative_path": relative,
+                    "module": module_match.group(1) if module_match else path.stem,
+                    "size": stat.st_size,
+                    "modified_utc": _file_time(path),
+                }
+            except (OSError, ValueError):
+                continue
+            item = dict(indexed)
+            if include_counts:
+                item.update(_api_definition_counts(indexed))
+            results.append(item)
+            if len(results) > limit:
+                return {
+                    "query": query,
+                    "api_directory": str(api_root),
+                    "files": results[:limit],
+                    "count": limit,
+                    "truncated": True,
+                    "counts_included": include_counts,
+                }
+        return {
+            "query": query,
+            "api_directory": str(api_root),
+            "files": results,
+            "count": len(results),
+            "truncated": False,
+            "counts_included": include_counts,
+        }
     for indexed in _api_definition_index(api_root):
         if wanted and not (
             wanted in indexed["relative_path"].casefold()
