@@ -4326,6 +4326,111 @@ def capture_slowest_calls(
 
 
 @mcp.tool()
+def capture_export_slowest_calls(
+    file_path: str,
+    output_path: str,
+    process_index: int | None = None,
+    pid: int | None = None,
+    thread_id: int | None = None,
+    api_name: str | None = None,
+    api_module: str | None = None,
+    min_duration_seconds: float = 0.0,
+    limit: int = 100,
+    max_records: int = 100_000,
+    include_data: bool = False,
+    max_data_bytes: int = 4096,
+    resolve_definitions: bool = True,
+    output_format: str = "json",
+    overwrite: bool = False,
+) -> dict[str, Any]:
+    """Export duration-ranked saved calls as JSON or CSV."""
+    if output_format not in {"json", "csv"}:
+        raise ValueError("output_format must be json or csv")
+    output = Path(output_path).expanduser()
+    if not output.parent.is_dir():
+        raise NotADirectoryError(f"Output directory not found: {output.parent}")
+    output = output.resolve()
+    if output.exists() and not overwrite:
+        raise FileExistsError(f"Output already exists: {output}")
+
+    result = capture_slowest_calls(
+        file_path,
+        process_index=process_index,
+        pid=pid,
+        thread_id=thread_id,
+        api_name=api_name,
+        api_module=api_module,
+        min_duration_seconds=min_duration_seconds,
+        limit=limit,
+        max_records=max_records,
+        include_data=include_data,
+        max_data_bytes=max_data_bytes,
+        resolve_definitions=resolve_definitions,
+    )
+    if output_format == "json":
+        content = json.dumps(result, indent=2, ensure_ascii=False) + "\n"
+    else:
+        stream = io.StringIO(newline="")
+        writer = csv.writer(stream)
+        writer.writerow(
+            [
+                "process_index",
+                "pid",
+                "record_index",
+                "api_name",
+                "api_module",
+                "thread_id",
+                "timestamp_utc",
+                "duration_seconds",
+                "error_code",
+                "data_refs",
+                "record_json",
+            ]
+        )
+        for item in result["calls"]:
+            record = item.get("record", {})
+            definition = record.get("definition", {})
+            context = record.get("context", {})
+            writer.writerow(
+                [
+                    item.get("process_index", ""),
+                    item.get("pid", ""),
+                    record.get("index", ""),
+                    definition.get("name", ""),
+                    definition.get("module", ""),
+                    context.get("thread_id", ""),
+                    context.get("timestamp_utc", ""),
+                    context.get("duration_seconds", ""),
+                    context.get("error_code", ""),
+                    json.dumps(record.get("data_refs", []), ensure_ascii=False),
+                    json.dumps(record, ensure_ascii=False),
+                ]
+            )
+        content = stream.getvalue()
+    encoded = content.encode("utf-8")
+    digest = hashlib.sha256(encoded).hexdigest()
+    try:
+        mode = "wb" if overwrite else "xb"
+        with output.open(mode) as handle:
+            handle.write(encoded)
+    except Exception:
+        if output.exists() and not overwrite:
+            output.unlink()
+        raise
+    return {
+        "exported": True,
+        "file": result["file"],
+        "output": str(output),
+        "format": output_format,
+        "count": result["count"],
+        "measured_count": result["measured_count"],
+        "truncated": result["truncated"],
+        "size": len(encoded),
+        "sha256": digest,
+    }
+
+
+@mcp.tool()
 def capture_call_timeline(
     file_path: str,
     process_index: int | None = None,

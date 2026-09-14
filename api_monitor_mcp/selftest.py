@@ -49,6 +49,7 @@ from .capture_tools import (
     capture_export_definitions,
     capture_export_monitoring_log,
     capture_export_search_calls,
+    capture_export_slowest_calls,
     capture_export_timeline,
     capture_extract_call_payload,
     capture_extract_entry,
@@ -442,6 +443,17 @@ def _self_test() -> None:
         slowest = capture_slowest_calls(str(path))
         assert slowest["count"] == 1
         assert slowest["calls"][0]["record"]["context"]["duration_seconds"] == 0.125
+        slowest_json_path = Path(directory) / "slowest.json"
+        slowest_export = capture_export_slowest_calls(str(path), str(slowest_json_path))
+        assert slowest_export["count"] == 1
+        assert json.loads(slowest_json_path.read_text())["calls"][0]["record"]["index"] == 0
+        slowest_csv_path = Path(directory) / "slowest.csv"
+        slowest_csv_export = capture_export_slowest_calls(
+            str(path), str(slowest_csv_path), output_format="csv"
+        )
+        assert slowest_csv_export["format"] == "csv"
+        assert "duration_seconds" in slowest_csv_path.read_text().splitlines()[0]
+        assert "CreateFileW" in slowest_csv_path.read_text()
         api_filtered = capture_filter_calls(
             str(path),
             api_name="CreateFileW",
