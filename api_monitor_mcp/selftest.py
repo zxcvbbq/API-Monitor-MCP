@@ -1107,22 +1107,28 @@ def _self_test() -> None:
         assert unsafe_result["count"] == 0
         assert unsafe_result["errors"][0]["error"] == "entry path escapes output directory"
         assert not (Path(directory) / "escape.txt").exists()
-        found = capture_find_bytes(str(path), "43 72 65 61 74 65", 10)
+        found = capture_find_bytes(
+            str(path), "43 72 65 61 74 65", 10, context_bytes=2
+        )
         assert found["offsets"]
+        assert found["matches"][0]["offset"] == found["offsets"][0]
+        assert found["matches"][0]["context_end"] > found["offsets"][0]
         assert not found["truncated"]
         entry_found = capture_find_bytes(
-            str(path), "43 72 65 61 74 65", entry_name="calls.bin"
+            str(path), "43 72 65 61 74 65", entry_name="calls.bin", context_bytes=2
         )
         assert entry_found["offsets"] == [0]
+        assert entry_found["matches"][0]["context_end"] == 10
         byte_search_json_path = Path(directory) / "bytes.json"
         byte_search_export = capture_export_find_bytes(
             str(path),
             str(byte_search_json_path),
             "43 72 65 61 74 65",
             entry_name="calls.bin",
+            context_bytes=2,
         )
         assert byte_search_export["count"] == 1
-        assert json.loads(byte_search_json_path.read_text())["offsets"] == [0]
+        assert json.loads(byte_search_json_path.read_text())["matches"][0]["ascii"] == "CreateFile"
         byte_search_csv_path = Path(directory) / "bytes.csv"
         byte_search_csv_export = capture_export_find_bytes(
             str(path),
@@ -1130,10 +1136,12 @@ def _self_test() -> None:
             "43 72 65 61 74 65",
             entry_name="calls.bin",
             output_format="csv",
+            context_bytes=2,
         )
         assert byte_search_csv_export["format"] == "csv"
         assert byte_search_csv_path.read_text().startswith("file,entry,pattern_hex")
         assert ",calls.bin," in byte_search_csv_path.read_text()
+        assert "context_ascii" in byte_search_csv_path.read_text().splitlines()[0]
         processes = capture_list_processes(str(path), 10)
         assert processes["processes"][0]["executables"] == ["C:\\sample.exe"]
         assert processes["processes"][0]["metadata"]["pid"] == 1234

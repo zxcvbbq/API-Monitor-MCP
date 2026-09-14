@@ -67,6 +67,42 @@ def _write_text_export(
     return encoded_bytes, digest
 
 
+def _byte_contexts(
+    path: Path,
+    entry_name: str | None,
+    offsets: list[int],
+    pattern_length: int,
+    context_bytes: int,
+) -> list[dict[str, Any]]:
+    if not context_bytes:
+        return []
+
+    def read_context(reader: Any, offset: int) -> dict[str, Any]:
+        start = max(0, offset - context_bytes)
+        reader.seek(start)
+        data = reader.read(pattern_length + context_bytes * 2)
+        return {
+            "offset": offset,
+            "context_start": start,
+            "context_end": start + len(data),
+            "hex": data.hex(" "),
+            "ascii": "".join(chr(value) if 32 <= value < 127 else "." for value in data),
+        }
+
+    if entry_name is None:
+        with path.open("rb") as handle:
+            return [read_context(handle, offset) for offset in offsets]
+
+    archive, _, _ = _open_capture_zip(path)
+    with archive:
+        try:
+            info = archive.getinfo(entry_name)
+        except KeyError as exc:
+            raise FileNotFoundError(f"ZIP entry not found: {entry_name}") from exc
+        with archive.open(info) as member:
+            return [read_context(member, offset) for offset in offsets]
+
+
 def _capture_records_without_data(
     archive: zipfile.ZipFile,
     data_info: zipfile.ZipInfo | None,
@@ -7877,13 +7913,16 @@ def capture_find_bytes(
     start_offset: int = 0,
     entry_name: str | None = None,
     max_bytes: int = 256 * 1024 * 1024,
+    context_bytes: int = 0,
 ) -> dict[str, Any]:
-    """Find a hexadecimal byte pattern in the raw file or a decompressed entry."""
+    """Find bytes in a capture, optionally returning bounded match context."""
     if not pattern_hex.strip():
         raise ValueError("pattern_hex must not be empty")
     limit = _limit(limit, "limit", 10_000)
     if start_offset < 0:
         raise ValueError("start_offset must be non-negative")
+    if not 0 <= context_bytes <= 4096:
+        raise ValueError("context_bytes must be between 0 and 4096")
     try:
         pattern = bytes.fromhex(pattern_hex)
     except ValueError as exc:
@@ -7912,6 +7951,8 @@ def capture_find_bytes(
                     "pattern_hex": pattern.hex(" "),
                     "start_offset": start_offset,
                     "offsets": [],
+                    "matches": [],
+                    "context_bytes": context_bytes,
                     "count": 0,
                     "truncated": False,
                 }
@@ -7950,6 +7991,10 @@ def capture_find_bytes(
             "pattern_hex": pattern.hex(" "),
             "start_offset": start_offset,
             "offsets": offsets,
+            "matches": _byte_contexts(
+                path, entry_name, offsets, len(pattern), context_bytes
+            ),
+            "context_bytes": context_bytes,
             "count": len(offsets),
             "truncated": truncated,
         }
@@ -7960,6 +8005,8 @@ def capture_find_bytes(
                 "entry": None,
                 "pattern_hex": pattern.hex(" "),
                 "offsets": [],
+                "matches": [],
+                "context_bytes": context_bytes,
                 "count": 0,
             }
         with mmap.mmap(handle.fileno(), 0, access=mmap.ACCESS_READ) as data:
@@ -7976,6 +8023,8 @@ def capture_find_bytes(
         "pattern_hex": pattern.hex(" "),
         "start_offset": start_offset,
         "offsets": offsets,
+        "matches": _byte_contexts(path, None, offsets, len(pattern), context_bytes),
+        "context_bytes": context_bytes,
         "count": len(offsets),
         "truncated": truncated,
     }
@@ -7992,6 +8041,7 @@ def capture_export_find_bytes(
     max_bytes: int = 256 * 1024 * 1024,
     output_format: str = "json",
     overwrite: bool = False,
+    context_bytes: int = 0,
 ) -> dict[str, Any]:
     """Export hexadecimal byte-search results as JSON or CSV."""
     if output_format not in {"json", "csv"}:
@@ -8009,21 +8059,41 @@ def capture_export_find_bytes(
         start_offset=start_offset,
         entry_name=entry_name,
         max_bytes=max_bytes,
+        context_bytes=context_bytes,
     )
     if output_format == "json":
         content = json.dumps(result, indent=2, ensure_ascii=False) + "\n"
     else:
         stream = io.StringIO(newline="")
         writer = csv.writer(stream)
-        writer.writerow(["file", "entry", "pattern_hex", "start_offset", "offset"])
-        for offset in result["offsets"]:
+        writer.writerow(
+            [
+                "file",
+                "entry",
+                "pattern_hex",
+                "start_offset",
+                "offset",
+                "context_start",
+                "context_end",
+                "context_hex",
+                "context_ascii",
+            ]
+        )
+        matches = result["matches"] or [
+            {"offset": offset} for offset in result["offsets"]
+        ]
+        for match in matches:
             writer.writerow(
                 [
                     result["file"],
                     result.get("entry"),
                     result["pattern_hex"],
                     result["start_offset"],
-                    offset,
+                    match.get("offset", ""),
+                    match.get("context_start", ""),
+                    match.get("context_end", ""),
+                    match.get("hex", ""),
+                    match.get("ascii", ""),
                 ]
             )
         content = stream.getvalue()
