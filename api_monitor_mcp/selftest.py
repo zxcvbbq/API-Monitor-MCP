@@ -43,6 +43,7 @@ from .capture_tools import (
     capture_decode_process_data,
     capture_error_summary,
     capture_export_all_calls,
+    capture_export_call_graph,
     capture_export_calls,
     capture_export_decoded_calls,
     capture_export_definitions,
@@ -339,6 +340,12 @@ def _self_test() -> None:
                 str(path), ["CreateFileW", "ReadFile"], max_gap=0
             )
             graph = capture_call_graph(str(path))
+            graph_json = Path(directory) / "graph.json"
+            graph_export = capture_export_call_graph(str(path), str(graph_json))
+            graph_csv = Path(directory) / "graph.csv"
+            graph_csv_export = capture_export_call_graph(
+                str(path), str(graph_csv), output_format="csv"
+            )
         finally:
             capture_tools.capture_call_timeline = original_timeline
         assert transitions["count"] == 1
@@ -349,6 +356,10 @@ def _self_test() -> None:
         assert graph["node_count"] == 2
         assert graph["edge_count"] == 1
         assert graph["edges"][0]["from"]["id"] == graph["nodes"][0]["id"]
+        assert graph_export["edge_count"] == 1
+        assert json.loads(graph_json.read_text())["node_count"] == 2
+        assert graph_csv_export["format"] == "csv"
+        assert "kind,id,process_index" in graph_csv.read_text().splitlines()[0]
         lazy_call_records = capture_call_records(str(path), include_data=False)
         assert lazy_call_records["data_entry_bytes"] == len(record) + 9
         assert lazy_call_records["records"][0]["valid"]

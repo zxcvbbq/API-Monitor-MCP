@@ -4573,6 +4573,114 @@ def capture_call_graph(
 
 
 @mcp.tool()
+def capture_export_call_graph(
+    file_path: str,
+    output_path: str,
+    process_index: int | None = None,
+    pid: int | None = None,
+    thread_id: int | None = None,
+    api_module: str | None = None,
+    limit: int = 1000,
+    max_records: int = 100_000,
+    output_format: str = "json",
+    overwrite: bool = False,
+) -> dict[str, Any]:
+    """Export a bounded captured API graph as JSON or CSV."""
+    if output_format not in {"json", "csv"}:
+        raise ValueError("output_format must be json or csv")
+    output = Path(output_path).expanduser()
+    if not output.parent.is_dir():
+        raise NotADirectoryError(f"Output directory not found: {output.parent}")
+    output = output.resolve()
+    if output.exists() and not overwrite:
+        raise FileExistsError(f"Output already exists: {output}")
+    graph = capture_call_graph(
+        file_path,
+        process_index=process_index,
+        pid=pid,
+        thread_id=thread_id,
+        api_module=api_module,
+        limit=limit,
+        max_records=max_records,
+    )
+    if output_format == "json":
+        content = json.dumps(graph, indent=2, ensure_ascii=False) + "\n"
+    else:
+        stream = io.StringIO(newline="")
+        writer = csv.writer(stream)
+        writer.writerow(
+            [
+                "kind",
+                "id",
+                "process_index",
+                "thread_id",
+                "from_id",
+                "to_id",
+                "name",
+                "module",
+                "count",
+                "first_record",
+                "last_record",
+            ]
+        )
+        for node in graph["nodes"]:
+            api = node["api"]
+            writer.writerow(
+                [
+                    "node",
+                    node["id"],
+                    node["process_index"],
+                    "",
+                    "",
+                    "",
+                    api.get("name", ""),
+                    api.get("module", ""),
+                    node["count"],
+                    node.get("first_record", ""),
+                    node.get("last_record", ""),
+                ]
+            )
+        for edge in graph["edges"]:
+            writer.writerow(
+                [
+                    "edge",
+                    "",
+                    edge["process_index"],
+                    edge["thread_id"],
+                    edge["from"].get("id", ""),
+                    edge["to"].get("id", ""),
+                    edge["to"].get("name", ""),
+                    edge["to"].get("module", ""),
+                    edge["count"],
+                    edge["first_transition"].get("from_record", ""),
+                    edge["last_transition"].get("to_record", ""),
+                ]
+            )
+        content = stream.getvalue()
+    encoded = content.encode("utf-8")
+    digest = hashlib.sha256(encoded).hexdigest()
+    try:
+        mode = "wb" if overwrite else "xb"
+        with output.open(mode) as handle:
+            handle.write(encoded)
+    except Exception:
+        if output.exists() and not overwrite:
+            output.unlink()
+        raise
+    return {
+        "exported": True,
+        "file": graph["file"],
+        "output": str(output),
+        "format": output_format,
+        "node_count": graph["node_count"],
+        "edge_count": graph["edge_count"],
+        "truncated": graph["truncated"],
+        "size": len(encoded),
+        "sha256": digest,
+    }
+
+
+@mcp.tool()
 def capture_export_timeline(
     file_path: str,
     output_path: str,
