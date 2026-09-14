@@ -7392,6 +7392,67 @@ def capture_find_bytes(
 
 
 @mcp.tool()
+def capture_export_find_bytes(
+    file_path: str,
+    output_path: str,
+    pattern_hex: str,
+    limit: int = 1000,
+    start_offset: int = 0,
+    entry_name: str | None = None,
+    max_bytes: int = 256 * 1024 * 1024,
+    output_format: str = "json",
+    overwrite: bool = False,
+) -> dict[str, Any]:
+    """Export hexadecimal byte-search results as JSON or CSV."""
+    if output_format not in {"json", "csv"}:
+        raise ValueError("output_format must be json or csv")
+    output = Path(output_path).expanduser()
+    if not output.parent.is_dir():
+        raise NotADirectoryError(f"Output directory not found: {output.parent}")
+    output = output.resolve()
+    if output.exists() and not overwrite:
+        raise FileExistsError(f"Output already exists: {output}")
+    result = capture_find_bytes(
+        file_path,
+        pattern_hex,
+        limit=limit,
+        start_offset=start_offset,
+        entry_name=entry_name,
+        max_bytes=max_bytes,
+    )
+    if output_format == "json":
+        content = json.dumps(result, indent=2, ensure_ascii=False) + "\n"
+    else:
+        stream = io.StringIO(newline="")
+        writer = csv.writer(stream)
+        writer.writerow(["file", "entry", "pattern_hex", "start_offset", "offset"])
+        for offset in result["offsets"]:
+            writer.writerow(
+                [
+                    result["file"],
+                    result.get("entry"),
+                    result["pattern_hex"],
+                    result["start_offset"],
+                    offset,
+                ]
+            )
+        content = stream.getvalue()
+    encoded, digest = _write_text_export(output, content, overwrite)
+    return {
+        "exported": True,
+        "file": result["file"],
+        "output": str(output),
+        "format": output_format,
+        "entry": result.get("entry"),
+        "pattern_hex": result["pattern_hex"],
+        "count": result["count"],
+        "truncated": result.get("truncated", False),
+        "size": len(encoded),
+        "sha256": digest,
+    }
+
+
+@mcp.tool()
 def capture_list_directory(
     directory: str,
     recursive: bool = True,

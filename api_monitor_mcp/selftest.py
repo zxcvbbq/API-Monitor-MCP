@@ -56,6 +56,7 @@ from .capture_tools import (
     capture_export_error_summary,
     capture_export_filter_calls,
     capture_export_filters,
+    capture_export_find_bytes,
     capture_export_modules,
     capture_export_monitoring_events,
     capture_export_monitoring_log,
@@ -979,6 +980,26 @@ def _self_test() -> None:
             str(path), "43 72 65 61 74 65", entry_name="calls.bin"
         )
         assert entry_found["offsets"] == [0]
+        byte_search_json_path = Path(directory) / "bytes.json"
+        byte_search_export = capture_export_find_bytes(
+            str(path),
+            str(byte_search_json_path),
+            "43 72 65 61 74 65",
+            entry_name="calls.bin",
+        )
+        assert byte_search_export["count"] == 1
+        assert json.loads(byte_search_json_path.read_text())["offsets"] == [0]
+        byte_search_csv_path = Path(directory) / "bytes.csv"
+        byte_search_csv_export = capture_export_find_bytes(
+            str(path),
+            str(byte_search_csv_path),
+            "43 72 65 61 74 65",
+            entry_name="calls.bin",
+            output_format="csv",
+        )
+        assert byte_search_csv_export["format"] == "csv"
+        assert byte_search_csv_path.read_text().startswith("file,entry,pattern_hex")
+        assert ",calls.bin," in byte_search_csv_path.read_text()
         processes = capture_list_processes(str(path), 10)
         assert processes["processes"][0]["executables"] == ["C:\\sample.exe"]
         assert processes["processes"][0]["metadata"]["pid"] == 1234
