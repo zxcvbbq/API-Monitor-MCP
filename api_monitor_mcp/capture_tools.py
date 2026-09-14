@@ -203,6 +203,75 @@ def capture_overview(
 
 
 @mcp.tool()
+def capture_process_overview(
+    file_path: str,
+    process_index: int,
+    pid: int | None = None,
+    max_records: int = 100_000,
+    include_calls: bool = False,
+    call_limit: int = 100,
+    include_data: bool = False,
+    max_data_bytes: int = 4096,
+) -> dict[str, Any]:
+    """Return one bounded investigation report for a captured process."""
+    if process_index < 0:
+        raise ValueError("process_index must be non-negative")
+    if pid is not None and not 1 <= pid <= 0xFFFFFFFF:
+        raise ValueError("pid must be between 1 and 4294967295")
+    max_records = _limit(max_records, "max_records", 1_000_000)
+    call_limit = _limit(call_limit, "call_limit", 10_000)
+    max_data_bytes = _limit(max_data_bytes, "max_data_bytes", 16 * 1024 * 1024)
+    processes = capture_list_processes(file_path, limit=2000)["processes"]
+    process = next((item for item in processes if item["index"] == process_index), None)
+    if process is None:
+        raise LookupError(f"Captured process index {process_index} was not found")
+    process_pid = process.get("metadata", {}).get("pid")
+    if pid is not None and process_pid != pid:
+        raise LookupError(f"Captured process index {process_index} does not contain PID {pid}")
+    stats = capture_call_stats(file_path, process_index=process_index, max_records=max_records)
+    process_stats = next(
+        (item for item in stats["processes"] if item["process_index"] == process_index),
+        None,
+    )
+    result: dict[str, Any] = {
+        "file": str(_capture_path(file_path)),
+        "process_index": process_index,
+        "pid": process_pid,
+        "process": process,
+        "stats": process_stats,
+        "modules": capture_list_modules(file_path, process_index=process_index, pid=pid),
+        "threads": capture_list_threads(
+            file_path,
+            process_index=process_index,
+            pid=pid,
+            max_records=max_records,
+        ),
+        "apis": capture_list_apis(
+            file_path,
+            process_index=process_index,
+            pid=pid,
+            max_records=max_records,
+        ),
+        "errors": capture_error_summary(
+            file_path,
+            process_index=process_index,
+            pid=pid,
+            max_records=max_records,
+        ),
+    }
+    if include_calls:
+        result["calls"] = capture_call_records(
+            file_path,
+            process_index=process_index,
+            limit=call_limit,
+            include_data=include_data,
+            max_data_bytes=max_data_bytes,
+            resolve_definitions=True,
+        )
+    return result
+
+
+@mcp.tool()
 def capture_validate(
     file_path: str, deep: bool = False, max_records: int = 1_000_000
 ) -> dict[str, Any]:

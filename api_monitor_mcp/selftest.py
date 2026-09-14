@@ -63,6 +63,7 @@ from .capture_tools import (
     capture_monitoring_log,
     capture_overview,
     capture_payload_summary,
+    capture_process_overview,
     capture_read_call_bytes,
     capture_read_definition,
     capture_read_entry,
@@ -235,6 +236,11 @@ def _self_test() -> None:
         assert overview["stats"]["totals"]["count"] == 1
         assert overview["apis"]["apis"][0]["name"] == "CreateFileW"
         assert overview["log"]["events"][0]["type"] == "module"
+        process_overview = capture_process_overview(str(path), 0, include_calls=True)
+        assert process_overview["pid"] == 1234
+        assert process_overview["threads"]["count"] == 1
+        assert process_overview["errors"]["error_count"] == 1
+        assert process_overview["calls"]["records"][0]["definition"]["name"] == "CreateFileW"
         assert capture_read_type(str(path), 160)["type"]["kind"] == 2
         invalid_prefix = Path(directory) / "invalid-prefix.apmx64"
         invalid_prefix.write_bytes(b"not-an-apmx" + path.read_bytes()[info["zip_offset"] :])
