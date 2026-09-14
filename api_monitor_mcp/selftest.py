@@ -142,6 +142,7 @@ from .gui_tools import (
     api_monitor_environment,
     api_monitor_export_traffic,
     api_monitor_gui_tree_check_query,
+    api_monitor_monitor_process,
     api_monitor_process_architecture,
     api_monitor_process_details,
     api_monitor_search_traffic,
@@ -1681,6 +1682,53 @@ def _self_test() -> None:
         raw_process_info += struct.pack("<I", zlib.crc32(raw_process_info) & 0xFFFFFFFF)
         raw_process = _parse_capture_process_info(raw_process_info, 8)
         assert raw_process["module_records"][0]["raw_payload"]["text"] == "raw-module"
+        target_executable = Path(directory) / "target.exe"
+        target_executable.write_bytes(b"MZ")
+        original_main_window = gui_tools._api_monitor_main_window
+        original_launch = gui_tools.api_monitor_launch
+        original_windows = gui_tools._find_api_monitor_windows
+        original_set_text = gui_tools._set_control_text
+        original_click = gui_tools._post_button_click
+        original_platform = gui_tools.sys.platform
+        set_text_calls = []
+        click_calls = []
+        gui_tools._api_monitor_main_window = lambda *_args, **_kwargs: None
+        gui_tools.api_monitor_launch = lambda architecture, **_kwargs: {
+            "pid": 9001,
+            "architecture": architecture,
+            "window": {"handle": 500, "title": "API Monitor V2 64-bit"},
+        }
+        gui_tools._find_api_monitor_windows = lambda: [
+            {
+                "title": "Monitor Process",
+                "children": [
+                    {"control_id": 2081, "handle": 2081},
+                    {"control_id": 2007, "handle": 2007},
+                    {"control_id": 2022, "handle": 2022},
+                    {"control_id": 1, "handle": 1},
+                ],
+            }
+        ]
+        gui_tools._set_control_text = lambda handle, value: set_text_calls.append((handle, value))
+        gui_tools._post_button_click = lambda handle: click_calls.append(handle)
+        try:
+            gui_tools.sys.platform = "win32"
+            started_monitor = api_monitor_monitor_process(
+                str(target_executable), arguments="--sample", start_in=directory
+            )
+        finally:
+            gui_tools.sys.platform = original_platform
+            gui_tools._api_monitor_main_window = original_main_window
+            gui_tools.api_monitor_launch = original_launch
+            gui_tools._find_api_monitor_windows = original_windows
+            gui_tools._set_control_text = original_set_text
+            gui_tools._post_button_click = original_click
+        assert started_monitor["submitted"]
+        assert started_monitor["launch"]["pid"] == 9001
+        assert (2081, str(target_executable.resolve())) in set_text_calls
+        assert (2007, "--sample") in set_text_calls
+        assert (2022, str(Path(directory).resolve())) in set_text_calls
+        assert click_calls == [1]
         original_summary = gui_tools.api_monitor_summary
         original_traffic = gui_tools.api_monitor_traffic
         summary_calls = iter((3, 4))

@@ -1778,6 +1778,10 @@ def api_monitor_monitor_process(
         start_in = str(start_directory.resolve())
 
     main_window = _api_monitor_main_window(architecture, timeout_seconds)
+    launch_result = None
+    if main_window is None:
+        launch_result = api_monitor_launch(architecture, timeout_seconds=timeout_seconds)
+        main_window = launch_result.get("window")
     if main_window is None:
         raise TimeoutError("API Monitor main window did not appear")
 
@@ -1806,7 +1810,7 @@ def api_monitor_monitor_process(
     if start_in and start_edit:
         _set_control_text(start_edit["handle"], start_in)
     _post_button_click(ok_button["handle"])
-    return {
+    result = {
         "submitted": True,
         "process": str(target),
         "architecture": architecture,
@@ -1815,6 +1819,9 @@ def api_monitor_monitor_process(
         "start_in": start_in,
         "window": {"handle": main_window["handle"], "title": main_window["title"]},
     }
+    if launch_result is not None:
+        result["launch"] = launch_result
+    return result
 
 
 @mcp.tool()
