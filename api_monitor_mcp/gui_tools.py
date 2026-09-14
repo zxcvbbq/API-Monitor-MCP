@@ -1395,6 +1395,7 @@ def api_monitor_search_traffic(
     traffic = api_monitor_traffic(window_title, limit, window_handle)
     matched_panes: list[dict[str, Any]] = []
     match_count = 0
+    returned_count = 0
     source_truncated = False
     for pane in traffic.get("panes", []):
         rows = pane.get("rows", [])
@@ -1406,7 +1407,7 @@ def api_monitor_search_traffic(
                 matching_indices.append(index)
         match_count += len(matching_indices)
         source_truncated |= pane.get("truncated", False)
-        selected = matching_indices[: max(0, max_matches - sum(len(item["records"]) for item in matched_panes))]
+        selected = matching_indices[: max(0, max_matches - returned_count)]
         if not selected:
             continue
         matched = dict(pane)
@@ -1416,7 +1417,7 @@ def api_monitor_search_traffic(
         matched["match_count"] = len(matching_indices)
         matched["truncated"] = pane.get("truncated", False) or len(selected) < len(matching_indices)
         matched_panes.append(matched)
-    returned_count = sum(len(pane["records"]) for pane in matched_panes)
+        returned_count += len(selected)
     return {
         "supported": traffic.get("supported", False),
         "query": query,
