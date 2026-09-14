@@ -1,6 +1,6 @@
 [project]
 name = "rohitab-api-monitor-mcp"
-version = "0.10.192"
+version = "0.10.193"
 description = "MCP bridge for Rohitab API Monitor captures and GUI"
 requires-python = ">=3.10"
 dependencies = ["mcp>=1.0.0,<2", "pywinauto>=0.6.8"]

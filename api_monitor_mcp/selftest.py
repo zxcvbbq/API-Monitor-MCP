@@ -58,6 +58,7 @@ from .capture_tools import (
     capture_export_modules,
     capture_export_monitoring_events,
     capture_export_monitoring_log,
+    capture_export_overview,
     capture_export_payload_summary,
     capture_export_processes,
     capture_export_search_calls,
@@ -264,6 +265,19 @@ def _self_test() -> None:
         assert overview["stats"]["totals"]["count"] == 1
         assert overview["apis"]["apis"][0]["name"] == "CreateFileW"
         assert overview["log"]["events"][0]["type"] == "module"
+        overview_json_path = Path(directory) / "overview.json"
+        overview_export = capture_export_overview(
+            str(path), str(overview_json_path), include_log=True, log_limit=10
+        )
+        assert "validation" in overview_export["sections"]
+        assert json.loads(overview_json_path.read_text())["stats"]["totals"]["count"] == 1
+        overview_csv_path = Path(directory) / "overview.csv"
+        overview_csv_export = capture_export_overview(
+            str(path), str(overview_csv_path), output_format="csv"
+        )
+        assert overview_csv_export["format"] == "csv"
+        assert overview_csv_path.read_text().startswith("section,key,value")
+        assert "validation,valid" in overview_csv_path.read_text()
         process_overview = capture_process_overview(str(path), 0, include_calls=True)
         assert process_overview["pid"] == 1234
         assert process_overview["threads"]["count"] == 1
