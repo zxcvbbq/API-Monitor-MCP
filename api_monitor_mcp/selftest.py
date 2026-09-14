@@ -56,6 +56,7 @@ from .capture_tools import (
     capture_list_apis,
     capture_list_definitions,
     capture_list_directory,
+    capture_list_filters,
     capture_list_modules,
     capture_list_processes,
     capture_list_threads,
@@ -291,6 +292,9 @@ def _self_test() -> None:
         xml = capture_xml_entry(str(path), query="CreateFile")
         assert xml["root"] == "DisplayFilters"
         assert xml["nodes"][0]["attributes"]["Field"] == "API"
+        filters = capture_list_filters(str(path), filter_type="display")
+        assert filters["count"] == 1
+        assert filters["filters"][0]["attributes"]["Operator"] == "contains"
         call_records = capture_call_records(str(path), include_data=True)
         assert call_records["count"] == 1
         assert call_records["process_pid"] == 1234

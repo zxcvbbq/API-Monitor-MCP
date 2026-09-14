@@ -1232,6 +1232,90 @@ def capture_xml_entry(
 
 
 @mcp.tool()
+def capture_list_filters(
+    file_path: str,
+    filter_type: str = "all",
+    query: str = "",
+    limit: int = 1000,
+    max_bytes: int = 16 * 1024 * 1024,
+) -> dict[str, Any]:
+    """List structured display/monitor filters stored in an APMX capture."""
+    if filter_type not in {"all", "display", "monitor"}:
+        raise ValueError("filter_type must be all, display, or monitor")
+    if len(query) > 4096:
+        raise ValueError("query must not exceed 4096 characters")
+    limit = _limit(limit, "limit", 20_000)
+    max_bytes = _limit(max_bytes, "max_bytes", 64 * 1024 * 1024)
+    path = _capture_path(file_path)
+    wanted = query.casefold()
+    entries: list[dict[str, Any]] = []
+    errors: list[dict[str, str]] = []
+    returned = 0
+    matched = 0
+    truncated = False
+    archive, _, _ = _open_capture_zip(path)
+    with archive:
+        for info in archive.infolist():
+            name = info.filename
+            lowered = name.casefold()
+            if info.is_dir() or not lowered.startswith("filter/") or not lowered.endswith(".xml"):
+                continue
+            if filter_type != "all" and filter_type not in lowered:
+                continue
+            try:
+                if info.file_size > max_bytes:
+                    raise ValueError(f"XML entry exceeds max_bytes: {info.file_size}")
+                root = ElementTree.fromstring(archive.read(info))
+            except (OSError, ElementTree.ParseError, ValueError) as exc:
+                errors.append({"entry": name, "error": str(exc)})
+                continue
+            root_tag = root.tag.rsplit("}", 1)[-1] if isinstance(root.tag, str) else str(root.tag)
+            filters: list[dict[str, Any]] = []
+            for node_index, node in enumerate(root.iter()):
+                tag = node.tag.rsplit("}", 1)[-1] if isinstance(node.tag, str) else str(node.tag)
+                if "filter" != tag.casefold():
+                    continue
+                text = " ".join((node.text or "").split())
+                searchable = " ".join((tag, text, *node.attrib.values())).casefold()
+                if wanted and wanted not in searchable:
+                    continue
+                matched += 1
+                if returned >= limit:
+                    truncated = True
+                    continue
+                filters.append(
+                    {
+                        "index": node_index,
+                        "tag": tag,
+                        "attributes": dict(node.attrib),
+                        "text": text[:4096],
+                        "truncated_text": len(text) > 4096,
+                    }
+                )
+                returned += 1
+            if filters:
+                entries.append(
+                    {
+                        "entry": name,
+                        "root": root_tag,
+                        "filters": filters,
+                        "count": len(filters),
+                    }
+                )
+    return {
+        "file": str(path),
+        "filter_type": filter_type,
+        "query": query,
+        "entries": entries,
+        "filters": [item for entry in entries for item in entry["filters"]],
+        "count": returned,
+        "matched": matched,
+        "truncated": truncated or matched > returned,
+        "errors": errors,
+    }
+
+
+@mcp.tool()
 def capture_call_records(
     file_path: str,
     process_index: int = 0,
