@@ -1885,6 +1885,27 @@ def _self_test() -> None:
         assert recovered_session["captured"]
         assert recovered_session["wait_error"] == "traffic wait unavailable"
         assert recovered_session["stopped"]["submitted"]
+        original_main_window = gui_tools._api_monitor_main_window
+        original_file_dialog = gui_tools._run_file_dialog
+        original_windows = gui_tools._find_api_monitor_windows
+        original_platform = gui_tools.sys.platform
+        gui_tools._api_monitor_main_window = lambda *_args, **_kwargs: {
+            "handle": 500,
+            "title": "API Monitor V2 64-bit",
+        }
+        gui_tools._run_file_dialog = lambda *_args, **_kwargs: None
+        gui_tools._find_api_monitor_windows = list
+        try:
+            gui_tools.sys.platform = "win32"
+            saved_capture = gui_tools.api_monitor_save_capture(
+                str(path), overwrite=True, timeout_seconds=1
+            )
+        finally:
+            gui_tools.sys.platform = original_platform
+            gui_tools._api_monitor_main_window = original_main_window
+            gui_tools._run_file_dialog = original_file_dialog
+            gui_tools._find_api_monitor_windows = original_windows
+        assert saved_capture["sha256"] == info["sha256"]
         original_summary = gui_tools.api_monitor_summary
         original_traffic = gui_tools.api_monitor_traffic
         summary_calls = iter((3, 4))

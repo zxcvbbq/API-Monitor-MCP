@@ -18,6 +18,7 @@ from typing import Any
 from .capture_format import (
     _capture_output_path,
     _capture_path,
+    _file_sha256,
     _file_time,
     _limit,
 )
@@ -2394,6 +2395,7 @@ def api_monitor_save_capture(
                 "method": "background-gui",
                 "file": str(path),
                 "size": stat.st_size,
+                "sha256": _file_sha256(path),
                 "modified_utc": _file_time(path),
             }
             result["validation"] = capture_validate(str(path))
