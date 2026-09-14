@@ -99,16 +99,24 @@ def api_monitor_search_apis(
     needle = query.casefold()
     results: list[dict[str, str]] = []
     seen: set[tuple[str, str]] = set()
-    for item in _api_definition_index(api_root):
-        module = str(item["module"])
-        for name in item["api_names"]:
+    for path in sorted(api_root.rglob("*.xml")):
+        try:
+            text = path.read_text(encoding="utf-8-sig", errors="replace")
+        except OSError:
+            continue
+        module_match = MODULE_NAME.search(text)
+        module = module_match.group(1) if module_match else path.stem
+        if needle not in module.casefold() and needle not in text.casefold():
+            continue
+        for match in API_NAME.finditer(text):
+            name = match.group(1)
             if needle not in name.casefold() and needle not in module.casefold():
                 continue
             key = (module, name)
             if key in seen:
                 continue
             seen.add(key)
-            results.append({"name": name, "module": module, "definition": item["definition"]})
+            results.append({"name": name, "module": module, "definition": str(path)})
             if len(results) >= limit:
                 return {"query": query, "results": results, "count": len(results), "truncated": True}
     return {"query": query, "results": results, "count": len(results), "truncated": False}
