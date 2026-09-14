@@ -3178,6 +3178,93 @@ def capture_error_summary(
 
 
 @mcp.tool()
+def capture_export_error_summary(
+    file_path: str,
+    output_path: str,
+    process_index: int | None = None,
+    pid: int | None = None,
+    limit: int = 1000,
+    max_records: int = 1_000_000,
+    output_format: str = "json",
+    overwrite: bool = False,
+) -> dict[str, Any]:
+    """Export saved call error summaries as JSON or CSV."""
+    if output_format not in {"json", "csv"}:
+        raise ValueError("output_format must be json or csv")
+    output = Path(output_path).expanduser()
+    if not output.parent.is_dir():
+        raise NotADirectoryError(f"Output directory not found: {output.parent}")
+    output = output.resolve()
+    if output.exists() and not overwrite:
+        raise FileExistsError(f"Output already exists: {output}")
+
+    result = capture_error_summary(
+        file_path,
+        process_index=process_index,
+        pid=pid,
+        limit=limit,
+        max_records=max_records,
+    )
+    if output_format == "json":
+        content = json.dumps(result, indent=2, ensure_ascii=False) + "\n"
+    else:
+        stream = io.StringIO(newline="")
+        writer = csv.writer(stream)
+        writer.writerow(
+            [
+                "error_code",
+                "hex",
+                "count",
+                "process_indices",
+                "pids",
+                "thread_ids",
+                "first_record",
+                "last_record",
+                "apis",
+                "context",
+            ]
+        )
+        for error in result["errors"]:
+            writer.writerow(
+                [
+                    error.get("error_code", ""),
+                    error.get("hex", ""),
+                    error.get("count", ""),
+                    json.dumps(error.get("process_indices", []), ensure_ascii=False),
+                    json.dumps(error.get("pids", []), ensure_ascii=False),
+                    json.dumps(error.get("thread_ids", []), ensure_ascii=False),
+                    json.dumps(error.get("first_record", {}), ensure_ascii=False),
+                    json.dumps(error.get("last_record", {}), ensure_ascii=False),
+                    json.dumps(error.get("apis", []), ensure_ascii=False),
+                    json.dumps(error.get("context", {}), ensure_ascii=False),
+                ]
+            )
+        content = stream.getvalue()
+    encoded = content.encode("utf-8")
+    digest = hashlib.sha256(encoded).hexdigest()
+    try:
+        mode = "wb" if overwrite else "xb"
+        with output.open(mode) as handle:
+            handle.write(encoded)
+    except Exception:
+        if output.exists() and not overwrite:
+            output.unlink()
+        raise
+    return {
+        "exported": True,
+        "file": result["file"],
+        "output": str(output),
+        "format": output_format,
+        "count": result["count"],
+        "error_count": result["error_count"],
+        "scanned_records": result["scanned_records"],
+        "truncated": result["truncated"],
+        "size": len(encoded),
+        "sha256": digest,
+    }
+
+
+@mcp.tool()
 def capture_list_definitions(
     file_path: str,
     process_index: int | None = None,

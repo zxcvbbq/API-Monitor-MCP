@@ -47,6 +47,7 @@ from .capture_tools import (
     capture_export_calls,
     capture_export_decoded_calls,
     capture_export_definitions,
+    capture_export_error_summary,
     capture_export_monitoring_log,
     capture_export_search_calls,
     capture_export_slowest_calls,
@@ -838,6 +839,17 @@ def _self_test() -> None:
         assert error_summary["errors"][0]["hex"] == "0x00000005"
         assert error_summary["errors"][0]["apis"][0]["name"] == "CreateFileW"
         assert capture_error_summary(str(path), pid=1234)["count"] == 1
+        error_json_path = Path(directory) / "errors.json"
+        error_export = capture_export_error_summary(str(path), str(error_json_path))
+        assert error_export["error_count"] == 1
+        assert json.loads(error_json_path.read_text())["errors"][0]["error_code"] == 5
+        error_csv_path = Path(directory) / "errors.csv"
+        error_csv_export = capture_export_error_summary(
+            str(path), str(error_csv_path), output_format="csv"
+        )
+        assert error_csv_export["format"] == "csv"
+        assert "error_code" in error_csv_path.read_text().splitlines()[0]
+        assert "0x00000005" in error_csv_path.read_text()
         definitions_list = capture_list_definitions(str(path), include_details=True)
         assert definitions_list["count"] == 1
         assert definitions_list["definitions"][0]["name"] == "CreateFileW"
