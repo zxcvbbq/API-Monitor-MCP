@@ -2799,6 +2799,96 @@ def capture_wait_for_new_calls(
 
 
 @mcp.tool()
+def capture_wait_for_new_events(
+    file_path: str,
+    minimum_new_events: int = 1,
+    event_type: str = "all",
+    process_query: str = "",
+    timeout_seconds: float = 30.0,
+    poll_interval_seconds: float = 0.5,
+    max_returned_events: int = 10_000,
+) -> dict[str, Any]:
+    """Wait for monitoring-log events added after this tool starts."""
+    if minimum_new_events < 0:
+        raise ValueError("minimum_new_events must be non-negative")
+    if event_type not in {"all", "module", "child_process", "summary", "unknown"}:
+        raise ValueError("event_type must be all, module, child_process, summary, or unknown")
+    if len(process_query) > 4096:
+        raise ValueError("process_query must not exceed 4096 characters")
+    if not math.isfinite(timeout_seconds) or not 0 < timeout_seconds <= 300:
+        raise ValueError("timeout_seconds must be finite and between 0 and 300")
+    if not math.isfinite(poll_interval_seconds) or not 0.01 <= poll_interval_seconds <= 5:
+        raise ValueError("poll_interval_seconds must be finite and between 0.01 and 5")
+    max_returned_events = _limit(max_returned_events, "max_returned_events", 100_000)
+    candidate = Path(file_path).expanduser()
+    if candidate.suffix.lower() not in CAPTURE_SUFFIXES:
+        raise ValueError("file_path must end in .apmx64 or .apmx86")
+    path = candidate.resolve()
+    started = time.monotonic()
+    deadline = started + timeout_seconds
+    attempts = 0
+    baseline: int | None = None
+    last_events: dict[str, Any] | None = None
+    last_error: str | None = None
+
+    while True:
+        attempts += 1
+        try:
+            current = capture_monitoring_events(
+                str(path), event_type=event_type, process_query=process_query, limit=10_000
+            )
+            last_events = current
+            last_error = None
+            count = int(current["count"])
+            if baseline is None or count < baseline:
+                baseline = count
+            new_count = max(0, count - baseline)
+            if new_count >= minimum_new_events:
+                events = current.get("events", [])[baseline : baseline + max_returned_events]
+                return {
+                    "ready": True,
+                    "file": str(path),
+                    "event_type": event_type,
+                    "process_query": process_query,
+                    "minimum_new_events": minimum_new_events,
+                    "baseline_events": baseline,
+                    "current_events": count,
+                    "new_events_count": new_count,
+                    "events": events,
+                    "events_truncated": current.get("truncated", False)
+                    or new_count > len(events),
+                    "attempts": attempts,
+                    "elapsed_seconds": round(time.monotonic() - started, 3),
+                    "source": current,
+                }
+        except (KeyError, OSError, ValueError, zipfile.BadZipFile) as exc:
+            last_error = str(exc)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        time.sleep(min(poll_interval_seconds, remaining))
+
+    baseline = baseline or 0
+    count = int((last_events or {}).get("count", 0))
+    return {
+        "ready": False,
+        "file": str(path),
+        "event_type": event_type,
+        "process_query": process_query,
+        "minimum_new_events": minimum_new_events,
+        "baseline_events": baseline,
+        "current_events": count,
+        "new_events_count": max(0, count - baseline),
+        "events": [],
+        "events_truncated": bool((last_events or {}).get("truncated", False)),
+        "attempts": attempts,
+        "elapsed_seconds": round(time.monotonic() - started, 3),
+        "source": last_events,
+        "error": last_error,
+    }
+
+
+@mcp.tool()
 def capture_list_apis(
     file_path: str,
     process_index: int | None = None,

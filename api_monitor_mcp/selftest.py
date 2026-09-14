@@ -82,6 +82,7 @@ from .capture_tools import (
     capture_validate,
     capture_wait_for_calls,
     capture_wait_for_new_calls,
+    capture_wait_for_new_events,
     capture_xml_entry,
 )
 from .capture_values import (
@@ -1179,6 +1180,31 @@ def _self_test() -> None:
         assert waited_new["ready"]
         assert waited_new["current_calls"] == 4
         assert waited_new["new_calls"] == 2
+        original_events = capture_tools.capture_monitoring_events
+        event_snapshots = iter(
+            (
+                {"count": 1, "events": [{"line": "old"}], "truncated": False},
+                {
+                    "count": 3,
+                    "events": [
+                        {"line": "old"},
+                        {"line": "new-1"},
+                        {"line": "new-2"},
+                    ],
+                    "truncated": False,
+                },
+            )
+        )
+        capture_tools.capture_monitoring_events = lambda *_args, **_kwargs: next(event_snapshots)
+        try:
+            waited_events = capture_wait_for_new_events(
+                str(path), minimum_new_events=2, timeout_seconds=1, poll_interval_seconds=0.01
+            )
+        finally:
+            capture_tools.capture_monitoring_events = original_events
+        assert waited_events["ready"]
+        assert waited_events["new_events_count"] == 2
+        assert [event["line"] for event in waited_events["events"]] == ["new-1", "new-2"]
         original_traffic = gui_tools.api_monitor_traffic
         gui_tools.api_monitor_traffic = lambda *_args, **_kwargs: {
             "supported": True,
