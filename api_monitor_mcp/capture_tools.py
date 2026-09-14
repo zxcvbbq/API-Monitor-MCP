@@ -4358,6 +4358,7 @@ def capture_find_call_sequence(
 
     matches_found: list[dict[str, Any]] = []
     state_truncated = False
+    limit_reached = False
     for stream_key, events in streams.items():
         active: list[dict[str, Any]] = []
         for event in events:
@@ -4377,6 +4378,7 @@ def capture_find_call_sequence(
                             }
                         )
                         if len(matches_found) >= limit:
+                            limit_reached = True
                             break
                     else:
                         next_active.append(
@@ -4404,6 +4406,8 @@ def capture_find_call_sequence(
                             "calls": [summary(event)],
                         }
                     )
+                    if len(matches_found) >= limit:
+                        limit_reached = True
                 else:
                     next_active.append({"next": 1, "gap": 0, "calls": [summary(event)]})
             if len(next_active) > 4096:
@@ -4423,7 +4427,7 @@ def capture_find_call_sequence(
         "matches": matches_found[:limit],
         "count": len(matches_found[:limit]),
         "scanned_records": timeline["scanned_records"],
-        "truncated": timeline["truncated"] or state_truncated,
+        "truncated": timeline["truncated"] or state_truncated or limit_reached,
         "definitions_resolved": timeline["definitions_resolved"],
     }
 
