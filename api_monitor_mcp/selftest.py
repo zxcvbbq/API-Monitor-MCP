@@ -13,7 +13,7 @@ import zlib
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from . import gui_tools
+from . import capture_tools, gui_tools
 from .capture_format import (
     _capture_call_records,
     _capture_call_stats,
@@ -26,6 +26,7 @@ from .capture_format import (
     _zip_entries,
 )
 from .capture_tools import (
+    capture_api_transitions,
     capture_call_records,
     capture_call_stats,
     capture_call_timeline,
@@ -274,6 +275,40 @@ def _self_test() -> None:
         slot_zero = next(item for item in payload_summary["payloads"] if item["slot"] == 0)
         assert slot_zero["bytes"] == 5
         assert slot_zero["samples"][0]["text"] == "hello"
+        original_timeline = capture_tools.capture_call_timeline
+        capture_tools.capture_call_timeline = lambda *_args, **_kwargs: {
+            "file": "sample.apmx64",
+            "timeline": [
+                {
+                    "process_index": 0,
+                    "pid": 1234,
+                    "record": {
+                        "index": 0,
+                        "definition": {"valid": True, "offset": 16, "name": "CreateFileW", "module": "kernel32.dll"},
+                        "context": {"thread_id": 0x1234},
+                    },
+                },
+                {
+                    "process_index": 0,
+                    "pid": 1234,
+                    "record": {
+                        "index": 1,
+                        "definition": {"valid": True, "offset": 32, "name": "ReadFile", "module": "kernel32.dll"},
+                        "context": {"thread_id": 0x1234},
+                    },
+                },
+            ],
+            "scanned_records": 2,
+            "truncated": False,
+            "definitions_resolved": True,
+        }
+        try:
+            transitions = capture_api_transitions(str(path))
+        finally:
+            capture_tools.capture_call_timeline = original_timeline
+        assert transitions["count"] == 1
+        assert transitions["transitions"][0]["from"]["name"] == "CreateFileW"
+        assert transitions["transitions"][0]["to"]["name"] == "ReadFile"
         lazy_call_records = capture_call_records(str(path), include_data=False)
         assert lazy_call_records["data_entry_bytes"] == len(record) + 9
         assert lazy_call_records["records"][0]["valid"]

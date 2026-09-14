@@ -3693,6 +3693,114 @@ def capture_call_timeline(
 
 
 @mcp.tool()
+def capture_api_transitions(
+    file_path: str,
+    process_index: int | None = None,
+    pid: int | None = None,
+    thread_id: int | None = None,
+    api_module: str | None = None,
+    limit: int = 1000,
+    max_records: int = 100_000,
+) -> dict[str, Any]:
+    """Count adjacent resolved API transitions for each captured thread."""
+    if process_index is not None and process_index < 0:
+        raise ValueError("process_index must be non-negative")
+    if pid is not None and not 1 <= pid <= 0xFFFFFFFF:
+        raise ValueError("pid must be between 1 and 4294967295")
+    if thread_id is not None and not 0 <= thread_id <= 0xFFFFFFFF:
+        raise ValueError("thread_id must be between 0 and 4294967295")
+    if api_module is not None and not api_module.strip():
+        raise ValueError("api_module must be non-empty when provided")
+    limit = _limit(limit, "limit", 10_000)
+    max_records = _limit(max_records, "max_records", 1_000_000)
+    timeline = capture_call_timeline(
+        file_path,
+        process_index=process_index,
+        order_by="capture",
+        limit=10_000,
+        max_records=max_records,
+        include_data=False,
+        resolve_definitions=True,
+        api_module=api_module,
+        pid=pid,
+        thread_id=thread_id,
+    )
+    previous: dict[tuple[int, int], dict[str, Any]] = {}
+    transitions: dict[tuple[int, int, int, int], dict[str, Any]] = {}
+    for event in timeline["timeline"]:
+        record = event.get("record", {})
+        definition = record.get("definition", {})
+        if not definition.get("valid") or not definition.get("name"):
+            continue
+        context = record.get("context", {})
+        current_thread = int(context.get("thread_id", 0))
+        current_process = int(event.get("process_index", 0))
+        stream_key = (current_process, current_thread)
+        current = {
+            "process_index": current_process,
+            "pid": event.get("pid"),
+            "thread_id": current_thread,
+            "index": record.get("index"),
+            "api": {
+                key: definition.get(key)
+                for key in ("offset", "name", "module", "ordinal")
+                if key in definition
+            },
+        }
+        prior = previous.get(stream_key)
+        if prior is not None:
+            prior_api = prior["api"]
+            current_api = current["api"]
+            key = (
+                current_process,
+                current_thread,
+                int(prior_api.get("offset", 0) or 0),
+                int(current_api.get("offset", 0) or 0),
+            )
+            item = transitions.setdefault(
+                key,
+                {
+                    "process_index": current_process,
+                    "pid": current.get("pid"),
+                    "thread_id": current_thread,
+                    "from": prior_api,
+                    "to": current_api,
+                    "count": 0,
+                    "first_transition": {
+                        "from_record": prior.get("index"),
+                        "to_record": current.get("index"),
+                    },
+                    "last_transition": {
+                        "from_record": prior.get("index"),
+                        "to_record": current.get("index"),
+                    },
+                },
+            )
+            item["count"] += 1
+            item["last_transition"] = {
+                "from_record": prior.get("index"),
+                "to_record": current.get("index"),
+            }
+        previous[stream_key] = current
+    returned = sorted(
+        transitions.values(),
+        key=lambda item: (-item["count"], item["process_index"], item["thread_id"]),
+    )
+    return {
+        "file": timeline["file"],
+        "process_index": process_index,
+        "pid": pid,
+        "thread_id": thread_id,
+        "api_module": api_module,
+        "transitions": returned[:limit],
+        "count": len(returned),
+        "scanned_records": timeline["scanned_records"],
+        "truncated": timeline["truncated"] or len(returned) > limit,
+        "definitions_resolved": timeline["definitions_resolved"],
+    }
+
+
+@mcp.tool()
 def capture_export_timeline(
     file_path: str,
     output_path: str,
