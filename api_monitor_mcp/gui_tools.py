@@ -522,6 +522,17 @@ def api_monitor_gui_tree_check_query(
     limit = _limit(limit, "limit", 20_000)
     if not 0 <= max_depth <= 128:
         raise ValueError("max_depth must be between 0 and 128")
+    if sys.platform != "win32":
+        return {
+            "supported": False,
+            "query": query,
+            "match_mode": match_mode,
+            "checked": checked,
+            "matches": [],
+            "count": 0,
+            "updated_count": 0,
+            "truncated": False,
+        }
     expression = re.compile(query, re.IGNORECASE) if match_mode == "regex" else None
     tree_result = api_monitor_gui_tree(
         tree_handle=tree_handle,
