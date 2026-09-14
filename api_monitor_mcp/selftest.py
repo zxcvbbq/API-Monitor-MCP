@@ -63,6 +63,7 @@ from .capture_tools import (
     capture_export_process_overview,
     capture_export_processes,
     capture_export_search_calls,
+    capture_export_search_entries,
     capture_export_slowest_calls,
     capture_export_threads,
     capture_export_timeline,
@@ -402,6 +403,19 @@ def _self_test() -> None:
         searched = capture_search_entries(str(path), "CreateFile", 10)
         assert searched["entries"][0]["entry"] == "calls.bin"
         assert not searched["truncated"]
+        entry_search_json_path = Path(directory) / "entry-search.json"
+        entry_search_export = capture_export_search_entries(
+            str(path), str(entry_search_json_path), "CreateFile", limit=10
+        )
+        assert entry_search_export["count"] == searched["count"]
+        assert json.loads(entry_search_json_path.read_text())["entries"][0]["entry"] == "calls.bin"
+        entry_search_csv_path = Path(directory) / "entry-search.csv"
+        entry_search_csv_export = capture_export_search_entries(
+            str(path), str(entry_search_csv_path), "CreateFile", output_format="csv"
+        )
+        assert entry_search_csv_export["format"] == "csv"
+        assert entry_search_csv_path.read_text().startswith("entry,offset,encoding,text")
+        assert "CreateFileW" in entry_search_csv_path.read_text()
         xml = capture_xml_entry(str(path), query="CreateFile")
         assert xml["root"] == "DisplayFilters"
         assert xml["nodes"][0]["attributes"]["Field"] == "API"
