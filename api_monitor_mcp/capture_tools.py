@@ -6756,33 +6756,37 @@ def capture_export_call_bytes(
     output = output.resolve()
     if output == path:
         raise ValueError("output_path must differ from the capture file")
-    if output.exists() and not overwrite:
-        raise FileExistsError(f"Output already exists: {output}")
-    result = capture_read_call_bytes(
+    context = capture_calls_around(
         str(path),
         process_index=process_index,
         record_index=record_index,
-        max_bytes=max_bytes,
+        before=0,
+        after=0,
+        include_data=False,
     )
-    raw = base64.b64decode(result["record_bytes"]["base64"])
-    created = False
-    try:
-        with output.open("wb" if overwrite else "xb") as handle:
-            created = True
-            handle.write(raw)
-    except Exception:
-        if created and not overwrite and output.exists():
-            output.unlink()
-        raise
+    record = context["records"][0]
+    if not record.get("valid"):
+        raise ValueError(record.get("error", "saved call record is invalid"))
+    size = int(record["size"])
+    if size > max_bytes:
+        raise ValueError(f"call record exceeds max_bytes: {size}")
+    extracted = capture_extract_process_data(
+        str(path),
+        process_index=process_index,
+        output_path=str(output),
+        offset=int(record["offset"]),
+        length=size,
+        overwrite=overwrite,
+    )
     return {
         "exported": True,
         "file": str(path),
         "process_index": process_index,
-        "process_pid": result.get("process_pid"),
+        "process_pid": context.get("process_pid"),
         "record_index": record_index,
         "output": str(output),
-        "size": len(raw),
-        "sha256": hashlib.sha256(raw).hexdigest(),
+        "size": extracted["size"],
+        "sha256": extracted["sha256"],
     }
 
 
