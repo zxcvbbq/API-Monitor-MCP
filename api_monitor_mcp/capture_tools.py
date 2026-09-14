@@ -497,6 +497,77 @@ def capture_compare(
 
 
 @mcp.tool()
+def capture_export_compare(
+    first_file: str,
+    second_file: str,
+    output_path: str,
+    limit: int = 2000,
+    output_format: str = "json",
+    overwrite: bool = False,
+) -> dict[str, Any]:
+    """Export ZIP-entry differences between two captures as JSON or CSV."""
+    if output_format not in {"json", "csv"}:
+        raise ValueError("output_format must be json or csv")
+    output = Path(output_path).expanduser()
+    if not output.parent.is_dir():
+        raise NotADirectoryError(f"Output directory not found: {output.parent}")
+    output = output.resolve()
+    if output.exists() and not overwrite:
+        raise FileExistsError(f"Output already exists: {output}")
+    result = capture_compare(first_file, second_file, limit=limit)
+    if output_format == "json":
+        content = json.dumps(result, indent=2, ensure_ascii=False) + "\n"
+    else:
+        stream = io.StringIO(newline="")
+        writer = csv.writer(stream)
+        writer.writerow(
+            [
+                "kind",
+                "entry",
+                "first_size",
+                "first_crc32",
+                "second_size",
+                "second_crc32",
+                "first",
+                "second",
+            ]
+        )
+        rows = [("added", {}, item.get("second", {})) for item in result["added"]]
+        rows.extend(("removed", item.get("first", {}), {}) for item in result["removed"])
+        rows.extend(
+            ("changed", item.get("first", {}), item.get("second", {}))
+            for item in result["changed"]
+        )
+        for kind, first_entry, second_entry in rows:
+            writer.writerow(
+                [
+                    kind,
+                    second_entry.get("name", first_entry.get("name", "")),
+                    first_entry.get("size", ""),
+                    first_entry.get("crc32", ""),
+                    second_entry.get("size", ""),
+                    second_entry.get("crc32", ""),
+                    json.dumps(first_entry, ensure_ascii=False) if first_entry else "",
+                    json.dumps(second_entry, ensure_ascii=False) if second_entry else "",
+                ]
+            )
+        content = stream.getvalue()
+    encoded, digest = _write_text_export(output, content, overwrite)
+    return {
+        "exported": True,
+        "first": result["first"],
+        "second": result["second"],
+        "output": str(output),
+        "format": output_format,
+        "counts": result["counts"],
+        "same": result["same"],
+        "truncated": result["truncated"],
+        "size": len(encoded),
+        "sha256": digest,
+    }
+
+
+@mcp.tool()
 def capture_compare_entry(
     first_file: str,
     second_file: str,

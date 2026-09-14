@@ -47,6 +47,7 @@ from .capture_tools import (
     capture_export_call_graph,
     capture_export_call_stats,
     capture_export_calls,
+    capture_export_compare,
     capture_export_compare_all_calls,
     capture_export_compare_apis,
     capture_export_compare_calls,
@@ -966,6 +967,22 @@ def _self_test() -> None:
         comparison = capture_compare(str(path), str(second_path))
         assert comparison["counts"] == {"added": 1, "removed": 8, "changed": 1}
         assert not comparison["same"]
+        entry_compare_json_path = Path(directory) / "entry-compare.json"
+        entry_compare_export = capture_export_compare(
+            str(path), str(second_path), str(entry_compare_json_path)
+        )
+        assert entry_compare_export["counts"] == comparison["counts"]
+        assert json.loads(entry_compare_json_path.read_text())["changed"][0]["entry"] == "metadata.txt"
+        entry_compare_csv_path = Path(directory) / "entry-compare.csv"
+        entry_compare_csv_export = capture_export_compare(
+            str(path),
+            str(second_path),
+            str(entry_compare_csv_path),
+            output_format="csv",
+        )
+        assert entry_compare_csv_export["format"] == "csv"
+        assert entry_compare_csv_path.read_text().startswith("kind,entry,first_size")
+        assert "metadata.txt" in entry_compare_csv_path.read_text()
         same_entry = capture_compare_entry(str(path), str(path), "calls.bin")
         assert same_entry["same"]
         entry_diff = capture_compare_entry(str(path), str(second_path), "metadata.txt")
