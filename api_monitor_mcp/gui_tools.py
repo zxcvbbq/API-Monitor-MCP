@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import ctypes
 import os
+import re
 import subprocess
 import sys
 import time
@@ -500,6 +501,59 @@ def api_monitor_gui_tree_check(
         "tree": tree,
         "item_handle": item_handle,
         "checked": checked,
+    }
+
+
+@mcp.tool()
+def api_monitor_gui_tree_check_query(
+    query: str,
+    checked: bool,
+    match_mode: str = "contains",
+    tree_handle: int | None = None,
+    window_title: str = "",
+    limit: int = 500,
+    max_depth: int = 32,
+) -> dict[str, Any]:
+    """Check matching API/filter tree items without foregrounding the window."""
+    if not query.strip():
+        raise ValueError("query must not be empty")
+    if match_mode not in {"contains", "exact", "regex"}:
+        raise ValueError("match_mode must be contains, exact, or regex")
+    limit = _limit(limit, "limit", 20_000)
+    if not 0 <= max_depth <= 128:
+        raise ValueError("max_depth must be between 0 and 128")
+    expression = re.compile(query, re.IGNORECASE) if match_mode == "regex" else None
+    tree_result = api_monitor_gui_tree(
+        tree_handle=tree_handle,
+        window_title=window_title,
+        limit=20_000,
+        max_depth=max_depth,
+    )
+    wanted = query.casefold()
+
+    def matches(text: str) -> bool:
+        if match_mode == "exact":
+            return text.casefold() == wanted
+        if expression is not None:
+            return expression.search(text) is not None
+        return wanted in text.casefold()
+
+    selected = [item for item in tree_result.get("items", []) if matches(item.get("text", ""))]
+    changed = selected[:limit]
+    tree = tree_result["tree"]
+    for item in changed:
+        _set_tree_item_check(tree["handle"], item["native_handle"], checked)
+    return {
+        "updated": True,
+        "method": "background-win32",
+        "query": query,
+        "match_mode": match_mode,
+        "checked": checked,
+        "tree": tree,
+        "matches": changed,
+        "count": len(selected),
+        "updated_count": len(changed),
+        "truncated": tree_result.get("truncated", False) or len(selected) > limit,
     }
 
 

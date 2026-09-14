@@ -95,6 +95,7 @@ from .gui_runtime import (
 )
 from .gui_tools import (
     api_monitor_environment,
+    api_monitor_gui_tree_check_query,
     api_monitor_process_architecture,
     api_monitor_wait_for_new_traffic,
 )
@@ -1067,6 +1068,27 @@ def _self_test() -> None:
         assert waited_new["ready"]
         assert waited_new["current_calls"] == 4
         assert waited_new["new_calls"] == 2
+        original_tree = gui_tools.api_monitor_gui_tree
+        original_check = gui_tools._set_tree_item_check
+        checked_items = []
+        gui_tools.api_monitor_gui_tree = lambda **_kwargs: {
+            "tree": {"handle": 99},
+            "items": [
+                {"native_handle": 101, "text": "CreateFileW"},
+                {"native_handle": 102, "text": "ReadFile"},
+            ],
+            "truncated": False,
+        }
+        gui_tools._set_tree_item_check = lambda tree, item, checked: checked_items.append(
+            (tree, item, checked)
+        )
+        try:
+            tree_query = api_monitor_gui_tree_check_query("create", True)
+        finally:
+            gui_tools.api_monitor_gui_tree = original_tree
+            gui_tools._set_tree_item_check = original_check
+        assert tree_query["updated_count"] == 1
+        assert checked_items == [(99, 101, True)]
         delta = _gui_traffic_delta(
             {"panes": [{"list_handle": 1, "headers": ["API"], "rows": [["old"]]}]},
             {
