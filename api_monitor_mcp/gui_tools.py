@@ -1371,6 +1371,64 @@ def api_monitor_traffic(
 
 
 @mcp.tool()
+def api_monitor_search_traffic(
+    query: str,
+    window_title: str = "",
+    limit: int = 500,
+    query_regex: bool = False,
+    max_matches: int = 2000,
+    window_handle: int | None = None,
+) -> dict[str, Any]:
+    """Search the current background API Monitor traffic snapshot."""
+    if not query.strip():
+        raise ValueError("query must not be empty")
+    if len(query) > 4096:
+        raise ValueError("query must not exceed 4096 characters")
+    expression = None
+    if query_regex:
+        try:
+            expression = re.compile(query, re.IGNORECASE)
+        except re.error as exc:
+            raise ValueError(f"query is not a valid regex: {exc}") from exc
+    limit = _limit(limit, "limit", 2000)
+    max_matches = _limit(max_matches, "max_matches", 20_000)
+    traffic = api_monitor_traffic(window_title, limit, window_handle)
+    matched_panes: list[dict[str, Any]] = []
+    match_count = 0
+    source_truncated = False
+    for pane in traffic.get("panes", []):
+        rows = pane.get("rows", [])
+        details = pane.get("row_details", [])
+        matching_indices = []
+        for index, record in enumerate(pane.get("records", [])):
+            text = json.dumps(record, ensure_ascii=False, default=str)
+            if expression.search(text) if expression else query.casefold() in text.casefold():
+                matching_indices.append(index)
+        match_count += len(matching_indices)
+        source_truncated |= pane.get("truncated", False)
+        selected = matching_indices[: max(0, max_matches - sum(len(item["records"]) for item in matched_panes))]
+        if not selected:
+            continue
+        matched = dict(pane)
+        matched["rows"] = [rows[index] for index in selected if index < len(rows)]
+        matched["records"] = [pane["records"][index] for index in selected]
+        matched["row_details"] = [details[index] for index in selected if index < len(details)]
+        matched["match_count"] = len(matching_indices)
+        matched["truncated"] = pane.get("truncated", False) or len(selected) < len(matching_indices)
+        matched_panes.append(matched)
+    returned_count = sum(len(pane["records"]) for pane in matched_panes)
+    return {
+        "supported": traffic.get("supported", False),
+        "query": query,
+        "query_regex": query_regex,
+        "panes": matched_panes,
+        "count": match_count,
+        "returned_count": returned_count,
+        "truncated": source_truncated or match_count > returned_count,
+    }
+
+
+@mcp.tool()
 def api_monitor_export_traffic(
     output_path: str,
     window_title: str = "",

@@ -112,6 +112,7 @@ from .gui_tools import (
     api_monitor_gui_tree_check_query,
     api_monitor_process_architecture,
     api_monitor_process_details,
+    api_monitor_search_traffic,
     api_monitor_wait_for_new_traffic,
 )
 
@@ -1228,7 +1229,10 @@ def _self_test() -> None:
                 {
                     "list_handle": 7,
                     "pane_title": "API Calls",
+                    "headers": ["API", "Module"],
+                    "rows": [["CreateFileW", "kernel32.dll"]],
                     "records": [{"API": "CreateFileW", "Arguments": {"path": "x"}}],
+                    "row_details": [{"selected": True}],
                     "truncated": False,
                 }
             ],
@@ -1240,6 +1244,7 @@ def _self_test() -> None:
             live_csv_export = api_monitor_export_traffic(
                 str(live_csv), output_format="csv"
             )
+            live_search = api_monitor_search_traffic(r"CreateFile(W|A)", query_regex=True)
         finally:
             gui_tools.api_monitor_traffic = original_traffic
         assert live_json_export["rows"] == 1
@@ -1247,6 +1252,8 @@ def _self_test() -> None:
         assert live_csv_export["format"] == "csv"
         assert "pane_title,list_handle,row_index" in live_csv.read_text().splitlines()[0]
         assert "CreateFileW" in live_csv.read_text()
+        assert live_search["count"] == 1
+        assert live_search["panes"][0]["rows"] == [["CreateFileW", "kernel32.dll"]]
         original_tree = gui_tools.api_monitor_gui_tree
         original_check = gui_tools._set_tree_item_check
         checked_items = []
