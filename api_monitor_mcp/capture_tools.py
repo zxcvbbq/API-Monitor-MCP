@@ -51,6 +51,22 @@ from .capture_values import (
 from .runtime import CAPTURE_SUFFIXES, PROCESS_INFO, mcp
 
 
+def _write_text_export(
+    output: Path, content: str, overwrite: bool
+) -> tuple[bytes, str]:
+    encoded_bytes = content.encode("utf-8")
+    digest = hashlib.sha256(encoded_bytes).hexdigest()
+    try:
+        mode = "wb" if overwrite else "xb"
+        with output.open(mode) as handle:
+            handle.write(encoded_bytes)
+    except Exception:
+        if output.exists() and not overwrite:
+            output.unlink()
+        raise
+    return encoded_bytes, digest
+
+
 def _capture_records_without_data(
     archive: zipfile.ZipFile,
     data_info: zipfile.ZipInfo | None,
@@ -1059,16 +1075,7 @@ def capture_export_all_calls(
                         ]
                     )
         content = stream.getvalue()
-    encoded = content.encode("utf-8")
-    digest = hashlib.sha256(encoded).hexdigest()
-    try:
-        mode = "wb" if overwrite else "xb"
-        with output.open(mode) as handle:
-            handle.write(encoded)
-    except Exception:
-        if output.exists() and not overwrite:
-            output.unlink()
-        raise
+    encoded, digest = _write_text_export(output, content, overwrite)
     return {
         "exported": True,
         "file": str(path),
@@ -1936,16 +1943,7 @@ def capture_export_calls(
                     ]
                 )
         content = stream.getvalue()
-    encoded = content.encode("utf-8")
-    digest = hashlib.sha256(encoded).hexdigest()
-    try:
-        mode = "wb" if overwrite else "xb"
-        with output.open(mode) as handle:
-            handle.write(encoded)
-    except Exception:
-        if output.exists() and not overwrite:
-            output.unlink()
-        raise
+    encoded, digest = _write_text_export(output, content, overwrite)
     return {
         "exported": True,
         "file": result["file"],
@@ -2496,16 +2494,7 @@ def capture_export_decoded_calls(
                         ]
                     )
         content = stream.getvalue()
-    encoded = content.encode("utf-8")
-    digest = hashlib.sha256(encoded).hexdigest()
-    try:
-        mode = "wb" if overwrite else "xb"
-        with output.open(mode) as handle:
-            handle.write(encoded)
-    except Exception:
-        if output.exists() and not overwrite:
-            output.unlink()
-        raise
+    encoded, digest = _write_text_export(output, content, overwrite)
     return {
         "exported": True,
         "file": result["file"],
@@ -3092,16 +3081,7 @@ def capture_export_api_summary(
                 ]
             )
         content = stream.getvalue()
-    encoded = content.encode("utf-8")
-    digest = hashlib.sha256(encoded).hexdigest()
-    try:
-        mode = "wb" if overwrite else "xb"
-        with output.open(mode) as handle:
-            handle.write(encoded)
-    except Exception:
-        if output.exists() and not overwrite:
-            output.unlink()
-        raise
+    encoded, digest = _write_text_export(output, content, overwrite)
     return {
         "exported": True,
         "file": result["file"],
@@ -3326,16 +3306,7 @@ def capture_export_error_summary(
                 ]
             )
         content = stream.getvalue()
-    encoded = content.encode("utf-8")
-    digest = hashlib.sha256(encoded).hexdigest()
-    try:
-        mode = "wb" if overwrite else "xb"
-        with output.open(mode) as handle:
-            handle.write(encoded)
-    except Exception:
-        if output.exists() and not overwrite:
-            output.unlink()
-        raise
+    encoded, digest = _write_text_export(output, content, overwrite)
     return {
         "exported": True,
         "file": result["file"],
@@ -3642,16 +3613,7 @@ def capture_export_definitions(
                 ]
             )
         content = stream.getvalue()
-    encoded = content.encode("utf-8")
-    digest = hashlib.sha256(encoded).hexdigest()
-    try:
-        mode = "wb" if overwrite else "xb"
-        with output.open(mode) as handle:
-            handle.write(encoded)
-    except Exception:
-        if output.exists() and not overwrite:
-            output.unlink()
-        raise
+    encoded, digest = _write_text_export(output, content, overwrite)
     return {
         "exported": True,
         "file": result["file"],
@@ -4175,16 +4137,7 @@ def capture_export_search_calls(
                 ]
             )
         content = stream.getvalue()
-    encoded = content.encode("utf-8")
-    digest = hashlib.sha256(encoded).hexdigest()
-    try:
-        mode = "wb" if overwrite else "xb"
-        with output.open(mode) as handle:
-            handle.write(encoded)
-    except Exception:
-        if output.exists() and not overwrite:
-            output.unlink()
-        raise
+    encoded, digest = _write_text_export(output, content, overwrite)
     return {
         "exported": True,
         "file": result["file"],
@@ -4580,16 +4533,7 @@ def capture_export_slowest_calls(
                 ]
             )
         content = stream.getvalue()
-    encoded = content.encode("utf-8")
-    digest = hashlib.sha256(encoded).hexdigest()
-    try:
-        mode = "wb" if overwrite else "xb"
-        with output.open(mode) as handle:
-            handle.write(encoded)
-    except Exception:
-        if output.exists() and not overwrite:
-            output.unlink()
-        raise
+    encoded, digest = _write_text_export(output, content, overwrite)
     return {
         "exported": True,
         "file": result["file"],
@@ -5195,16 +5139,7 @@ def capture_export_call_graph(
                 ]
             )
         content = stream.getvalue()
-    encoded = content.encode("utf-8")
-    digest = hashlib.sha256(encoded).hexdigest()
-    try:
-        mode = "wb" if overwrite else "xb"
-        with output.open(mode) as handle:
-            handle.write(encoded)
-    except Exception:
-        if output.exists() and not overwrite:
-            output.unlink()
-        raise
+    encoded, digest = _write_text_export(output, content, overwrite)
     return {
         "exported": True,
         "file": graph["file"],
@@ -5332,16 +5267,7 @@ def capture_export_timeline(
                 ]
             )
         content = stream.getvalue()
-    encoded = content.encode("utf-8")
-    digest = hashlib.sha256(encoded).hexdigest()
-    try:
-        mode = "wb" if overwrite else "xb"
-        with output.open(mode) as handle:
-            handle.write(encoded)
-    except Exception:
-        if output.exists() and not overwrite:
-            output.unlink()
-        raise
+    encoded, digest = _write_text_export(output, content, overwrite)
     return {
         "exported": True,
         "file": result["file"],
@@ -5711,16 +5637,7 @@ def capture_export_monitoring_log(
                 ]
             )
         content = stream.getvalue()
-    encoded = content.encode("utf-8")
-    digest = hashlib.sha256(encoded).hexdigest()
-    try:
-        mode = "wb" if overwrite else "xb"
-        with output.open(mode) as handle:
-            handle.write(encoded)
-    except Exception:
-        if output.exists() and not overwrite:
-            output.unlink()
-        raise
+    encoded, digest = _write_text_export(output, content, overwrite)
     return {
         "exported": True,
         "file": result["file"],
@@ -5787,16 +5704,7 @@ def capture_export_monitoring_events(
                 ]
             )
         content = stream.getvalue()
-    encoded = content.encode("utf-8")
-    digest = hashlib.sha256(encoded).hexdigest()
-    try:
-        mode = "wb" if overwrite else "xb"
-        with output.open(mode) as handle:
-            handle.write(encoded)
-    except Exception:
-        if output.exists() and not overwrite:
-            output.unlink()
-        raise
+    encoded, digest = _write_text_export(output, content, overwrite)
     return {
         "exported": True,
         "file": result["file"],
