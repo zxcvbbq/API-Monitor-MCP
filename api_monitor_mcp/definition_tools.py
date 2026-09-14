@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 from xml.etree import ElementTree
@@ -10,6 +11,18 @@ from xml.etree import ElementTree
 from .capture_format import _file_time, _limit
 from .gui_runtime import _app_root
 from .runtime import API_NAME, MODULE_NAME, mcp
+
+
+@lru_cache(maxsize=4096)
+def _cached_api_text(
+    path_name: str, size: int, modified_ns: int, changed_ns: int
+) -> str:
+    return Path(path_name).read_text(encoding="utf-8-sig", errors="replace")
+
+
+def _api_text(path: Path) -> str:
+    stat = path.stat()
+    return _cached_api_text(str(path), stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
 
 
 def _api_definition_item(
@@ -20,7 +33,7 @@ def _api_definition_item(
 ) -> dict[str, Any] | None:
     try:
         stat = path.stat()
-        text = path.read_text(encoding="utf-8-sig", errors="replace")
+        text = _api_text(path)
         module_match = MODULE_NAME.search(text)
         relative = str(path.relative_to(api_root))
         text_casefold = text.casefold()
@@ -47,7 +60,7 @@ def _api_definition_item(
 def _api_definition_counts(indexed: dict[str, Any]) -> dict[str, Any]:
     path = Path(indexed["definition"])
     try:
-        text = path.read_text(encoding="utf-8-sig", errors="replace")
+        text = _api_text(path)
         root = ElementTree.fromstring(text)
     except OSError as exc:
         return {"valid": False, "error": str(exc), "api_count": 0, "variable_count": 0}
@@ -89,7 +102,7 @@ def api_monitor_search_apis(
     seen: set[tuple[str, str]] = set()
     for path in sorted(api_root.rglob("*.xml")):
         try:
-            text = path.read_text(encoding="utf-8-sig", errors="replace")
+            text = _api_text(path)
         except OSError:
             continue
         module_match = MODULE_NAME.search(text)
@@ -296,7 +309,7 @@ def api_monitor_search_variables(
     results: list[dict[str, Any]] = []
     for xml_path in sorted(api_root.rglob("*.xml")):
         try:
-            text = xml_path.read_text(encoding="utf-8-sig", errors="replace")
+            text = _api_text(xml_path)
         except OSError:
             continue
         if (
@@ -408,7 +421,7 @@ def api_monitor_read_api_definition(
     """Read a bounded Rohitab XML API definition returned by the API search tool."""
     max_chars = _limit(max_chars, "max_chars", 2_000_000)
     path = _api_definition_path(definition_path, install_root)
-    text = path.read_text(encoding="utf-8-sig", errors="replace")
+    text = _api_text(path)
     return {
         "definition": str(path),
         "text": text[:max_chars],
