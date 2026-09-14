@@ -186,7 +186,8 @@ def _self_test() -> None:
             archive.writestr("definitions", bytes(definitions))
             archive.writestr(
                 "log/monitoring.txt",
-                "sample.exe: Monitoring Module 0x1234 -> C:\\sample.dll\n",
+                "sample.exe: Monitoring Module 0x1234 -> C:\\sample.dll\n"
+                "Summary | 1 calls | 5% | sample.exe\n",
             )
             process_info = struct.pack("<IIIQ", 1, 0, 1234, 0x7FF600000000)
             for value in ("C:\\sample.exe", '"C:\\sample.exe" /test', "Sample Process"):
@@ -253,6 +254,9 @@ def _self_test() -> None:
         log = capture_monitoring_log(str(path), "module", 10)
         assert log["lines"] == ["sample.exe: Monitoring Module 0x1234 -> C:\\sample.dll"]
         assert log["events"][0]["type"] == "module"
+        summary_log = capture_monitoring_log(str(path), "summary", 10)
+        assert summary_log["events"][0]["calls"] == 1
+        assert summary_log["events"][0]["process"] == "sample.exe"
         full_log_entry = capture_read_entry(str(path), "log/monitoring.txt", max_bytes=1024)
         log_slice = capture_read_entry(str(path), "log/monitoring.txt", max_bytes=4, offset=7)
         assert log_slice["text"] == full_log_entry["text"][7:11]

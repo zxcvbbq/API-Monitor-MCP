@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any
 
 from .capture_values import _read_payload
-from .runtime import CAPTURE_SUFFIXES, CHILD_EVENT, MODULE_EVENT, ZIP_SIGNATURES
+from .runtime import CAPTURE_SUFFIXES, CHILD_EVENT, MODULE_EVENT, SUMMARY_TEXT, ZIP_SIGNATURES
 
 
 def _capture_path(file_path: str) -> Path:
@@ -1055,6 +1055,13 @@ def _scan_strings(data: bytes | mmap.mmap, query: str, limit: int, minimum: int)
 
 
 def _monitoring_event(line: str) -> dict[str, Any]:
+    if match := SUMMARY_TEXT.fullmatch(line.strip()):
+        return {
+            "type": "summary",
+            "calls": int(match.group(1).replace(",", "")),
+            "usage": match.group(2).strip(),
+            "process": match.group(3).strip(),
+        }
     if match := MODULE_EVENT.fullmatch(line):
         event = {"type": "module", **match.groupdict()}
         event["module"] = event["module"].rstrip(".")
