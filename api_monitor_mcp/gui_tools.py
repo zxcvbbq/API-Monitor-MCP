@@ -1953,17 +1953,27 @@ def api_monitor_capture_session(
     if path.exists() and not overwrite:
         raise FileExistsError(f"Capture already exists: {path}")
 
-    waited = api_monitor_wait_for_traffic(
-        minimum_calls=minimum_calls,
-        timeout_seconds=duration_seconds,
-        window_handle=window_handle,
-    )
-    stopped = api_monitor_monitoring_control(
-        "stop",
-        architecture=architecture,
-        timeout_seconds=timeout_seconds,
-        window_handle=window_handle,
-    )
+    wait_error = None
+    try:
+        waited = api_monitor_wait_for_traffic(
+            minimum_calls=minimum_calls,
+            timeout_seconds=duration_seconds,
+            window_handle=window_handle,
+        )
+    except (LookupError, OSError, RuntimeError, TimeoutError, ValueError, TypeError, AttributeError) as exc:
+        waited = {"ready": False, "error": str(exc)}
+        wait_error = str(exc)
+    stop_error = None
+    try:
+        stopped = api_monitor_monitoring_control(
+            "stop",
+            architecture=architecture,
+            timeout_seconds=timeout_seconds,
+            window_handle=window_handle,
+        )
+    except (LookupError, OSError, RuntimeError, TimeoutError, ValueError, TypeError, AttributeError) as exc:
+        stopped = {"submitted": False, "error": str(exc)}
+        stop_error = str(exc)
     saved = api_monitor_save_capture(
         str(path),
         overwrite=overwrite,
@@ -1974,7 +1984,7 @@ def api_monitor_capture_session(
     if validation is None:
         validation = capture_validate(str(path))
     result = {
-        "captured": validation["valid"],
+        "captured": bool(validation.get("valid")),
         "ready": waited.get("ready", False),
         "minimum_calls": minimum_calls,
         "waited": waited,
@@ -1984,6 +1994,10 @@ def api_monitor_capture_session(
     }
     if validation["valid"]:
         result["capture"] = capture_info(str(path))
+    if wait_error:
+        result["wait_error"] = wait_error
+    if stop_error:
+        result["stop_error"] = stop_error
     return result
 
 

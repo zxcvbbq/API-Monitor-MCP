@@ -140,6 +140,7 @@ from .gui_runtime import (
 from .gui_tools import (
     api_monitor_call_stack,
     api_monitor_capture_process,
+    api_monitor_capture_session,
     api_monitor_environment,
     api_monitor_export_traffic,
     api_monitor_gui_tree_check_query,
@@ -1768,6 +1769,38 @@ def _self_test() -> None:
         assert recovered_capture["captured"]
         assert recovered_capture["wait_error"] == "traffic unavailable"
         assert recovered_capture["stopped"]["submitted"]
+        original_wait_for_traffic = gui_tools.api_monitor_wait_for_traffic
+        original_monitoring_control = gui_tools.api_monitor_monitoring_control
+        original_save_capture = gui_tools.api_monitor_save_capture
+        original_capture_info = gui_tools.capture_info
+        gui_tools.api_monitor_wait_for_traffic = lambda **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("traffic wait unavailable")
+        )
+        gui_tools.api_monitor_monitoring_control = lambda *_args, **_kwargs: {
+            "submitted": True,
+            "action": "stop",
+        }
+        gui_tools.api_monitor_save_capture = lambda *_args, **_kwargs: {
+            "saved": True,
+            "validation": {"valid": True},
+        }
+        gui_tools.capture_info = lambda *_args, **_kwargs: {"file": "mock-session"}
+        try:
+            gui_tools.sys.platform = "win32"
+            recovered_session = api_monitor_capture_session(
+                str(Path(directory) / "mock-session.apmx64"),
+                duration_seconds=1,
+                timeout_seconds=1,
+            )
+        finally:
+            gui_tools.sys.platform = original_platform
+            gui_tools.api_monitor_wait_for_traffic = original_wait_for_traffic
+            gui_tools.api_monitor_monitoring_control = original_monitoring_control
+            gui_tools.api_monitor_save_capture = original_save_capture
+            gui_tools.capture_info = original_capture_info
+        assert recovered_session["captured"]
+        assert recovered_session["wait_error"] == "traffic wait unavailable"
+        assert recovered_session["stopped"]["submitted"]
         original_summary = gui_tools.api_monitor_summary
         original_traffic = gui_tools.api_monitor_traffic
         summary_calls = iter((3, 4))
