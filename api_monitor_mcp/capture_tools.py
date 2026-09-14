@@ -4727,6 +4727,66 @@ def capture_export_behavior_summary(
 
 
 @mcp.tool()
+def capture_security_report(
+    file_path: str,
+    deep_validation: bool = False,
+    process_limit: int = 200,
+    api_limit: int = 1000,
+    max_records: int = 100_000,
+    indicator_limit: int = 200,
+    max_indicator_bytes: int = 64 * 1024 * 1024,
+    include_log: bool = True,
+    log_limit: int = 1000,
+) -> dict[str, Any]:
+    """Return one bounded blue-team/CTF triage report for an APMX capture."""
+    process_limit = _limit(process_limit, "process_limit", 2000)
+    api_limit = _limit(api_limit, "api_limit", 10_000)
+    max_records = _limit(max_records, "max_records", 1_000_000)
+    indicator_limit = _limit(indicator_limit, "indicator_limit", 10_000)
+    max_indicator_bytes = _limit(
+        max_indicator_bytes, "max_indicator_bytes", 512 * 1024 * 1024
+    )
+    log_limit = _limit(log_limit, "log_limit", 10_000)
+    report = capture_overview(
+        file_path,
+        process_limit=process_limit,
+        api_limit=api_limit,
+        max_records=max_records,
+        include_log=include_log,
+        log_limit=log_limit,
+    )
+    if deep_validation:
+        report["validation"] = capture_validate(
+            file_path, deep=True, max_records=max_records
+        )
+    report["modules"] = capture_list_modules(file_path, limit=process_limit)
+    report["errors"] = capture_error_summary(
+        file_path, limit=api_limit, max_records=max_records
+    )
+    report["indicators"] = capture_indicators(
+        file_path,
+        limit=indicator_limit,
+        max_total_bytes=max_indicator_bytes,
+    )
+    report["behavior"] = capture_behavior_summary(
+        file_path, limit=api_limit, max_records=max_records
+    )
+    report["security"] = {
+        "valid": report["validation"].get("valid", False),
+        "heuristic_behavior": True,
+        "high_signal_categories": [
+            item["category"]
+            for item in report["behavior"].get("categories", [])
+            if item.get("severity") == "high"
+        ],
+        "error_count": report["errors"].get("error_count", 0),
+        "indicator_count": report["indicators"].get("count", 0),
+        "behavior_finding_count": report["behavior"].get("count", 0),
+    }
+    return report
+
+
+@mcp.tool()
 def capture_error_summary(
     file_path: str,
     process_index: int | None = None,

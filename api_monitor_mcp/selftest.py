@@ -114,6 +114,7 @@ from .capture_tools import (
     capture_search_definitions,
     capture_search_directory,
     capture_search_entries,
+    capture_security_report,
     capture_slowest_calls,
     capture_strings,
     capture_validate,
@@ -1229,6 +1230,10 @@ def _self_test() -> None:
         assert behavior_csv_export["format"] == "csv"
         assert behavior_csv_path.read_text().startswith("category,severity")
         assert "CreateFileW" in behavior_csv_path.read_text()
+        security_report = capture_security_report(str(path), include_log=False)
+        assert security_report["security"]["valid"]
+        assert security_report["security"]["indicator_count"] >= 1
+        assert security_report["behavior"]["findings"][0]["api"]["name"] == "CreateFileW"
         error_summary = capture_error_summary(str(path))
         assert error_summary["error_count"] == 1
         assert error_summary["errors"][0]["hex"] == "0x00000005"
