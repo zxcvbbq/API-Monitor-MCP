@@ -15,6 +15,7 @@ import re
 import struct
 import time
 import zipfile
+from collections import Counter
 from contextlib import ExitStack
 from pathlib import Path
 from typing import Any
@@ -280,6 +281,16 @@ def _indicator_candidates(text: str) -> list[tuple[str, str]]:
                     continue
             candidates.append((kind, value))
     return candidates
+
+
+def _shannon_entropy(data: bytes) -> float:
+    if not data:
+        return 0.0
+    size = len(data)
+    return -sum(
+        (count / size) * math.log2(count / size)
+        for count in Counter(data).values()
+    )
 
 
 def _capture_records_without_data(
@@ -2057,6 +2068,69 @@ def capture_export_indicators(
         "truncated": result["truncated"],
         "size": len(encoded),
         "sha256": digest,
+    }
+
+
+@mcp.tool()
+def capture_entropy(
+    file_path: str,
+    threshold: float = 7.0,
+    limit: int = 200,
+    max_entry_bytes: int = 8 * 1024 * 1024,
+    max_total_bytes: int = 64 * 1024 * 1024,
+) -> dict[str, Any]:
+    """Measure ZIP-entry entropy to flag packed or encrypted capture content."""
+    if not math.isfinite(threshold) or not 0 <= threshold <= 8:
+        raise ValueError("threshold must be finite and between 0 and 8")
+    limit = _limit(limit, "limit", 10_000)
+    max_entry_bytes = _limit(max_entry_bytes, "max_entry_bytes", 64 * 1024 * 1024)
+    max_total_bytes = _limit(max_total_bytes, "max_total_bytes", 512 * 1024 * 1024)
+    path = _capture_path(file_path)
+    entries: list[dict[str, Any]] = []
+    scanned_bytes = 0
+    scanned_entries = 0
+    truncated = False
+    archive, _, _ = _open_capture_zip(path)
+    with archive:
+        for info in archive.infolist():
+            if info.is_dir():
+                continue
+            if len(entries) >= limit:
+                truncated = True
+                break
+            remaining = max_total_bytes - scanned_bytes
+            if remaining <= 0:
+                truncated = True
+                break
+            read_limit = min(max_entry_bytes, remaining)
+            with archive.open(info) as member:
+                data = member.read(read_limit + 1)
+            entry_truncated = len(data) > read_limit or info.file_size > read_limit
+            data = data[:read_limit]
+            scanned_bytes += len(data)
+            scanned_entries += 1
+            entropy = _shannon_entropy(data)
+            entries.append(
+                {
+                    "entry": info.filename,
+                    "size": info.file_size,
+                    "sampled_bytes": len(data),
+                    "entropy": round(entropy, 6),
+                    "high_entropy": entropy >= threshold,
+                    "truncated": entry_truncated,
+                }
+            )
+            truncated |= entry_truncated
+    entries.sort(key=lambda item: (-item["entropy"], item["entry"]))
+    return {
+        "file": str(path),
+        "threshold": threshold,
+        "entries": entries,
+        "count": len(entries),
+        "high_entropy_count": sum(item["high_entropy"] for item in entries),
+        "scanned_entries": scanned_entries,
+        "scanned_bytes": scanned_bytes,
+        "truncated": truncated,
     }
 
 
@@ -4768,6 +4842,9 @@ def capture_security_report(
         limit=indicator_limit,
         max_total_bytes=max_indicator_bytes,
     )
+    report["entropy"] = capture_entropy(
+        file_path, max_total_bytes=max_indicator_bytes
+    )
     report["behavior"] = capture_behavior_summary(
         file_path, limit=api_limit, max_records=max_records
     )
@@ -4781,6 +4858,7 @@ def capture_security_report(
         ],
         "error_count": report["errors"].get("error_count", 0),
         "indicator_count": report["indicators"].get("count", 0),
+        "high_entropy_count": report["entropy"].get("high_entropy_count", 0),
         "behavior_finding_count": report["behavior"].get("count", 0),
     }
     return report

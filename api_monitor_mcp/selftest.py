@@ -42,6 +42,7 @@ from .capture_tools import (
     capture_decode_call,
     capture_decode_calls,
     capture_decode_process_data,
+    capture_entropy,
     capture_error_summary,
     capture_export_all_calls,
     capture_export_api_summary,
@@ -389,6 +390,9 @@ def _self_test() -> None:
         assert indicators_csv_export["format"] == "csv"
         assert indicators_csv_path.read_text().startswith("type,value,entry")
         assert "https://example.test" in indicators_csv_path.read_text()
+        entropy = capture_entropy(str(path), limit=20)
+        assert entropy["count"] == len(info["entries"])
+        assert entropy["high_entropy_count"] >= 0
         log = capture_monitoring_log(str(path), "module", 10)
         assert log["lines"] == ["sample.exe: Monitoring Module 0x1234 -> C:\\sample.dll"]
         assert log["events"][0]["type"] == "module"
@@ -1233,6 +1237,8 @@ def _self_test() -> None:
         security_report = capture_security_report(str(path), include_log=False)
         assert security_report["security"]["valid"]
         assert security_report["security"]["indicator_count"] >= 1
+        assert "high_entropy_count" in security_report["security"]
+        assert security_report["entropy"]["count"] == len(info["entries"])
         assert security_report["behavior"]["findings"][0]["api"]["name"] == "CreateFileW"
         error_summary = capture_error_summary(str(path))
         assert error_summary["error_count"] == 1
