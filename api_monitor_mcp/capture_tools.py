@@ -6685,6 +6685,110 @@ def capture_calls_around(
 
 
 @mcp.tool()
+def capture_export_calls_around(
+    file_path: str,
+    output_path: str,
+    process_index: int,
+    record_index: int,
+    before: int = 5,
+    after: int = 5,
+    include_data: bool = True,
+    max_data_bytes: int = 4096,
+    resolve_definitions: bool = False,
+    output_format: str = "json",
+    overwrite: bool = False,
+) -> dict[str, Any]:
+    """Export a bounded call-record window around one saved call as JSON or CSV."""
+    if output_format not in {"json", "csv"}:
+        raise ValueError("output_format must be json or csv")
+    output = Path(output_path).expanduser()
+    if not output.parent.is_dir():
+        raise NotADirectoryError(f"Output directory not found: {output.parent}")
+    output = output.resolve()
+    if output.exists() and not overwrite:
+        raise FileExistsError(f"Output already exists: {output}")
+    result = capture_calls_around(
+        file_path,
+        process_index=process_index,
+        record_index=record_index,
+        before=before,
+        after=after,
+        include_data=include_data,
+        max_data_bytes=max_data_bytes,
+        resolve_definitions=resolve_definitions,
+    )
+    if output_format == "json":
+        content = json.dumps(result, indent=2, ensure_ascii=False) + "\n"
+    else:
+        stream = io.StringIO(newline="")
+        writer = csv.writer(stream)
+        writer.writerow(
+            [
+                "process_index",
+                "pid",
+                "target_record_index",
+                "record_index",
+                "is_target",
+                "offset",
+                "size",
+                "valid",
+                "flags",
+                "definition_offset",
+                "api_name",
+                "api_module",
+                "thread_id",
+                "thread_number",
+                "timestamp_utc",
+                "duration_seconds",
+                "error_code",
+                "data_refs",
+            ]
+        )
+        for record in result["records"]:
+            definition = record.get("definition", {})
+            context = record.get("context", {})
+            writer.writerow(
+                [
+                    process_index,
+                    result.get("process_pid", ""),
+                    record_index,
+                    record.get("index", ""),
+                    record.get("is_target", ""),
+                    record.get("offset", ""),
+                    record.get("size", ""),
+                    record.get("valid", ""),
+                    record.get("flags", ""),
+                    record.get("definition_offset", ""),
+                    definition.get("name", ""),
+                    definition.get("module", ""),
+                    context.get("thread_id", ""),
+                    context.get("thread_number", ""),
+                    context.get("timestamp_utc", ""),
+                    context.get("duration_seconds", ""),
+                    context.get("error_code", ""),
+                    json.dumps(record.get("data_refs", []), ensure_ascii=False),
+                ]
+            )
+        content = stream.getvalue()
+    encoded, digest = _write_text_export(output, content, overwrite)
+    return {
+        "exported": True,
+        "file": result["file"],
+        "output": str(output),
+        "format": output_format,
+        "process_index": process_index,
+        "process_pid": result.get("process_pid"),
+        "record_index": record_index,
+        "window_start": result["window_start"],
+        "window_end": result["window_end"],
+        "count": len(result["records"]),
+        "total_count": result["count"],
+        "size": len(encoded),
+        "sha256": digest,
+    }
+
+
+@mcp.tool()
 def capture_read_call_bytes(
     file_path: str,
     process_index: int,

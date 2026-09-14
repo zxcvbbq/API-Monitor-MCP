@@ -50,6 +50,7 @@ from .capture_tools import (
     capture_export_call_sequence,
     capture_export_call_stats,
     capture_export_calls,
+    capture_export_calls_around,
     capture_export_compare,
     capture_export_compare_all_calls,
     capture_export_compare_apis,
@@ -922,6 +923,18 @@ def _self_test() -> None:
         assert call_window["process_pid"] == 1234
         assert call_window["window_start"] == 0
         assert call_window["records"][0]["is_target"]
+        call_window_json = Path(directory) / "call-window.json"
+        call_window_export = capture_export_calls_around(
+            str(path), str(call_window_json), 0, 0, before=2, after=2
+        )
+        assert call_window_export["count"] == 1
+        assert json.loads(call_window_json.read_text())["records"][0]["is_target"]
+        call_window_csv = Path(directory) / "call-window.csv"
+        call_window_csv_export = capture_export_calls_around(
+            str(path), str(call_window_csv), 0, 0, before=2, after=2, output_format="csv"
+        )
+        assert call_window_csv_export["format"] == "csv"
+        assert "target_record_index" in call_window_csv.read_text().splitlines()[0]
         resolved_window = capture_calls_around(str(path), 0, 0, resolve_definitions=True)
         assert resolved_window["records"][0]["definition"]["name"] == "CreateFileW"
         binary_payload = _read_payload(b"\x01\x00\xff\x00")
