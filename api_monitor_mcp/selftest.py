@@ -69,6 +69,7 @@ from .capture_tools import (
     capture_export_threads,
     capture_export_timeline,
     capture_export_types,
+    capture_export_xml_entry,
     capture_extract_call_payload,
     capture_extract_entry,
     capture_extract_process_data,
@@ -420,6 +421,19 @@ def _self_test() -> None:
         xml = capture_xml_entry(str(path), query="CreateFile")
         assert xml["root"] == "DisplayFilters"
         assert xml["nodes"][0]["attributes"]["Field"] == "API"
+        xml_json_path = Path(directory) / "filters-xml.json"
+        xml_export = capture_export_xml_entry(
+            str(path), str(xml_json_path), query="CreateFile"
+        )
+        assert xml_export["count"] == 1
+        assert json.loads(xml_json_path.read_text())["nodes"][0]["tag"] == "Filter"
+        xml_csv_path = Path(directory) / "filters-xml.csv"
+        xml_csv_export = capture_export_xml_entry(
+            str(path), str(xml_csv_path), query="CreateFile", output_format="csv"
+        )
+        assert xml_csv_export["format"] == "csv"
+        assert xml_csv_path.read_text().startswith("index,parent_index,depth,tag")
+        assert "CreateFile" in xml_csv_path.read_text()
         filters = capture_list_filters(str(path), filter_type="display")
         assert filters["count"] == 1
         assert filters["filters"][0]["attributes"]["Operator"] == "contains"

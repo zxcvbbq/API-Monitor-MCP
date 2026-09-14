@@ -1764,6 +1764,77 @@ def capture_xml_entry(
 
 
 @mcp.tool()
+def capture_export_xml_entry(
+    file_path: str,
+    output_path: str,
+    entry_name: str = "filter/display.xml",
+    query: str = "",
+    limit: int = 1000,
+    max_bytes: int = 16 * 1024 * 1024,
+    output_format: str = "json",
+    overwrite: bool = False,
+) -> dict[str, Any]:
+    """Export bounded XML node searches as JSON or CSV."""
+    if output_format not in {"json", "csv"}:
+        raise ValueError("output_format must be json or csv")
+    output = Path(output_path).expanduser()
+    if not output.parent.is_dir():
+        raise NotADirectoryError(f"Output directory not found: {output.parent}")
+    output = output.resolve()
+    if output.exists() and not overwrite:
+        raise FileExistsError(f"Output already exists: {output}")
+    result = capture_xml_entry(
+        file_path,
+        entry_name=entry_name,
+        query=query,
+        limit=limit,
+        max_bytes=max_bytes,
+    )
+    if output_format == "json":
+        content = json.dumps(result, indent=2, ensure_ascii=False) + "\n"
+    else:
+        stream = io.StringIO(newline="")
+        writer = csv.writer(stream)
+        writer.writerow(
+            [
+                "index",
+                "parent_index",
+                "depth",
+                "tag",
+                "attributes",
+                "text",
+                "truncated_text",
+            ]
+        )
+        for node in result["nodes"]:
+            writer.writerow(
+                [
+                    node.get("index", ""),
+                    node.get("parent_index", ""),
+                    node.get("depth", ""),
+                    node.get("tag", ""),
+                    json.dumps(node.get("attributes", {}), ensure_ascii=False),
+                    node.get("text", ""),
+                    node.get("truncated_text", ""),
+                ]
+            )
+        content = stream.getvalue()
+    encoded, digest = _write_text_export(output, content, overwrite)
+    return {
+        "exported": True,
+        "file": result["file"],
+        "output": str(output),
+        "format": output_format,
+        "entry": entry_name,
+        "query": query,
+        "count": result["count"],
+        "truncated": result["truncated"],
+        "size": len(encoded),
+        "sha256": digest,
+    }
+
+
+@mcp.tool()
 def capture_list_filters(
     file_path: str,
     filter_type: str = "all",
