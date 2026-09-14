@@ -47,6 +47,7 @@ from .capture_tools import (
     capture_export_timeline,
     capture_extract_call_payload,
     capture_extract_entry,
+    capture_extract_process_data,
     capture_filter_calls,
     capture_find_bytes,
     capture_info,
@@ -401,6 +402,12 @@ def _self_test() -> None:
         assert protected_output.read_bytes() == b"keep"
         process_slice = capture_read_process_data(str(path), 0, 160, 5)
         assert process_slice["text"] == "hello"
+        process_extract = Path(directory) / "process-slice.bin"
+        process_extract_result = capture_extract_process_data(
+            str(path), 0, str(process_extract), offset=160, length=5
+        )
+        assert process_extract_result["size"] == 5
+        assert process_extract.read_bytes() == b"hello"
         json_export = capture_export_calls(
             str(path), str(Path(directory) / "calls.json"), resolve_definitions=True
         )

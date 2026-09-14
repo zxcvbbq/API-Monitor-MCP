@@ -136,6 +136,36 @@ def _capture_validate_stream(
     return stats, definition_checks
 
 
+def _copy_capture_slice(
+    archive: zipfile.ZipFile,
+    info: zipfile.ZipInfo,
+    offset: int,
+    length: int,
+    output: Path,
+    overwrite: bool,
+) -> tuple[int, str]:
+    digest = hashlib.sha256()
+    written = 0
+    created = False
+    try:
+        with archive.open(info) as data_stream:
+            data_stream.seek(offset)
+            with output.open("wb" if overwrite else "xb") as handle:
+                created = True
+                while written < length:
+                    chunk = data_stream.read(min(1024 * 1024, length - written))
+                    if not chunk:
+                        raise ValueError("capture entry ended before its declared length")
+                    handle.write(chunk)
+                    digest.update(chunk)
+                    written += len(chunk)
+    except Exception:
+        if created and output.exists():
+            output.unlink()
+        raise
+    return written, digest.hexdigest()
+
+
 @mcp.tool()
 def capture_info(file_path: str) -> dict[str, Any]:
     """Inspect an APMX file header and list its ZIP container entries."""
@@ -1636,27 +1666,14 @@ def capture_extract_call_payload(
         if reference["length"] > max_bytes:
             raise ValueError(f"call payload exceeds max_bytes: {reference['length']}")
 
-        digest = hashlib.sha256()
-        written = 0
-        created = False
-        try:
-            with archive.open(data_info) as data_stream:
-                data_stream.seek(reference["offset"])
-                with output.open("wb" if overwrite else "xb") as handle:
-                    created = True
-                    while written < reference["length"]:
-                        chunk = data_stream.read(
-                            min(1024 * 1024, reference["length"] - written)
-                        )
-                        if not chunk:
-                            raise ValueError("saved call payload ended before its declared length")
-                        handle.write(chunk)
-                        digest.update(chunk)
-                        written += len(chunk)
-        except Exception:
-            if created and output.exists():
-                output.unlink()
-            raise
+        written, digest = _copy_capture_slice(
+            archive,
+            data_info,
+            reference["offset"],
+            reference["length"],
+            output,
+            overwrite,
+        )
     return {
         "extracted": True,
         "file": str(path),
@@ -1666,7 +1683,7 @@ def capture_extract_call_payload(
         "data_offset": reference["offset"],
         "size": written,
         "output": str(output),
-        "sha256": digest.hexdigest(),
+        "sha256": digest,
     }
 
 
@@ -1705,6 +1722,63 @@ def capture_read_process_data(
         "returned_bytes": len(returned),
         "truncated": len(data) > length,
         **payload,
+    }
+
+
+@mcp.tool()
+def capture_extract_process_data(
+    file_path: str,
+    process_index: int,
+    output_path: str,
+    offset: int = 0,
+    length: int = 4096,
+    overwrite: bool = False,
+) -> dict[str, Any]:
+    """Extract a bounded arbitrary process-data range to a file."""
+    if process_index < 0 or offset < 0:
+        raise ValueError("process_index and offset must be non-negative")
+    length = _limit(length, "length", 256 * 1024 * 1024)
+    output = Path(output_path).expanduser()
+    if not output.parent.is_dir():
+        raise NotADirectoryError(f"Output directory not found: {output.parent}")
+    output = output.resolve()
+    if output.exists() and not overwrite:
+        raise FileExistsError(f"Output already exists: {output}")
+    path = _capture_path(file_path)
+    if output == path:
+        raise ValueError("output_path must differ from the capture file")
+    entry_name = f"process/{process_index}/data"
+    archive, _, _ = _open_capture_zip(path)
+    with archive:
+        try:
+            info = archive.getinfo(entry_name)
+        except KeyError as exc:
+            raise FileNotFoundError(f"Capture data entry not found: {entry_name}") from exc
+        if info.is_dir():
+            raise IsADirectoryError(f"Capture data entry is a directory: {entry_name}")
+        if offset > info.file_size:
+            raise ValueError(f"offset {offset} is outside {info.file_size}-byte data entry")
+        requested = min(length, info.file_size - offset)
+        written, digest = _copy_capture_slice(
+            archive,
+            info,
+            offset,
+            requested,
+            output,
+            overwrite,
+        )
+    return {
+        "extracted": True,
+        "file": str(path),
+        "process_index": process_index,
+        "entry": entry_name,
+        "entry_size": info.file_size,
+        "offset": offset,
+        "requested_bytes": length,
+        "size": written,
+        "truncated": written < length,
+        "output": str(output),
+        "sha256": digest,
     }
 
 
