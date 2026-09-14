@@ -4865,6 +4865,85 @@ def capture_security_report(
 
 
 @mcp.tool()
+def capture_export_security_report(
+    file_path: str,
+    output_path: str,
+    deep_validation: bool = False,
+    process_limit: int = 200,
+    api_limit: int = 1000,
+    max_records: int = 100_000,
+    indicator_limit: int = 200,
+    max_indicator_bytes: int = 64 * 1024 * 1024,
+    include_log: bool = True,
+    log_limit: int = 1000,
+    output_format: str = "json",
+    overwrite: bool = False,
+) -> dict[str, Any]:
+    """Export a bounded security triage report as JSON or sectioned CSV."""
+    if output_format not in {"json", "csv"}:
+        raise ValueError("output_format must be json or csv")
+    output = Path(output_path).expanduser()
+    if not output.parent.is_dir():
+        raise NotADirectoryError(f"Output directory not found: {output.parent}")
+    output = output.resolve()
+    if output.exists() and not overwrite:
+        raise FileExistsError(f"Output already exists: {output}")
+    result = capture_security_report(
+        file_path,
+        deep_validation=deep_validation,
+        process_limit=process_limit,
+        api_limit=api_limit,
+        max_records=max_records,
+        indicator_limit=indicator_limit,
+        max_indicator_bytes=max_indicator_bytes,
+        include_log=include_log,
+        log_limit=log_limit,
+    )
+    if output_format == "json":
+        content = json.dumps(result, indent=2, ensure_ascii=False) + "\n"
+    else:
+        stream = io.StringIO(newline="")
+        writer = csv.writer(stream)
+        writer.writerow(["section", "key", "value"])
+        for section, value in result.items():
+            if isinstance(value, dict):
+                for key, item in value.items():
+                    writer.writerow(
+                        [
+                            section,
+                            key,
+                            json.dumps(item, ensure_ascii=False)
+                            if isinstance(item, (dict, list))
+                            else item,
+                        ]
+                    )
+            else:
+                writer.writerow(
+                    [
+                        section,
+                        "",
+                        json.dumps(value, ensure_ascii=False)
+                        if isinstance(value, list)
+                        else value,
+                    ]
+                )
+        content = stream.getvalue()
+    encoded, digest = _write_text_export(output, content, overwrite)
+    return {
+        "exported": True,
+        "file": result["file"],
+        "output": str(output),
+        "format": output_format,
+        "valid": result["security"]["valid"],
+        "indicator_count": result["security"]["indicator_count"],
+        "behavior_finding_count": result["security"]["behavior_finding_count"],
+        "high_entropy_count": result["security"]["high_entropy_count"],
+        "size": len(encoded),
+        "sha256": digest,
+    }
+
+
+@mcp.tool()
 def capture_error_summary(
     file_path: str,
     process_index: int | None = None,

@@ -77,6 +77,7 @@ from .capture_tools import (
     capture_export_search_calls,
     capture_export_search_directory,
     capture_export_search_entries,
+    capture_export_security_report,
     capture_export_slowest_calls,
     capture_export_strings,
     capture_export_threads,
@@ -1240,6 +1241,19 @@ def _self_test() -> None:
         assert "high_entropy_count" in security_report["security"]
         assert security_report["entropy"]["count"] == len(info["entries"])
         assert security_report["behavior"]["findings"][0]["api"]["name"] == "CreateFileW"
+        security_json_path = Path(directory) / "security.json"
+        security_export = capture_export_security_report(
+            str(path), str(security_json_path), include_log=False
+        )
+        assert security_export["valid"]
+        assert json.loads(security_json_path.read_text())["security"]["valid"]
+        security_csv_path = Path(directory) / "security.csv"
+        security_csv_export = capture_export_security_report(
+            str(path), str(security_csv_path), include_log=False, output_format="csv"
+        )
+        assert security_csv_export["format"] == "csv"
+        assert security_csv_path.read_text().startswith("section,key,value")
+        assert "indicator_count" in security_csv_path.read_text()
         error_summary = capture_error_summary(str(path))
         assert error_summary["error_count"] == 1
         assert error_summary["errors"][0]["hex"] == "0x00000005"
