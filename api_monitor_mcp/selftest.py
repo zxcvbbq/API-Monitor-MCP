@@ -55,6 +55,7 @@ from .capture_tools import (
     capture_export_definitions,
     capture_export_error_summary,
     capture_export_filter_calls,
+    capture_export_filters,
     capture_export_modules,
     capture_export_monitoring_events,
     capture_export_monitoring_log,
@@ -422,6 +423,19 @@ def _self_test() -> None:
         filters = capture_list_filters(str(path), filter_type="display")
         assert filters["count"] == 1
         assert filters["filters"][0]["attributes"]["Operator"] == "contains"
+        filters_json_path = Path(directory) / "filters.json"
+        filters_export = capture_export_filters(
+            str(path), str(filters_json_path), filter_type="display"
+        )
+        assert filters_export["count"] == 1
+        assert json.loads(filters_json_path.read_text())["filters"][0]["tag"] == "Filter"
+        filters_csv_path = Path(directory) / "filters.csv"
+        filters_csv_export = capture_export_filters(
+            str(path), str(filters_csv_path), filter_type="display", output_format="csv"
+        )
+        assert filters_csv_export["format"] == "csv"
+        assert filters_csv_path.read_text().startswith("entry,root,index,tag")
+        assert "CreateFile" in filters_csv_path.read_text()
         call_records = capture_call_records(str(path), include_data=True)
         assert call_records["count"] == 1
         assert call_records["process_pid"] == 1234

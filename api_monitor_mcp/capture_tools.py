@@ -1848,6 +1848,72 @@ def capture_list_filters(
 
 
 @mcp.tool()
+def capture_export_filters(
+    file_path: str,
+    output_path: str,
+    filter_type: str = "all",
+    query: str = "",
+    limit: int = 1000,
+    max_bytes: int = 16 * 1024 * 1024,
+    output_format: str = "json",
+    overwrite: bool = False,
+) -> dict[str, Any]:
+    """Export structured capture filters as JSON or CSV."""
+    if output_format not in {"json", "csv"}:
+        raise ValueError("output_format must be json or csv")
+    output = Path(output_path).expanduser()
+    if not output.parent.is_dir():
+        raise NotADirectoryError(f"Output directory not found: {output.parent}")
+    output = output.resolve()
+    if output.exists() and not overwrite:
+        raise FileExistsError(f"Output already exists: {output}")
+    result = capture_list_filters(
+        file_path,
+        filter_type=filter_type,
+        query=query,
+        limit=limit,
+        max_bytes=max_bytes,
+    )
+    if output_format == "json":
+        content = json.dumps(result, indent=2, ensure_ascii=False) + "\n"
+    else:
+        stream = io.StringIO(newline="")
+        writer = csv.writer(stream)
+        writer.writerow(
+            ["entry", "root", "index", "tag", "attributes", "text", "truncated_text"]
+        )
+        for entry in result["entries"]:
+            for item in entry.get("filters", []):
+                writer.writerow(
+                    [
+                        entry.get("entry", ""),
+                        entry.get("root", ""),
+                        item.get("index", ""),
+                        item.get("tag", ""),
+                        json.dumps(item.get("attributes", {}), ensure_ascii=False),
+                        item.get("text", ""),
+                        item.get("truncated_text", ""),
+                    ]
+                )
+        content = stream.getvalue()
+    encoded, digest = _write_text_export(output, content, overwrite)
+    return {
+        "exported": True,
+        "file": result["file"],
+        "output": str(output),
+        "format": output_format,
+        "filter_type": filter_type,
+        "query": query,
+        "count": result["count"],
+        "matched": result["matched"],
+        "truncated": result["truncated"],
+        "errors": result["errors"],
+        "size": len(encoded),
+        "sha256": digest,
+    }
+
+
+@mcp.tool()
 def capture_call_records(
     file_path: str,
     process_index: int = 0,
