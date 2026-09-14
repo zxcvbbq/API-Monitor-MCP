@@ -2807,6 +2807,7 @@ def capture_wait_for_new_events(
     timeout_seconds: float = 30.0,
     poll_interval_seconds: float = 0.5,
     max_returned_events: int = 10_000,
+    process_query_regex: bool = False,
 ) -> dict[str, Any]:
     """Wait for monitoring-log events added after this tool starts."""
     if minimum_new_events < 0:
@@ -2835,7 +2836,11 @@ def capture_wait_for_new_events(
         attempts += 1
         try:
             current = capture_monitoring_events(
-                str(path), event_type=event_type, process_query=process_query, limit=10_000
+                str(path),
+                event_type=event_type,
+                process_query=process_query,
+                limit=10_000,
+                process_query_regex=process_query_regex,
             )
             last_events = current
             last_error = None
@@ -2850,6 +2855,7 @@ def capture_wait_for_new_events(
                     "file": str(path),
                     "event_type": event_type,
                     "process_query": process_query,
+                    "process_query_regex": process_query_regex,
                     "minimum_new_events": minimum_new_events,
                     "baseline_events": baseline,
                     "current_events": count,
@@ -2875,6 +2881,7 @@ def capture_wait_for_new_events(
         "file": str(path),
         "event_type": event_type,
         "process_query": process_query,
+        "process_query_regex": process_query_regex,
         "minimum_new_events": minimum_new_events,
         "baseline_events": baseline,
         "current_events": count,

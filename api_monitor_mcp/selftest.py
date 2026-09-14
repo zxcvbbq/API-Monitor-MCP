@@ -1215,12 +1215,17 @@ def _self_test() -> None:
         capture_tools.capture_monitoring_events = lambda *_args, **_kwargs: next(event_snapshots)
         try:
             waited_events = capture_wait_for_new_events(
-                str(path), minimum_new_events=2, timeout_seconds=1, poll_interval_seconds=0.01
+                str(path),
+                minimum_new_events=2,
+                process_query_regex=True,
+                timeout_seconds=1,
+                poll_interval_seconds=0.01,
             )
         finally:
             capture_tools.capture_monitoring_events = original_events
         assert waited_events["ready"]
         assert waited_events["new_events_count"] == 2
+        assert waited_events["process_query_regex"]
         assert [event["line"] for event in waited_events["events"]] == ["new-1", "new-2"]
         original_traffic = gui_tools.api_monitor_traffic
         gui_tools.api_monitor_traffic = lambda *_args, **_kwargs: {
