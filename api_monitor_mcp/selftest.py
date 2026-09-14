@@ -77,6 +77,7 @@ from .capture_tools import (
     capture_slowest_calls,
     capture_validate,
     capture_wait_for_calls,
+    capture_wait_for_new_calls,
     capture_xml_entry,
 )
 from .capture_values import (
@@ -735,6 +736,10 @@ def _self_test() -> None:
             str(path), minimum_calls=1, timeout_seconds=1, poll_interval_seconds=0.01
         )
         assert waited_capture["ready"] and waited_capture["calls"] == 1
+        new_wait = capture_wait_for_new_calls(
+            str(path), minimum_new_calls=0, timeout_seconds=1, poll_interval_seconds=0.01
+        )
+        assert new_wait["ready"] and new_wait["new_calls"] == 0
         api_list = capture_list_apis(str(path))
         assert api_list["count"] == 1
         assert api_list["apis"][0]["name"] == "CreateFileW"

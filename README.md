@@ -20,7 +20,7 @@ claude plugin install api-monitor-mcp@api-monitor-mcp
 
 ## Features
 
-- Background GUI control, process attach, live capture, filters, and screenshots
+- Background GUI control, process attach, live capture, filters, screenshots, and capture tailing
 - Read, validate, search, compare, decode, and export `.apmx86`/`.apmx64`
 - Inspect calls, API definitions and types, parameters, returns, payloads, errors, processes, modules, logs, and raw bytes
 

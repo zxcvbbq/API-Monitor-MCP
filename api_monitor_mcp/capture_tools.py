@@ -2564,6 +2564,139 @@ def capture_wait_for_calls(
 
 
 @mcp.tool()
+def capture_wait_for_new_calls(
+    file_path: str,
+    minimum_new_calls: int = 1,
+    process_index: int | None = None,
+    timeout_seconds: float = 30.0,
+    poll_interval_seconds: float = 0.5,
+    max_records: int = 1_000_000,
+    max_returned_calls: int = 10_000,
+    include_data: bool = False,
+    max_data_bytes: int = 4096,
+    resolve_definitions: bool = False,
+) -> dict[str, Any]:
+    """Wait for calls added after this tool starts and return their records."""
+    if minimum_new_calls < 0:
+        raise ValueError("minimum_new_calls must be non-negative")
+    if process_index is not None and process_index < 0:
+        raise ValueError("process_index must be non-negative")
+    if not math.isfinite(timeout_seconds) or not 0 < timeout_seconds <= 300:
+        raise ValueError("timeout_seconds must be finite and between 0 and 300")
+    if not math.isfinite(poll_interval_seconds) or not 0.01 <= poll_interval_seconds <= 5:
+        raise ValueError("poll_interval_seconds must be finite and between 0.01 and 5")
+    max_records = _limit(max_records, "max_records", 1_000_000)
+    max_returned_calls = _limit(max_returned_calls, "max_returned_calls", 50_000)
+    max_data_bytes = _limit(max_data_bytes, "max_data_bytes", 16 * 1024 * 1024)
+    candidate = Path(file_path).expanduser()
+    if candidate.suffix.lower() not in CAPTURE_SUFFIXES:
+        raise ValueError("file_path must end in .apmx64 or .apmx86")
+    path = candidate.resolve()
+    started = time.monotonic()
+    deadline = started + timeout_seconds
+    attempts = 0
+    baseline: dict[int, int] | None = None
+    last_stats: dict[str, Any] | None = None
+    last_error: str | None = None
+
+    while True:
+        attempts += 1
+        try:
+            stats = capture_call_stats(
+                str(path), process_index=process_index, max_records=max_records
+            )
+            last_stats = stats
+            last_error = None
+            counts = {
+                int(item["process_index"]): int(item["count"])
+                for item in stats["processes"]
+            }
+            if baseline is None:
+                baseline = counts.copy()
+            else:
+                for index, count in counts.items():
+                    if count < baseline.get(index, 0):
+                        baseline[index] = count
+            new_counts = {
+                index: max(0, count - baseline.get(index, 0))
+                for index, count in counts.items()
+            }
+            new_total = sum(new_counts.values())
+            if new_total >= minimum_new_calls:
+                records: list[dict[str, Any]] = []
+                remaining = max_returned_calls
+                if new_total and remaining:
+                    for index in sorted(new_counts):
+                        count = new_counts[index]
+                        if not count:
+                            continue
+                        result = capture_call_records(
+                            str(path),
+                            process_index=index,
+                            start_index=baseline.get(index, 0),
+                            limit=min(count, remaining),
+                            include_data=include_data,
+                            max_data_bytes=max_data_bytes,
+                            resolve_definitions=resolve_definitions,
+                        )
+                        records.extend(result["records"])
+                        remaining = max_returned_calls - len(records)
+                        if not remaining:
+                            break
+                return {
+                    "ready": True,
+                    "file": str(path),
+                    "minimum_new_calls": minimum_new_calls,
+                    "baseline_calls": sum(baseline.values()),
+                    "current_calls": sum(counts.values()),
+                    "new_calls": new_total,
+                    "new_process_counts": {
+                        str(index): count for index, count in sorted(new_counts.items()) if count
+                    },
+                    "records": records,
+                    "records_truncated": new_total > len(records),
+                    "process_index": process_index,
+                    "attempts": attempts,
+                    "elapsed_seconds": round(time.monotonic() - started, 3),
+                    "stats": stats,
+                }
+        except (KeyError, OSError, ValueError, zipfile.BadZipFile) as exc:
+            last_error = str(exc)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        time.sleep(min(poll_interval_seconds, remaining))
+
+    current_counts = {
+        int(item["process_index"]): int(item["count"])
+        for item in (last_stats or {}).get("processes", [])
+    }
+    baseline = baseline or {}
+    new_counts = {
+        index: max(0, count - baseline.get(index, 0))
+        for index, count in current_counts.items()
+    }
+    return {
+        "ready": False,
+        "file": str(path),
+        "minimum_new_calls": minimum_new_calls,
+        "baseline_calls": sum(baseline.values()),
+        "current_calls": sum(current_counts.values()),
+        "new_calls": sum(new_counts.values()),
+        "new_process_counts": {
+            str(index): count for index, count in sorted(new_counts.items()) if count
+        },
+        "records": [],
+        "records_truncated": False,
+        "process_index": process_index,
+        "attempts": attempts,
+        "elapsed_seconds": round(time.monotonic() - started, 3),
+        "stats": last_stats,
+        "error": last_error,
+    }
+
+
+@mcp.tool()
 def capture_list_apis(
     file_path: str,
     process_index: int | None = None,
