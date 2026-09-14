@@ -61,6 +61,7 @@ from .capture_tools import (
     capture_list_types,
     capture_monitoring_log,
     capture_overview,
+    capture_payload_summary,
     capture_read_call_bytes,
     capture_read_definition,
     capture_read_entry,
@@ -269,6 +270,10 @@ def _self_test() -> None:
         assert call_records["process_pid"] == 1234
         assert call_records["start_index"] == 0
         assert call_records["records"][0]["data_refs"][0]["payload"]["text"] == "hello"
+        payload_summary = capture_payload_summary(str(path), api_name="CreateFile")
+        slot_zero = next(item for item in payload_summary["payloads"] if item["slot"] == 0)
+        assert slot_zero["bytes"] == 5
+        assert slot_zero["samples"][0]["text"] == "hello"
         lazy_call_records = capture_call_records(str(path), include_data=False)
         assert lazy_call_records["data_entry_bytes"] == len(record) + 9
         assert lazy_call_records["records"][0]["valid"]

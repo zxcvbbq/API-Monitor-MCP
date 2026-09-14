@@ -1244,6 +1244,196 @@ def capture_call_records(
 
 
 @mcp.tool()
+def capture_payload_summary(
+    file_path: str,
+    process_index: int | None = None,
+    pid: int | None = None,
+    api_name: str | None = None,
+    api_module: str | None = None,
+    limit: int = 1000,
+    max_records: int = 100_000,
+    max_data_bytes: int = 16_384,
+) -> dict[str, Any]:
+    """Summarize saved payload references by API and APMX data slot."""
+    if process_index is not None and process_index < 0:
+        raise ValueError("process_index must be non-negative")
+    if pid is not None and not 1 <= pid <= 0xFFFFFFFF:
+        raise ValueError("pid must be between 1 and 4294967295")
+    if api_name is not None and not api_name.strip():
+        raise ValueError("api_name must be non-empty when provided")
+    if api_module is not None and not api_module.strip():
+        raise ValueError("api_module must be non-empty when provided")
+    limit = _limit(limit, "limit", 10_000)
+    max_records = _limit(max_records, "max_records", 1_000_000)
+    max_data_bytes = _limit(max_data_bytes, "max_data_bytes", 16 * 1024 * 1024)
+    path = _capture_path(file_path)
+    pointer_size = 4 if path.suffix.lower() == ".apmx86" else 8
+    archive, _, _ = _open_capture_zip(path)
+    groups: dict[tuple[int, int], dict[str, Any]] = {}
+    scanned = 0
+    total_references = 0
+    truncated = False
+    with archive:
+        entries = {info.filename: info for info in archive.infolist()}
+        definitions = archive.read("definitions") if "definitions" in entries else None
+        process_indices = sorted(
+            int(match.group(1))
+            for name in entries
+            if (match := re.fullmatch(r"process/(\d+)/calls", name, re.IGNORECASE))
+            and (process_index is None or int(match.group(1)) == process_index)
+        )
+        for index in process_indices:
+            if scanned >= max_records:
+                truncated = True
+                break
+            calls = archive.read(f"process/{index}/calls")
+            if len(calls) % pointer_size:
+                raise ValueError(
+                    f"process/{index}/calls is not an array of {pointer_size * 8}-bit offsets"
+                )
+            process_pid = _capture_process_pid(archive, entries, index, pointer_size)
+            if pid is not None and process_pid != pid:
+                continue
+            data_info = entries.get(f"process/{index}/data")
+            record_count = len(calls) // pointer_size
+            page_count = min(record_count, max_records - scanned)
+            truncated |= page_count < record_count
+
+            def collect(
+                records: list[dict[str, Any]],
+                current_index: int = index,
+                current_pid: int | None = process_pid,
+            ) -> None:
+                nonlocal scanned, total_references
+                scanned += len(records)
+                for record in records:
+                    definition = record.get("definition", {})
+                    name = definition.get("name")
+                    module = definition.get("module")
+                    if api_name and api_name.casefold() not in str(name or "").casefold():
+                        continue
+                    if api_module and api_module.casefold() not in str(module or "").casefold():
+                        continue
+                    definition_offset = int(
+                        definition.get("offset", record.get("definition_offset", 0)) or 0
+                    )
+                    for reference in record.get("data_refs", []):
+                        total_references += 1
+                        slot = int(reference.get("slot", 0))
+                        key = (definition_offset, slot)
+                        item = groups.setdefault(
+                            key,
+                            {
+                                "slot": slot,
+                                "definition_offset": definition_offset,
+                                "api": {
+                                    "name": name,
+                                    "module": module,
+                                    "ordinal": definition.get("ordinal"),
+                                },
+                                "references": 0,
+                                "bytes": 0,
+                                "valid_references": 0,
+                                "invalid_references": 0,
+                                "oversize_references": 0,
+                                "max_length": 0,
+                                "process_indices": [],
+                                "pids": set(),
+                                "samples": [],
+                                "_sample_hashes": set(),
+                            },
+                        )
+                        item["references"] += 1
+                        length = int(reference.get("length", 0) or 0)
+                        item["bytes"] += length
+                        item["max_length"] = max(item["max_length"], length)
+                        if current_index not in item["process_indices"]:
+                            item["process_indices"].append(current_index)
+                        if current_pid is not None:
+                            item["pids"].add(current_pid)
+                        if not reference.get("valid", False):
+                            item["invalid_references"] += 1
+                            continue
+                        item["valid_references"] += 1
+                        payload = reference.get("payload")
+                        if payload is None:
+                            if reference.get("truncated"):
+                                item["oversize_references"] += 1
+                            continue
+                        digest = payload.get("sha256")
+                        if digest in item["_sample_hashes"] or len(item["samples"]) >= 3:
+                            continue
+                        item["_sample_hashes"].add(digest)
+                        sample = {
+                            key: payload[key]
+                            for key in ("size", "sha256", "encoding", "hex_preview")
+                            if key in payload
+                        }
+                        if "text" in payload:
+                            sample["text"] = payload["text"][:1024]
+                            sample["text_truncated"] = len(payload["text"]) > 1024
+                        if "base64" in payload:
+                            sample["base64_preview"] = payload["base64"][:1024]
+                            sample["base64_truncated"] = len(payload["base64"]) > 1024
+                        item["samples"].append(sample)
+
+            if data_info is None:
+                collect(
+                    _capture_call_records(
+                        calls,
+                        b"",
+                        page_count,
+                        True,
+                        max_data_bytes,
+                        definitions=definitions,
+                        pointer_size=pointer_size,
+                    )
+                )
+            else:
+                with archive.open(data_info) as data_stream:
+
+                    def read_data(offset: int, size: int) -> bytes:
+                        data_stream.seek(offset)
+                        return data_stream.read(size)
+
+                    collect(
+                        _capture_call_records(
+                            calls,
+                            b"",
+                            page_count,
+                            True,
+                            max_data_bytes,
+                            definitions=definitions,
+                            pointer_size=pointer_size,
+                            data_size=data_info.file_size,
+                            data_reader=read_data,
+                        )
+                    )
+            if scanned >= max_records:
+                break
+
+    returned: list[dict[str, Any]] = []
+    for item in groups.values():
+        item["pids"] = sorted(item["pids"])
+        item.pop("_sample_hashes")
+        returned.append(item)
+    returned.sort(key=lambda item: (-item["bytes"], -item["references"], item["slot"]))
+    return {
+        "file": str(path),
+        "process_index": process_index,
+        "pid": pid,
+        "api_name": api_name,
+        "api_module": api_module,
+        "definitions_available": definitions is not None,
+        "payloads": returned[:limit],
+        "count": len(returned),
+        "total_references": total_references,
+        "scanned_records": scanned,
+        "truncated": truncated or len(returned) > limit,
+    }
+
+
+@mcp.tool()
 def capture_read_definition(file_path: str, definition_offset: int) -> dict[str, Any]:
     """Resolve one API definition node from an APMX definitions entry."""
     if definition_offset < 0:
