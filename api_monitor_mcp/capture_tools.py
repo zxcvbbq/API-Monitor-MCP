@@ -346,6 +346,68 @@ def capture_process_overview(
 
 
 @mcp.tool()
+def capture_export_process_overview(
+    file_path: str,
+    output_path: str,
+    process_index: int,
+    pid: int | None = None,
+    max_records: int = 100_000,
+    include_calls: bool = False,
+    call_limit: int = 100,
+    include_data: bool = False,
+    max_data_bytes: int = 4096,
+    output_format: str = "json",
+    overwrite: bool = False,
+) -> dict[str, Any]:
+    """Export one captured-process investigation report as JSON or CSV."""
+    if output_format not in {"json", "csv"}:
+        raise ValueError("output_format must be json or csv")
+    output = Path(output_path).expanduser()
+    if not output.parent.is_dir():
+        raise NotADirectoryError(f"Output directory not found: {output.parent}")
+    output = output.resolve()
+    if output.exists() and not overwrite:
+        raise FileExistsError(f"Output already exists: {output}")
+    result = capture_process_overview(
+        file_path,
+        process_index=process_index,
+        pid=pid,
+        max_records=max_records,
+        include_calls=include_calls,
+        call_limit=call_limit,
+        include_data=include_data,
+        max_data_bytes=max_data_bytes,
+    )
+    if output_format == "json":
+        content = json.dumps(result, indent=2, ensure_ascii=False) + "\n"
+    else:
+        stream = io.StringIO(newline="")
+        writer = csv.writer(stream)
+        writer.writerow(["section", "key", "value"])
+        for section, value in result.items():
+            if isinstance(value, dict):
+                for key, item in value.items():
+                    writer.writerow(
+                        [section, key, json.dumps(item, ensure_ascii=False)]
+                    )
+            else:
+                writer.writerow([section, "", json.dumps(value, ensure_ascii=False)])
+        content = stream.getvalue()
+    encoded, digest = _write_text_export(output, content, overwrite)
+    return {
+        "exported": True,
+        "file": result["file"],
+        "output": str(output),
+        "format": output_format,
+        "process_index": process_index,
+        "pid": result["pid"],
+        "sections": list(result),
+        "size": len(encoded),
+        "sha256": digest,
+    }
+
+
+@mcp.tool()
 def capture_validate(
     file_path: str, deep: bool = False, max_records: int = 1_000_000
 ) -> dict[str, Any]:

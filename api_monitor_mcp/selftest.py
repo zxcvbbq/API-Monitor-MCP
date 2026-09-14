@@ -60,6 +60,7 @@ from .capture_tools import (
     capture_export_monitoring_log,
     capture_export_overview,
     capture_export_payload_summary,
+    capture_export_process_overview,
     capture_export_processes,
     capture_export_search_calls,
     capture_export_slowest_calls,
@@ -283,6 +284,23 @@ def _self_test() -> None:
         assert process_overview["threads"]["count"] == 1
         assert process_overview["errors"]["error_count"] == 1
         assert process_overview["calls"]["records"][0]["definition"]["name"] == "CreateFileW"
+        process_report_json_path = Path(directory) / "process-overview.json"
+        process_report_export = capture_export_process_overview(
+            str(path),
+            str(process_report_json_path),
+            0,
+            include_calls=True,
+            include_data=True,
+        )
+        assert process_report_export["pid"] == 1234
+        assert json.loads(process_report_json_path.read_text())["calls"]["records"][0]["definition"]["name"] == "CreateFileW"
+        process_report_csv_path = Path(directory) / "process-overview.csv"
+        process_report_csv_export = capture_export_process_overview(
+            str(path), str(process_report_csv_path), 0, output_format="csv"
+        )
+        assert process_report_csv_export["format"] == "csv"
+        assert process_report_csv_path.read_text().startswith("section,key,value")
+        assert "process_index" in process_report_csv_path.read_text()
         assert capture_read_type(str(path), 160)["type"]["kind"] == 2
         invalid_prefix = Path(directory) / "invalid-prefix.apmx64"
         invalid_prefix.write_bytes(b"not-an-apmx" + path.read_bytes()[info["zip_offset"] :])
