@@ -6154,6 +6154,81 @@ def capture_find_call_sequence(
 
 
 @mcp.tool()
+def capture_export_call_sequence(
+    file_path: str,
+    output_path: str,
+    api_sequence: list[str],
+    process_index: int | None = None,
+    pid: int | None = None,
+    thread_id: int | None = None,
+    match_mode: str = "contains",
+    max_gap: int = 0,
+    limit: int = 100,
+    max_records: int = 100_000,
+    output_format: str = "json",
+    overwrite: bool = False,
+) -> dict[str, Any]:
+    """Export ordered API sequence matches as JSON or CSV."""
+    if output_format not in {"json", "csv"}:
+        raise ValueError("output_format must be json or csv")
+    output = Path(output_path).expanduser()
+    if not output.parent.is_dir():
+        raise NotADirectoryError(f"Output directory not found: {output.parent}")
+    output = output.resolve()
+    if output.exists() and not overwrite:
+        raise FileExistsError(f"Output already exists: {output}")
+    result = capture_find_call_sequence(
+        file_path,
+        api_sequence=api_sequence,
+        process_index=process_index,
+        pid=pid,
+        thread_id=thread_id,
+        match_mode=match_mode,
+        max_gap=max_gap,
+        limit=limit,
+        max_records=max_records,
+    )
+    if output_format == "json":
+        content = json.dumps(result, indent=2, ensure_ascii=False) + "\n"
+    else:
+        stream = io.StringIO(newline="")
+        writer = csv.writer(stream)
+        writer.writerow(
+            [
+                "process_index",
+                "pid",
+                "thread_id",
+                "start_record",
+                "end_record",
+                "calls_json",
+            ]
+        )
+        for match in result["matches"]:
+            writer.writerow(
+                [
+                    match.get("process_index", ""),
+                    match.get("pid", ""),
+                    match.get("thread_id", ""),
+                    match.get("start_record", ""),
+                    match.get("end_record", ""),
+                    json.dumps(match.get("calls", []), ensure_ascii=False),
+                ]
+            )
+        content = stream.getvalue()
+    encoded, digest = _write_text_export(output, content, overwrite)
+    return {
+        "exported": True,
+        "file": result["file"],
+        "output": str(output),
+        "format": output_format,
+        "count": result["count"],
+        "truncated": result["truncated"],
+        "size": len(encoded),
+        "sha256": digest,
+    }
+
+
+@mcp.tool()
 def capture_call_graph(
     file_path: str,
     process_index: int | None = None,

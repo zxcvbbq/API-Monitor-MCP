@@ -47,6 +47,7 @@ from .capture_tools import (
     capture_export_api_transitions,
     capture_export_call_bytes,
     capture_export_call_graph,
+    capture_export_call_sequence,
     capture_export_call_stats,
     capture_export_calls,
     capture_export_compare,
@@ -535,6 +536,17 @@ def _self_test() -> None:
             sequence = capture_find_call_sequence(
                 str(path), ["CreateFileW", "ReadFile"], max_gap=0
             )
+            sequence_json = Path(directory) / "sequence.json"
+            sequence_export = capture_export_call_sequence(
+                str(path), str(sequence_json), ["CreateFileW", "ReadFile"]
+            )
+            sequence_csv = Path(directory) / "sequence.csv"
+            sequence_csv_export = capture_export_call_sequence(
+                str(path),
+                str(sequence_csv),
+                ["CreateFileW", "ReadFile"],
+                output_format="csv",
+            )
             graph = capture_call_graph(str(path))
             graph_json = Path(directory) / "graph.json"
             graph_export = capture_export_call_graph(str(path), str(graph_json))
@@ -554,6 +566,11 @@ def _self_test() -> None:
         assert "CreateFileW" in transitions_csv.read_text()
         assert sequence["count"] == 1
         assert sequence["matches"][0]["start_record"] == 0
+        assert sequence_export["count"] == sequence["count"]
+        assert json.loads(sequence_json.read_text())["count"] == 1
+        assert sequence_csv_export["format"] == "csv"
+        assert "calls_json" in sequence_csv.read_text().splitlines()[0]
+        assert "CreateFileW" in sequence_csv.read_text()
         assert graph["node_count"] == 2
         assert graph["edge_count"] == 1
         assert graph["edges"][0]["from"]["id"] == graph["nodes"][0]["id"]
