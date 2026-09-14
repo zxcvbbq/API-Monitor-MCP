@@ -53,6 +53,7 @@ from .capture_tools import (
     capture_export_compare_calls,
     capture_export_decoded_calls,
     capture_export_definitions,
+    capture_export_directory,
     capture_export_error_summary,
     capture_export_filter_calls,
     capture_export_filters,
@@ -1102,6 +1103,23 @@ def _self_test() -> None:
         }
         listed = capture_list_directory(directory, recursive=False, limit=10)
         assert listed["count"] == 1
+        directory_json_path = Path(directory) / "directory.json"
+        directory_export = capture_export_directory(
+            directory, str(directory_json_path), recursive=False, limit=10
+        )
+        assert directory_export["count"] == listed["count"]
+        assert json.loads(directory_json_path.read_text())["captures"][0]["architecture"] == "x64"
+        directory_csv_path = Path(directory) / "directory.csv"
+        directory_csv_export = capture_export_directory(
+            directory,
+            str(directory_csv_path),
+            recursive=False,
+            limit=10,
+            output_format="csv",
+        )
+        assert directory_csv_export["format"] == "csv"
+        assert directory_csv_path.read_text().startswith("file,architecture,size")
+        assert "sample.apmx64" in directory_csv_path.read_text()
         directory_search = capture_search_directory(directory, "CreateFile", recursive=False, limit=10)
         assert directory_search["captures"][0]["entries"][0]["entry"] == "calls.bin"
         directory_search_json_path = Path(directory) / "directory-search.json"

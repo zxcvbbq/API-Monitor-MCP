@@ -7540,6 +7540,55 @@ def capture_list_directory(
 
 
 @mcp.tool()
+def capture_export_directory(
+    directory: str,
+    output_path: str,
+    recursive: bool = True,
+    limit: int = 500,
+    output_format: str = "json",
+    overwrite: bool = False,
+) -> dict[str, Any]:
+    """Export a directory capture inventory as JSON or CSV."""
+    if output_format not in {"json", "csv"}:
+        raise ValueError("output_format must be json or csv")
+    output = Path(output_path).expanduser()
+    if not output.parent.is_dir():
+        raise NotADirectoryError(f"Output directory not found: {output.parent}")
+    output = output.resolve()
+    if output.exists() and not overwrite:
+        raise FileExistsError(f"Output already exists: {output}")
+    result = capture_list_directory(directory, recursive=recursive, limit=limit)
+    if output_format == "json":
+        content = json.dumps(result, indent=2, ensure_ascii=False) + "\n"
+    else:
+        stream = io.StringIO(newline="")
+        writer = csv.writer(stream)
+        writer.writerow(["file", "architecture", "size", "modified_utc"])
+        for capture in result["captures"]:
+            writer.writerow(
+                [
+                    capture.get("file", ""),
+                    capture.get("architecture", ""),
+                    capture.get("size", ""),
+                    capture.get("modified_utc", ""),
+                ]
+            )
+        content = stream.getvalue()
+    encoded, digest = _write_text_export(output, content, overwrite)
+    return {
+        "exported": True,
+        "directory": result["directory"],
+        "output": str(output),
+        "format": output_format,
+        "recursive": recursive,
+        "count": result["count"],
+        "truncated": result["truncated"],
+        "size": len(encoded),
+        "sha256": digest,
+    }
+
+
+@mcp.tool()
 def capture_search_directory(
     directory: str,
     query: str,
