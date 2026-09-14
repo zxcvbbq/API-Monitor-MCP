@@ -444,12 +444,27 @@ def _self_test() -> None:
         searched = capture_search_entries(str(path), "CreateFile", 10)
         assert searched["entries"][0]["entry"] == "calls.bin"
         assert not searched["truncated"]
+        regex_entry_search = capture_search_entries(
+            str(path), r"CreateFile(W|A)", 10, query_regex=True
+        )
+        assert regex_entry_search["query_regex"]
+        assert regex_entry_search["entries"][0]["entry"] == "calls.bin"
         entry_search_json_path = Path(directory) / "entry-search.json"
         entry_search_export = capture_export_search_entries(
             str(path), str(entry_search_json_path), "CreateFile", limit=10
         )
         assert entry_search_export["count"] == searched["count"]
         assert json.loads(entry_search_json_path.read_text())["entries"][0]["entry"] == "calls.bin"
+        regex_entry_search_json_path = Path(directory) / "entry-search-regex.json"
+        regex_entry_search_export = capture_export_search_entries(
+            str(path),
+            str(regex_entry_search_json_path),
+            r"CreateFile(W|A)",
+            limit=10,
+            query_regex=True,
+        )
+        assert regex_entry_search_export["query_regex"]
+        assert json.loads(regex_entry_search_json_path.read_text())["query_regex"]
         entry_search_csv_path = Path(directory) / "entry-search.csv"
         entry_search_csv_export = capture_export_search_entries(
             str(path), str(entry_search_csv_path), "CreateFile", output_format="csv"

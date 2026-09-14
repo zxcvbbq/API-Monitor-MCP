@@ -1708,10 +1708,18 @@ def capture_search_entries(
     query: str,
     limit: int = 100,
     max_entry_bytes: int = 4 * 1024 * 1024,
+    query_regex: bool = False,
 ) -> dict[str, Any]:
     """Search printable strings inside each APMX ZIP entry."""
     if not query:
         raise ValueError("query must not be empty")
+    if len(query) > 4096:
+        raise ValueError("query must not exceed 4096 characters")
+    if query_regex:
+        try:
+            re.compile(query, re.IGNORECASE)
+        except re.error as exc:
+            raise ValueError(f"query is not a valid regex: {exc}") from exc
     limit = _limit(limit, "limit", 2000)
     max_entry_bytes = _limit(max_entry_bytes, "max_entry_bytes", 64 * 1024 * 1024)
     path = _capture_path(file_path)
@@ -1724,7 +1732,9 @@ def capture_search_entries(
                 continue
             with archive.open(info) as member:
                 data = member.read(max_entry_bytes + 1)
-            entry_matches = _scan_strings(data[:max_entry_bytes], query, min(20, limit), 4)
+            entry_matches = _scan_strings(
+                data[:max_entry_bytes], query, min(20, limit), 4, query_regex
+            )
             if entry_matches:
                 matches.append(
                     {
@@ -1740,6 +1750,7 @@ def capture_search_entries(
     return {
         "file": str(path),
         "query": query,
+        "query_regex": query_regex,
         "entries": returned,
         "count": len(returned),
         "truncated": truncated,
@@ -1755,6 +1766,7 @@ def capture_export_search_entries(
     max_entry_bytes: int = 4 * 1024 * 1024,
     output_format: str = "json",
     overwrite: bool = False,
+    query_regex: bool = False,
 ) -> dict[str, Any]:
     """Export printable-string matches across capture entries as JSON or CSV."""
     if output_format not in {"json", "csv"}:
@@ -1770,6 +1782,7 @@ def capture_export_search_entries(
         query,
         limit=limit,
         max_entry_bytes=max_entry_bytes,
+        query_regex=query_regex,
     )
     if output_format == "json":
         content = json.dumps(result, indent=2, ensure_ascii=False) + "\n"
@@ -1796,6 +1809,7 @@ def capture_export_search_entries(
         "output": str(output),
         "format": output_format,
         "query": query,
+        "query_regex": query_regex,
         "count": result["count"],
         "truncated": result["truncated"],
         "size": len(encoded),
