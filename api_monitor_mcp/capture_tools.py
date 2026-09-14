@@ -1613,6 +1613,102 @@ def capture_payload_summary(
 
 
 @mcp.tool()
+def capture_export_payload_summary(
+    file_path: str,
+    output_path: str,
+    process_index: int | None = None,
+    pid: int | None = None,
+    api_name: str | None = None,
+    api_module: str | None = None,
+    limit: int = 1000,
+    max_records: int = 100_000,
+    max_data_bytes: int = 16_384,
+    output_format: str = "json",
+    overwrite: bool = False,
+) -> dict[str, Any]:
+    """Export saved payload summaries as JSON or CSV."""
+    if output_format not in {"json", "csv"}:
+        raise ValueError("output_format must be json or csv")
+    output = Path(output_path).expanduser()
+    if not output.parent.is_dir():
+        raise NotADirectoryError(f"Output directory not found: {output.parent}")
+    output = output.resolve()
+    if output.exists() and not overwrite:
+        raise FileExistsError(f"Output already exists: {output}")
+    result = capture_payload_summary(
+        file_path,
+        process_index=process_index,
+        pid=pid,
+        api_name=api_name,
+        api_module=api_module,
+        limit=limit,
+        max_records=max_records,
+        max_data_bytes=max_data_bytes,
+    )
+    if output_format == "json":
+        content = json.dumps(result, indent=2, ensure_ascii=False) + "\n"
+    else:
+        stream = io.StringIO(newline="")
+        writer = csv.writer(stream)
+        writer.writerow(
+            [
+                "slot",
+                "definition_offset",
+                "api_name",
+                "api_module",
+                "ordinal",
+                "references",
+                "bytes",
+                "valid_references",
+                "invalid_references",
+                "oversize_references",
+                "max_length",
+                "process_indices",
+                "pids",
+                "samples",
+            ]
+        )
+        for payload in result["payloads"]:
+            api = payload.get("api", {})
+            writer.writerow(
+                [
+                    payload.get("slot", ""),
+                    payload.get("definition_offset", ""),
+                    api.get("name", ""),
+                    api.get("module", ""),
+                    api.get("ordinal", ""),
+                    payload.get("references", ""),
+                    payload.get("bytes", ""),
+                    payload.get("valid_references", ""),
+                    payload.get("invalid_references", ""),
+                    payload.get("oversize_references", ""),
+                    payload.get("max_length", ""),
+                    json.dumps(payload.get("process_indices", []), ensure_ascii=False),
+                    json.dumps(payload.get("pids", []), ensure_ascii=False),
+                    json.dumps(payload.get("samples", []), ensure_ascii=False),
+                ]
+            )
+        content = stream.getvalue()
+    encoded, digest = _write_text_export(output, content, overwrite)
+    return {
+        "exported": True,
+        "file": result["file"],
+        "output": str(output),
+        "format": output_format,
+        "process_index": process_index,
+        "pid": pid,
+        "api_name": api_name,
+        "api_module": api_module,
+        "count": result["count"],
+        "total_references": result["total_references"],
+        "scanned_records": result["scanned_records"],
+        "truncated": result["truncated"],
+        "size": len(encoded),
+        "sha256": digest,
+    }
+
+
+@mcp.tool()
 def capture_read_definition(file_path: str, definition_offset: int) -> dict[str, Any]:
     """Resolve one API definition node from an APMX definitions entry."""
     if definition_offset < 0:

@@ -53,6 +53,7 @@ from .capture_tools import (
     capture_export_modules,
     capture_export_monitoring_events,
     capture_export_monitoring_log,
+    capture_export_payload_summary,
     capture_export_processes,
     capture_export_search_calls,
     capture_export_slowest_calls,
@@ -378,6 +379,20 @@ def _self_test() -> None:
         slot_zero = next(item for item in payload_summary["payloads"] if item["slot"] == 0)
         assert slot_zero["bytes"] == 5
         assert slot_zero["samples"][0]["text"] == "hello"
+        payload_json_path = Path(directory) / "payloads.json"
+        payload_export = capture_export_payload_summary(
+            str(path), str(payload_json_path), api_name="CreateFile"
+        )
+        assert payload_export["count"] == payload_summary["count"]
+        assert json.loads(payload_json_path.read_text())["payloads"][0]["bytes"] == 5
+        payload_csv_path = Path(directory) / "payloads.csv"
+        payload_csv_export = capture_export_payload_summary(
+            str(path), str(payload_csv_path), api_name="CreateFile", output_format="csv"
+        )
+        assert payload_csv_export["format"] == "csv"
+        payload_csv_text = payload_csv_path.read_text()
+        assert payload_csv_text.startswith("slot,definition_offset,api_name")
+        assert "CreateFileW" in payload_csv_text and "hello" in payload_csv_text
         original_timeline = capture_tools.capture_call_timeline
         capture_tools.capture_call_timeline = lambda *_args, **_kwargs: {
             "file": "sample.apmx64",
