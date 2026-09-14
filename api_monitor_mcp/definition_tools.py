@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-from functools import lru_cache
 from pathlib import Path
 from typing import Any
 from xml.etree import ElementTree
@@ -13,47 +12,36 @@ from .gui_runtime import _app_root
 from .runtime import API_NAME, MODULE_NAME, mcp
 
 
-def _api_definition_signature(api_root: Path) -> tuple[tuple[str, int, int], ...]:
-    signature: list[tuple[str, int, int]] = []
-    for path in sorted(api_root.rglob("*.xml")):
-        try:
-            stat = path.stat()
-        except OSError:
-            continue
-        signature.append((str(path), stat.st_size, stat.st_mtime_ns))
-    return tuple(signature)
-
-
-@lru_cache(maxsize=2)
-def _cached_api_definition_index(
-    api_root_name: str, signature: tuple[tuple[str, int, int], ...]
-) -> tuple[dict[str, Any], ...]:
-    api_root = Path(api_root_name)
-    index: list[dict[str, Any]] = []
-    for path_name, size, _modified_ns in signature:
-        path = Path(path_name)
-        try:
-            text = path.read_text(encoding="utf-8-sig", errors="replace")
-            relative = str(path.relative_to(api_root))
-            module_match = MODULE_NAME.search(text)
-            module = module_match.group(1) if module_match else path.stem
-        except (OSError, ValueError):
-            continue
-        api_names = tuple(match.group(1) for match in API_NAME.finditer(text))
+def _api_definition_item(
+    path: Path,
+    api_root: Path,
+    include_api_names: bool = False,
+    query: str = "",
+) -> dict[str, Any] | None:
+    try:
+        stat = path.stat()
+        text = path.read_text(encoding="utf-8-sig", errors="replace")
+        module_match = MODULE_NAME.search(text)
+        relative = str(path.relative_to(api_root))
+        text_casefold = text.casefold()
+        if query and query not in relative.casefold() and query not in text_casefold:
+            return None
         item: dict[str, Any] = {
             "definition": str(path),
             "relative_path": relative,
-            "module": module,
-            "size": size,
+            "module": module_match.group(1) if module_match else path.stem,
+            "size": stat.st_size,
             "modified_utc": _file_time(path),
-            "api_names": api_names,
         }
-        index.append(item)
-    return tuple(index)
-
-
-def _api_definition_index(api_root: Path) -> tuple[dict[str, Any], ...]:
-    return _cached_api_definition_index(str(api_root), _api_definition_signature(api_root))
+    except (OSError, ValueError):
+        return None
+    if include_api_names:
+        item["api_names"] = (
+            tuple(match.group(1) for match in API_NAME.finditer(text))
+            if not query or query in text_casefold
+            else ()
+        )
+    return item
 
 
 def _api_definition_counts(indexed: dict[str, Any]) -> dict[str, Any]:
@@ -190,44 +178,12 @@ def api_monitor_list_api_files(
 
     wanted = query.casefold()
     results: list[dict[str, Any]] = []
-    if not wanted:
-        for path in sorted(api_root.rglob("*.xml")):
-            try:
-                stat = path.stat()
-                text = path.read_text(encoding="utf-8-sig", errors="replace")
-                relative = str(path.relative_to(api_root))
-                module_match = MODULE_NAME.search(text)
-                indexed = {
-                    "definition": str(path),
-                    "relative_path": relative,
-                    "module": module_match.group(1) if module_match else path.stem,
-                    "size": stat.st_size,
-                    "modified_utc": _file_time(path),
-                }
-            except (OSError, ValueError):
-                continue
-            item = dict(indexed)
-            if include_counts:
-                item.update(_api_definition_counts(indexed))
-            results.append(item)
-            if len(results) > limit:
-                return {
-                    "query": query,
-                    "api_directory": str(api_root),
-                    "files": results[:limit],
-                    "count": limit,
-                    "truncated": True,
-                    "counts_included": include_counts,
-                }
-        return {
-            "query": query,
-            "api_directory": str(api_root),
-            "files": results,
-            "count": len(results),
-            "truncated": False,
-            "counts_included": include_counts,
-        }
-    for indexed in _api_definition_index(api_root):
+    for path in sorted(api_root.rglob("*.xml")):
+        indexed = _api_definition_item(
+            path, api_root, include_api_names=bool(wanted), query=wanted
+        )
+        if indexed is None:
+            continue
         if wanted and not (
             wanted in indexed["relative_path"].casefold()
             or wanted in indexed["module"].casefold()
