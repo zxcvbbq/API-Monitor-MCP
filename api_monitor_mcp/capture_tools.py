@@ -2137,6 +2137,66 @@ def capture_entropy(
 
 
 @mcp.tool()
+def capture_export_entropy(
+    file_path: str,
+    output_path: str,
+    threshold: float = 7.0,
+    limit: int = 200,
+    max_entry_bytes: int = 8 * 1024 * 1024,
+    max_total_bytes: int = 64 * 1024 * 1024,
+    output_format: str = "json",
+    overwrite: bool = False,
+) -> dict[str, Any]:
+    """Export ZIP-entry entropy results as JSON or CSV."""
+    if output_format not in {"json", "csv"}:
+        raise ValueError("output_format must be json or csv")
+    output = Path(output_path).expanduser()
+    if not output.parent.is_dir():
+        raise NotADirectoryError(f"Output directory not found: {output.parent}")
+    output = output.resolve()
+    if output.exists() and not overwrite:
+        raise FileExistsError(f"Output already exists: {output}")
+    result = capture_entropy(
+        file_path,
+        threshold=threshold,
+        limit=limit,
+        max_entry_bytes=max_entry_bytes,
+        max_total_bytes=max_total_bytes,
+    )
+    if output_format == "json":
+        content = json.dumps(result, indent=2, ensure_ascii=False) + "\n"
+    else:
+        stream = io.StringIO(newline="")
+        writer = csv.writer(stream)
+        writer.writerow(["entry", "size", "sampled_bytes", "entropy", "high_entropy", "truncated"])
+        for item in result["entries"]:
+            writer.writerow(
+                [
+                    item.get("entry", ""),
+                    item.get("size", ""),
+                    item.get("sampled_bytes", ""),
+                    item.get("entropy", ""),
+                    item.get("high_entropy", ""),
+                    item.get("truncated", ""),
+                ]
+            )
+        content = stream.getvalue()
+    encoded, digest = _write_text_export(output, content, overwrite)
+    return {
+        "exported": True,
+        "file": result["file"],
+        "output": str(output),
+        "format": output_format,
+        "threshold": result["threshold"],
+        "count": result["count"],
+        "high_entropy_count": result["high_entropy_count"],
+        "truncated": result["truncated"],
+        "size": len(encoded),
+        "sha256": digest,
+    }
+
+
+@mcp.tool()
 def capture_export_strings(
     file_path: str,
     output_path: str,

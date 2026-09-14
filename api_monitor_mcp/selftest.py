@@ -62,6 +62,7 @@ from .capture_tools import (
     capture_export_definitions,
     capture_export_directory,
     capture_export_entries,
+    capture_export_entropy,
     capture_export_error_summary,
     capture_export_filter_calls,
     capture_export_filters,
@@ -394,6 +395,16 @@ def _self_test() -> None:
         entropy = capture_entropy(str(path), limit=20)
         assert entropy["count"] == len(info["entries"])
         assert entropy["high_entropy_count"] >= 0
+        entropy_json_path = Path(directory) / "entropy.json"
+        entropy_export = capture_export_entropy(str(path), str(entropy_json_path), limit=20)
+        assert entropy_export["count"] == entropy["count"]
+        assert json.loads(entropy_json_path.read_text())["entries"]
+        entropy_csv_path = Path(directory) / "entropy.csv"
+        entropy_csv_export = capture_export_entropy(
+            str(path), str(entropy_csv_path), limit=20, output_format="csv"
+        )
+        assert entropy_csv_export["format"] == "csv"
+        assert entropy_csv_path.read_text().startswith("entry,size,sampled_bytes")
         log = capture_monitoring_log(str(path), "module", 10)
         assert log["lines"] == ["sample.exe: Monitoring Module 0x1234 -> C:\\sample.dll"]
         assert log["events"][0]["type"] == "module"
