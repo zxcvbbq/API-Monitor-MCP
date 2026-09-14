@@ -1342,7 +1342,6 @@ def capture_call_records(
         except KeyError as exc:
             raise FileNotFoundError(f"Capture call entry not found: {calls_name}") from exc
         data_info = archive.getinfo(data_name) if data_name in entries else None
-        data = archive.read(data_info) if include_data and data_info is not None else b""
         data_entry_bytes = data_info.file_size if data_info is not None else 0
         definitions = archive.read("definitions") if resolve_definitions and "definitions" in entries else None
         process_pid = _capture_process_pid(archive, entries, process_index, pointer_size)
@@ -1353,7 +1352,25 @@ def capture_call_records(
         count = len(calls) // pointer_size
         if start_index > count:
             raise IndexError(f"start_index {start_index} is outside {count} saved calls")
-        if data_info is not None and not include_data:
+        if data_info is not None and include_data:
+            with archive.open(data_info) as data_stream:
+                def read_data(offset: int, size: int) -> bytes:
+                    data_stream.seek(offset)
+                    return data_stream.read(size)
+
+                records = _capture_call_records(
+                    calls,
+                    b"",
+                    limit,
+                    True,
+                    max_data_bytes,
+                    start_index=start_index,
+                    definitions=definitions,
+                    pointer_size=pointer_size,
+                    data_size=data_entry_bytes,
+                    data_reader=read_data,
+                )
+        elif data_info is not None:
             records = _capture_records_without_data(
                 archive,
                 data_info,
@@ -1366,7 +1383,7 @@ def capture_call_records(
         else:
             records = _capture_call_records(
                 calls,
-                data,
+                b"",
                 limit,
                 include_data,
                 max_data_bytes,
