@@ -139,6 +139,7 @@ from .gui_runtime import (
 )
 from .gui_tools import (
     api_monitor_call_stack,
+    api_monitor_capture_process,
     api_monitor_environment,
     api_monitor_export_traffic,
     api_monitor_gui_tree_check_query,
@@ -1729,6 +1730,44 @@ def _self_test() -> None:
         assert (2007, "--sample") in set_text_calls
         assert (2022, str(Path(directory).resolve())) in set_text_calls
         assert click_calls == [1]
+        original_monitor_process = gui_tools.api_monitor_monitor_process
+        original_summary = gui_tools.api_monitor_summary
+        original_monitoring_control = gui_tools.api_monitor_monitoring_control
+        original_save_capture = gui_tools.api_monitor_save_capture
+        original_capture_info = gui_tools.capture_info
+        gui_tools.api_monitor_monitor_process = lambda *_args, **_kwargs: {
+            "window": {"handle": 500, "title": "API Monitor V2 64-bit"}
+        }
+        gui_tools.api_monitor_summary = lambda **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("traffic unavailable")
+        )
+        gui_tools.api_monitor_monitoring_control = lambda *_args, **_kwargs: {
+            "submitted": True,
+            "action": "stop",
+        }
+        gui_tools.api_monitor_save_capture = lambda *_args, **_kwargs: {
+            "saved": True,
+            "validation": {"valid": True},
+        }
+        gui_tools.capture_info = lambda *_args, **_kwargs: {"file": "mock-capture"}
+        try:
+            gui_tools.sys.platform = "win32"
+            recovered_capture = api_monitor_capture_process(
+                str(target_executable),
+                str(Path(directory) / "mock-capture.apmx64"),
+                duration_seconds=1,
+                timeout_seconds=1,
+            )
+        finally:
+            gui_tools.sys.platform = original_platform
+            gui_tools.api_monitor_monitor_process = original_monitor_process
+            gui_tools.api_monitor_summary = original_summary
+            gui_tools.api_monitor_monitoring_control = original_monitoring_control
+            gui_tools.api_monitor_save_capture = original_save_capture
+            gui_tools.capture_info = original_capture_info
+        assert recovered_capture["captured"]
+        assert recovered_capture["wait_error"] == "traffic unavailable"
+        assert recovered_capture["stopped"]["submitted"]
         original_summary = gui_tools.api_monitor_summary
         original_traffic = gui_tools.api_monitor_traffic
         summary_calls = iter((3, 4))

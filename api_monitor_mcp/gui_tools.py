@@ -1884,15 +1884,20 @@ def api_monitor_capture_process(
             if remaining <= 0:
                 break
             time.sleep(min(0.25, remaining))
-    except (LookupError, OSError, RuntimeError, TimeoutError) as exc:
+    except (LookupError, OSError, RuntimeError, TimeoutError, ValueError, TypeError, AttributeError) as exc:
         wait_error = str(exc)
     waited_seconds = round(time.monotonic() - started_at, 3)
-    stopped = api_monitor_monitoring_control(
-        "stop",
-        architecture=architecture,
-        timeout_seconds=timeout_seconds,
-        window_handle=started["window"]["handle"],
-    )
+    stop_error = None
+    try:
+        stopped = api_monitor_monitoring_control(
+            "stop",
+            architecture=architecture,
+            timeout_seconds=timeout_seconds,
+            window_handle=started["window"]["handle"],
+        )
+    except (LookupError, OSError, RuntimeError, TimeoutError, ValueError, TypeError, AttributeError) as exc:
+        stopped = {"submitted": False, "error": str(exc)}
+        stop_error = str(exc)
     saved = api_monitor_save_capture(
         str(path),
         overwrite=overwrite,
@@ -1903,7 +1908,7 @@ def api_monitor_capture_process(
     if validation is None:
         validation = capture_validate(str(path))
     result: dict[str, Any] = {
-        "captured": True,
+        "captured": bool(validation.get("valid")),
         "ready": ready,
         "minimum_calls": minimum_calls,
         "requested_architecture": requested_architecture,
@@ -1918,6 +1923,8 @@ def api_monitor_capture_process(
         result["capture"] = capture_info(str(path))
     if wait_error:
         result["wait_error"] = wait_error
+    if stop_error:
+        result["stop_error"] = stop_error
     return result
 
 
