@@ -68,6 +68,7 @@ from .capture_tools import (
     capture_export_filters,
     capture_export_find_bytes,
     capture_export_indicators,
+    capture_export_info,
     capture_export_modules,
     capture_export_monitoring_events,
     capture_export_monitoring_log,
@@ -274,6 +275,16 @@ def _self_test() -> None:
 
         info = _capture_info(path)
         assert capture_info(str(path))["architecture"] == "x64"
+        info_json_path = Path(directory) / "info.json"
+        info_export = capture_export_info(str(path), str(info_json_path))
+        assert info_export["capture_sha256"] == info["sha256"]
+        assert json.loads(info_json_path.read_text())["format_marker"] == "RBAPM"
+        info_csv_path = Path(directory) / "info.csv"
+        info_csv_export = capture_export_info(
+            str(path), str(info_csv_path), output_format="csv"
+        )
+        assert info_csv_export["format"] == "csv"
+        assert info_csv_path.read_text().startswith("section,key,value")
         assert _capture_zip_offset(path) == info["zip_offset"]
         assert info["extension"] == ".apmx64"
         assert info["format_marker"] == "RBAPM"

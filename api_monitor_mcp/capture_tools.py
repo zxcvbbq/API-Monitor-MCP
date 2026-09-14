@@ -419,6 +419,52 @@ def capture_info(file_path: str) -> dict[str, Any]:
 
 
 @mcp.tool()
+def capture_export_info(
+    file_path: str,
+    output_path: str,
+    output_format: str = "json",
+    overwrite: bool = False,
+) -> dict[str, Any]:
+    """Export an APMX file manifest and hash as JSON or CSV."""
+    if output_format not in {"json", "csv"}:
+        raise ValueError("output_format must be json or csv")
+    output = Path(output_path).expanduser()
+    if not output.parent.is_dir():
+        raise NotADirectoryError(f"Output directory not found: {output.parent}")
+    output = output.resolve()
+    if output.exists() and not overwrite:
+        raise FileExistsError(f"Output already exists: {output}")
+    result = capture_info(file_path)
+    if output_format == "json":
+        content = json.dumps(result, indent=2, ensure_ascii=False) + "\n"
+    else:
+        stream = io.StringIO(newline="")
+        writer = csv.writer(stream)
+        writer.writerow(["section", "key", "value"])
+        for key, value in result.items():
+            writer.writerow(
+                [
+                    "info",
+                    key,
+                    json.dumps(value, ensure_ascii=False)
+                    if isinstance(value, (dict, list))
+                    else value,
+                ]
+            )
+        content = stream.getvalue()
+    encoded, digest = _write_text_export(output, content, overwrite)
+    return {
+        "exported": True,
+        "file": result["file"],
+        "output": str(output),
+        "format": output_format,
+        "capture_sha256": result["sha256"],
+        "size": len(encoded),
+        "sha256": digest,
+    }
+
+
+@mcp.tool()
 def capture_overview(
     file_path: str,
     process_limit: int = 200,
