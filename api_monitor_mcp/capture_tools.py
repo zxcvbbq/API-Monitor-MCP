@@ -1580,6 +1580,60 @@ def capture_strings(
 
 
 @mcp.tool()
+def capture_export_strings(
+    file_path: str,
+    output_path: str,
+    query: str = "",
+    limit: int = 100,
+    minimum_length: int = 4,
+    output_format: str = "json",
+    overwrite: bool = False,
+) -> dict[str, Any]:
+    """Export printable capture strings as JSON or CSV."""
+    if output_format not in {"json", "csv"}:
+        raise ValueError("output_format must be json or csv")
+    output = Path(output_path).expanduser()
+    if not output.parent.is_dir():
+        raise NotADirectoryError(f"Output directory not found: {output.parent}")
+    output = output.resolve()
+    if output.exists() and not overwrite:
+        raise FileExistsError(f"Output already exists: {output}")
+    result = capture_strings(
+        file_path,
+        query=query,
+        limit=limit,
+        minimum_length=minimum_length,
+    )
+    if output_format == "json":
+        content = json.dumps(
+            {"file": str(_capture_path(file_path)), **result},
+            indent=2,
+            ensure_ascii=False,
+        ) + "\n"
+    else:
+        stream = io.StringIO(newline="")
+        writer = csv.writer(stream)
+        writer.writerow(["offset", "encoding", "text"])
+        for item in result["strings"]:
+            writer.writerow(
+                [item.get("offset", ""), item.get("encoding", ""), item.get("text", "")]
+            )
+        content = stream.getvalue()
+    encoded, digest = _write_text_export(output, content, overwrite)
+    return {
+        "exported": True,
+        "file": str(_capture_path(file_path)),
+        "output": str(output),
+        "format": output_format,
+        "query": query,
+        "count": result["count"],
+        "limit": result["limit"],
+        "size": len(encoded),
+        "sha256": digest,
+    }
+
+
+@mcp.tool()
 def capture_search_entries(
     file_path: str,
     query: str,

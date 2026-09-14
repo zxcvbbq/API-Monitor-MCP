@@ -68,6 +68,7 @@ from .capture_tools import (
     capture_export_search_directory,
     capture_export_search_entries,
     capture_export_slowest_calls,
+    capture_export_strings,
     capture_export_threads,
     capture_export_timeline,
     capture_export_types,
@@ -102,6 +103,7 @@ from .capture_tools import (
     capture_search_directory,
     capture_search_entries,
     capture_slowest_calls,
+    capture_strings,
     capture_validate,
     capture_wait_for_calls,
     capture_wait_for_new_calls,
@@ -314,6 +316,20 @@ def _self_test() -> None:
         assert info["entries"][0]["name"] == "metadata.txt"
         strings = _capture_strings(path, "CreateFile", 10, 4)
         assert strings and "CreateFileW" in strings[0]["text"]
+        capture_string_result = capture_strings(str(path), query="CreateFile", limit=10)
+        strings_json_path = Path(directory) / "strings.json"
+        strings_export = capture_export_strings(
+            str(path), str(strings_json_path), query="CreateFile", limit=10
+        )
+        assert strings_export["count"] == capture_string_result["count"]
+        assert "CreateFileW" in strings_json_path.read_text()
+        strings_csv_path = Path(directory) / "strings.csv"
+        strings_csv_export = capture_export_strings(
+            str(path), str(strings_csv_path), query="CreateFile", output_format="csv"
+        )
+        assert strings_csv_export["format"] == "csv"
+        assert strings_csv_path.read_text().startswith("offset,encoding,text")
+        assert "CreateFileW" in strings_csv_path.read_text()
         log = capture_monitoring_log(str(path), "module", 10)
         assert log["lines"] == ["sample.exe: Monitoring Module 0x1234 -> C:\\sample.dll"]
         assert log["events"][0]["type"] == "module"
