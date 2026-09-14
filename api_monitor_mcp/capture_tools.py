@@ -2580,6 +2580,82 @@ def capture_call_stats(
 
 
 @mcp.tool()
+def capture_export_call_stats(
+    file_path: str,
+    output_path: str,
+    process_index: int | None = None,
+    max_records: int = 1_000_000,
+    output_format: str = "json",
+    overwrite: bool = False,
+) -> dict[str, Any]:
+    """Export aggregate saved-call statistics as JSON or CSV."""
+    if output_format not in {"json", "csv"}:
+        raise ValueError("output_format must be json or csv")
+    output = Path(output_path).expanduser()
+    if not output.parent.is_dir():
+        raise NotADirectoryError(f"Output directory not found: {output.parent}")
+    output = output.resolve()
+    if output.exists() and not overwrite:
+        raise FileExistsError(f"Output already exists: {output}")
+    result = capture_call_stats(
+        file_path, process_index=process_index, max_records=max_records
+    )
+    if output_format == "json":
+        content = json.dumps(result, indent=2, ensure_ascii=False) + "\n"
+    else:
+        stream = io.StringIO(newline="")
+        writer = csv.writer(stream)
+        writer.writerow(
+            [
+                "scope",
+                "process_index",
+                "process_pid",
+                "count",
+                "scanned_records",
+                "valid_records",
+                "invalid_records",
+                "data_bytes",
+                "referenced_data_bytes",
+                "unreferenced_data_bytes",
+                "context",
+            ]
+        )
+        rows = [("total", "", "", result["totals"])] + [
+            ("process", process["process_index"], process.get("process_pid", ""), process)
+            for process in result["processes"]
+        ]
+        for scope, index, pid, stats in rows:
+            writer.writerow(
+                [
+                    scope,
+                    index,
+                    pid,
+                    stats.get("count", ""),
+                    stats.get("scanned_records", ""),
+                    stats.get("valid_records", ""),
+                    stats.get("invalid_records", ""),
+                    stats.get("data_bytes", ""),
+                    stats.get("referenced_data_bytes", ""),
+                    stats.get("unreferenced_data_bytes", ""),
+                    json.dumps(stats.get("context", {}), ensure_ascii=False),
+                ]
+            )
+        content = stream.getvalue()
+    encoded, digest = _write_text_export(output, content, overwrite)
+    return {
+        "exported": True,
+        "file": result["file"],
+        "output": str(output),
+        "format": output_format,
+        "process_index": process_index,
+        "count": result["count"],
+        "totals": result["totals"],
+        "size": len(encoded),
+        "sha256": digest,
+    }
+
+
+@mcp.tool()
 def capture_wait_for_calls(
     file_path: str,
     minimum_calls: int = 1,

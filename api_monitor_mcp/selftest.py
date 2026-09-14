@@ -45,6 +45,7 @@ from .capture_tools import (
     capture_export_all_calls,
     capture_export_api_summary,
     capture_export_call_graph,
+    capture_export_call_stats,
     capture_export_calls,
     capture_export_decoded_calls,
     capture_export_definitions,
@@ -451,6 +452,18 @@ def _self_test() -> None:
         assert stats["processes"][0]["process_pid"] == 1234
         assert stats["processes"][0]["context"]["error_count"] == 1
         assert stats["processes"][0]["context"]["error_codes"] == {"0x00000005": 1}
+        stats_json_path = Path(directory) / "stats.json"
+        stats_export = capture_export_call_stats(str(path), str(stats_json_path))
+        assert stats_export["totals"]["count"] == 1
+        assert json.loads(stats_json_path.read_text())["totals"]["valid_records"] == 1
+        stats_csv_path = Path(directory) / "stats.csv"
+        stats_csv_export = capture_export_call_stats(
+            str(path), str(stats_csv_path), output_format="csv"
+        )
+        assert stats_csv_export["format"] == "csv"
+        stats_csv_text = stats_csv_path.read_text()
+        assert stats_csv_text.startswith("scope,process_index")
+        assert "total,," in stats_csv_text and "process,0,1234," in stats_csv_text
         bounded_records = bytearray(257 * 160)
         bounded_calls = b"".join(struct.pack("<Q", index * 160) for index in range(257))
         for index in range(257):
