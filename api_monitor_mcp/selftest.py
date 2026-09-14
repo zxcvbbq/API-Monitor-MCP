@@ -49,6 +49,7 @@ from .capture_tools import (
     capture_export_decoded_calls,
     capture_export_definitions,
     capture_export_error_summary,
+    capture_export_monitoring_events,
     capture_export_monitoring_log,
     capture_export_search_calls,
     capture_export_slowest_calls,
@@ -283,6 +284,19 @@ def _self_test() -> None:
             str(path), process_query=r"sample\.exe", process_query_regex=True
         )
         assert regex_events["count"] == 2 and regex_events["process_query_regex"]
+        events_json_path = Path(directory) / "events.json"
+        events_export = capture_export_monitoring_events(
+            str(path), str(events_json_path), event_type="summary"
+        )
+        assert events_export["count"] == 1
+        assert json.loads(events_json_path.read_text())["events"][0]["calls"] == 1
+        events_csv_path = Path(directory) / "events.csv"
+        events_csv_export = capture_export_monitoring_events(
+            str(path), str(events_csv_path), event_type="summary", output_format="csv"
+        )
+        assert events_csv_export["format"] == "csv"
+        assert "calls" in events_csv_path.read_text().splitlines()[0]
+        assert ",1,5%" in events_csv_path.read_text()
         full_log_entry = capture_read_entry(str(path), "log/monitoring.txt", max_bytes=1024)
         log_slice = capture_read_entry(str(path), "log/monitoring.txt", max_bytes=4, offset=7)
         assert log_slice["text"] == full_log_entry["text"][7:11]

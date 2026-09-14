@@ -5737,6 +5737,82 @@ def capture_export_monitoring_log(
 
 
 @mcp.tool()
+def capture_export_monitoring_events(
+    file_path: str,
+    output_path: str,
+    event_type: str = "all",
+    process_query: str = "",
+    limit: int = 1000,
+    output_format: str = "json",
+    overwrite: bool = False,
+    process_query_regex: bool = False,
+) -> dict[str, Any]:
+    """Export filtered structured monitoring events as JSON or CSV."""
+    if output_format not in {"json", "csv"}:
+        raise ValueError("output_format must be json or csv")
+    output = Path(output_path).expanduser()
+    if not output.parent.is_dir():
+        raise NotADirectoryError(f"Output directory not found: {output.parent}")
+    output = output.resolve()
+    if output.exists() and not overwrite:
+        raise FileExistsError(f"Output already exists: {output}")
+
+    result = capture_monitoring_events(
+        file_path,
+        event_type=event_type,
+        process_query=process_query,
+        limit=limit,
+        process_query_regex=process_query_regex,
+    )
+    if output_format == "json":
+        content = json.dumps(result, indent=2, ensure_ascii=False) + "\n"
+    else:
+        stream = io.StringIO(newline="")
+        writer = csv.writer(stream)
+        writer.writerow(
+            ["line", "type", "process", "address", "module", "pid", "attach", "calls", "usage"]
+        )
+        for event in result["events"]:
+            writer.writerow(
+                [
+                    event.get("line", ""),
+                    event.get("type", ""),
+                    event.get("process", ""),
+                    event.get("address", ""),
+                    event.get("module", ""),
+                    event.get("pid", ""),
+                    event.get("attach", ""),
+                    event.get("calls", ""),
+                    event.get("usage", ""),
+                ]
+            )
+        content = stream.getvalue()
+    encoded = content.encode("utf-8")
+    digest = hashlib.sha256(encoded).hexdigest()
+    try:
+        mode = "wb" if overwrite else "xb"
+        with output.open(mode) as handle:
+            handle.write(encoded)
+    except Exception:
+        if output.exists() and not overwrite:
+            output.unlink()
+        raise
+    return {
+        "exported": True,
+        "file": result["file"],
+        "output": str(output),
+        "format": output_format,
+        "event_type": event_type,
+        "process_query": process_query,
+        "count": len(result["events"]),
+        "matched_count": result["count"],
+        "truncated": result["truncated"],
+        "size": len(encoded),
+        "sha256": digest,
+    }
+
+
+@mcp.tool()
 def capture_list_processes(file_path: str, limit: int = 200) -> dict[str, Any]:
     """List process records and executable paths recoverable from an APMX capture."""
     limit = _limit(limit, "limit", 2000)
