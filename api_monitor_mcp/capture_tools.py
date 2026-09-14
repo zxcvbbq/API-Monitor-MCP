@@ -5690,6 +5690,11 @@ def capture_search_calls(
     process_indices: set[int] = set()
     with archive, ExitStack() as streams:
         entries = {info.filename: info for info in archive.infolist()}
+        definitions = (
+            archive.read("definitions")
+            if resolve_definitions and "definitions" in entries
+            else None
+        )
         for name in entries:
             match = re.fullmatch(r"process/(\d+)/calls", name, re.IGNORECASE)
             if match and (process_index is None or int(match.group(1)) == process_index):
@@ -5713,7 +5718,6 @@ def capture_search_calls(
                 stream.seek(offset)
                 return stream.read(size)
 
-            definitions = archive.read("definitions") if resolve_definitions and "definitions" in entries else None
             if len(calls) % pointer_size:
                 raise ValueError(
                     f"process/{index}/calls is not an array of {pointer_size * 8}-bit offsets"
