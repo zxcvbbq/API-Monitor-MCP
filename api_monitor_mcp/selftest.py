@@ -52,6 +52,7 @@ from .capture_tools import (
     capture_extract_process_data,
     capture_filter_calls,
     capture_find_bytes,
+    capture_find_call_sequence,
     capture_info,
     capture_list_apis,
     capture_list_definitions,
@@ -333,11 +334,16 @@ def _self_test() -> None:
         }
         try:
             transitions = capture_api_transitions(str(path))
+            sequence = capture_find_call_sequence(
+                str(path), ["CreateFileW", "ReadFile"], max_gap=0
+            )
         finally:
             capture_tools.capture_call_timeline = original_timeline
         assert transitions["count"] == 1
         assert transitions["transitions"][0]["from"]["name"] == "CreateFileW"
         assert transitions["transitions"][0]["to"]["name"] == "ReadFile"
+        assert sequence["count"] == 1
+        assert sequence["matches"][0]["start_record"] == 0
         lazy_call_records = capture_call_records(str(path), include_data=False)
         assert lazy_call_records["data_entry_bytes"] == len(record) + 9
         assert lazy_call_records["records"][0]["valid"]

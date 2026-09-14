@@ -4278,6 +4278,157 @@ def capture_api_transitions(
 
 
 @mcp.tool()
+def capture_find_call_sequence(
+    file_path: str,
+    api_sequence: list[str],
+    process_index: int | None = None,
+    pid: int | None = None,
+    thread_id: int | None = None,
+    match_mode: str = "contains",
+    max_gap: int = 0,
+    limit: int = 100,
+    max_records: int = 100_000,
+) -> dict[str, Any]:
+    """Find ordered API sequences on captured process threads."""
+    if not api_sequence or len(api_sequence) > 64:
+        raise ValueError("api_sequence must contain between 1 and 64 API names")
+    if any(not isinstance(item, str) or not item.strip() for item in api_sequence):
+        raise ValueError("api_sequence items must be non-empty strings")
+    if any(len(item) > 4096 for item in api_sequence):
+        raise ValueError("api_sequence items must not exceed 4096 characters")
+    if process_index is not None and process_index < 0:
+        raise ValueError("process_index must be non-negative")
+    if pid is not None and not 1 <= pid <= 0xFFFFFFFF:
+        raise ValueError("pid must be between 1 and 4294967295")
+    if thread_id is not None and not 0 <= thread_id <= 0xFFFFFFFF:
+        raise ValueError("thread_id must be between 0 and 4294967295")
+    if match_mode not in {"contains", "exact"}:
+        raise ValueError("match_mode must be contains or exact")
+    if not 0 <= max_gap <= 1000:
+        raise ValueError("max_gap must be between 0 and 1000")
+    limit = _limit(limit, "limit", 10_000)
+    max_records = _limit(max_records, "max_records", 1_000_000)
+    timeline = capture_call_timeline(
+        file_path,
+        process_index=process_index,
+        order_by="capture",
+        limit=10_000,
+        max_records=max_records,
+        resolve_definitions=True,
+        pid=pid,
+        thread_id=thread_id,
+    )
+    wanted = [item.casefold() for item in api_sequence]
+
+    def matches(event: dict[str, Any], target: str) -> bool:
+        definition = event.get("record", {}).get("definition", {})
+        name = str(definition.get("name") or "")
+        module = str(definition.get("module") or "")
+        values = [name.casefold()]
+        if module:
+            values.append(f"{module}!{name}".casefold())
+        if match_mode == "exact":
+            return target in values
+        return any(target in value for value in values)
+
+    def summary(event: dict[str, Any]) -> dict[str, Any]:
+        record = event.get("record", {})
+        definition = record.get("definition", {})
+        context = record.get("context", {})
+        return {
+            "process_index": event.get("process_index"),
+            "pid": event.get("pid"),
+            "thread_id": context.get("thread_id"),
+            "record_index": record.get("index"),
+            "api": {
+                key: definition.get(key)
+                for key in ("offset", "name", "module", "ordinal")
+                if key in definition
+            },
+        }
+
+    streams: dict[tuple[int, int], list[dict[str, Any]]] = {}
+    for event in timeline["timeline"]:
+        definition = event.get("record", {}).get("definition", {})
+        if not definition.get("valid") or not definition.get("name"):
+            continue
+        context = event.get("record", {}).get("context", {})
+        key = (int(event.get("process_index", 0)), int(context.get("thread_id", 0)))
+        streams.setdefault(key, []).append(event)
+
+    matches_found: list[dict[str, Any]] = []
+    state_truncated = False
+    for stream_key, events in streams.items():
+        active: list[dict[str, Any]] = []
+        for event in events:
+            next_active: list[dict[str, Any]] = []
+            for state in active:
+                if matches(event, wanted[state["next"]]):
+                    calls = [*state["calls"], summary(event)]
+                    if state["next"] == len(wanted) - 1:
+                        matches_found.append(
+                            {
+                                "process_index": stream_key[0],
+                                "thread_id": stream_key[1],
+                                "pid": event.get("pid"),
+                                "start_record": calls[0]["record_index"],
+                                "end_record": calls[-1]["record_index"],
+                                "calls": calls,
+                            }
+                        )
+                        if len(matches_found) >= limit:
+                            break
+                    else:
+                        next_active.append(
+                            {"next": state["next"] + 1, "gap": 0, "calls": calls}
+                        )
+                    if state["gap"] < max_gap:
+                        next_active.append(
+                            {"next": state["next"], "gap": state["gap"] + 1, "calls": state["calls"]}
+                        )
+                elif state["gap"] < max_gap:
+                    next_active.append(
+                        {"next": state["next"], "gap": state["gap"] + 1, "calls": state["calls"]}
+                    )
+            if len(matches_found) >= limit:
+                break
+            if matches(event, wanted[0]):
+                if len(wanted) == 1:
+                    matches_found.append(
+                        {
+                            "process_index": stream_key[0],
+                            "thread_id": stream_key[1],
+                            "pid": event.get("pid"),
+                            "start_record": event.get("record", {}).get("index"),
+                            "end_record": event.get("record", {}).get("index"),
+                            "calls": [summary(event)],
+                        }
+                    )
+                else:
+                    next_active.append({"next": 1, "gap": 0, "calls": [summary(event)]})
+            if len(next_active) > 4096:
+                next_active = next_active[-4096:]
+                state_truncated = True
+            active = next_active
+        if len(matches_found) >= limit:
+            break
+    return {
+        "file": timeline["file"],
+        "api_sequence": api_sequence,
+        "match_mode": match_mode,
+        "max_gap": max_gap,
+        "process_index": process_index,
+        "pid": pid,
+        "thread_id": thread_id,
+        "matches": matches_found[:limit],
+        "count": len(matches_found[:limit]),
+        "scanned_records": timeline["scanned_records"],
+        "truncated": timeline["truncated"] or state_truncated,
+        "definitions_resolved": timeline["definitions_resolved"],
+    }
+
+
+@mcp.tool()
 def capture_export_timeline(
     file_path: str,
     output_path: str,
