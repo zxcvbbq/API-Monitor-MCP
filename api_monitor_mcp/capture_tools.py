@@ -3855,7 +3855,7 @@ def capture_filter_calls(
     matches: list[dict[str, Any]] = []
     scanned = 0
     scan_truncated = False
-    with archive:
+    with archive, ExitStack() as streams:
         entries = {info.filename: info for info in archive.infolist()}
         definitions = archive.read("definitions") if resolve_definitions and "definitions" in entries else None
         process_entries = []
@@ -3884,7 +3884,19 @@ def capture_filter_calls(
             calls = archive.read(f"process/{index}/calls")
             data_name = f"process/{index}/data"
             data_info = entries.get(data_name)
-            data = archive.read(data_info) if include_data and data_info is not None else b""
+            data_size = data_info.file_size if data_info is not None else 0
+            data_stream = (
+                streams.enter_context(archive.open(data_info))
+                if data_info is not None and include_data
+                else None
+            )
+
+            def read_data(offset: int, size: int, stream: Any = data_stream) -> bytes:
+                if stream is None:
+                    return b""
+                stream.seek(offset)
+                return stream.read(size)
+
             if len(calls) % pointer_size:
                 raise ValueError(
                     f"process/{index}/calls is not an array of {pointer_size * 8}-bit offsets"
@@ -3904,12 +3916,14 @@ def capture_filter_calls(
             else:
                 records = _capture_call_records(
                     calls,
-                    data,
+                    b"",
                     page_count,
                     include_data,
                     max_data_bytes,
                     definitions=definitions,
                     pointer_size=pointer_size,
+                    data_size=data_size,
+                    data_reader=read_data if data_stream is not None else None,
                 )
             scanned += len(records)
             for record in records:
@@ -4423,34 +4437,49 @@ def capture_calls_around(
     calls_name = f"process/{process_index}/calls"
     data_name = f"process/{process_index}/data"
     archive, _, _ = _open_capture_zip(path)
-    with archive:
+    with archive, ExitStack() as streams:
         entries = {info.filename for info in archive.infolist()}
         try:
             calls = archive.read(calls_name)
         except KeyError as exc:
             raise FileNotFoundError(f"Capture call entry not found: {calls_name}") from exc
-        data = archive.read(data_name) if data_name in entries else b""
+        data_info = archive.getinfo(data_name) if data_name in entries else None
+        data_size = data_info.file_size if data_info is not None else 0
+        data_stream = (
+            streams.enter_context(archive.open(data_info))
+            if data_info is not None
+            else None
+        )
+
+        def read_data(offset: int, size: int, stream: Any = data_stream) -> bytes:
+            if stream is None:
+                return b""
+            stream.seek(offset)
+            return stream.read(size)
+
         definitions = archive.read("definitions") if resolve_definitions and "definitions" in entries else None
         process_pid = _capture_process_pid(archive, entries, process_index, pointer_size)
-    if len(calls) % pointer_size:
-        raise ValueError(
-            f"process calls entry is not an array of {pointer_size * 8}-bit offsets"
+        if len(calls) % pointer_size:
+            raise ValueError(
+                f"process calls entry is not an array of {pointer_size * 8}-bit offsets"
+            )
+        count = len(calls) // pointer_size
+        if record_index >= count:
+            raise IndexError(f"record_index {record_index} is outside {count} saved calls")
+        start = max(0, record_index - before)
+        end = min(count, record_index + after + 1)
+        records = _capture_call_records(
+            calls,
+            b"",
+            end - start,
+            include_data,
+            max_data_bytes,
+            start_index=start,
+            definitions=definitions,
+            pointer_size=pointer_size,
+            data_size=data_size,
+            data_reader=read_data if data_stream is not None else None,
         )
-    count = len(calls) // pointer_size
-    if record_index >= count:
-        raise IndexError(f"record_index {record_index} is outside {count} saved calls")
-    start = max(0, record_index - before)
-    end = min(count, record_index + after + 1)
-    records = _capture_call_records(
-        calls,
-        data,
-        end - start,
-        include_data,
-        max_data_bytes,
-        start_index=start,
-        definitions=definitions,
-        pointer_size=pointer_size,
-    )
     for record in records:
         record["is_target"] = record["index"] == record_index
     return {
@@ -4461,7 +4490,7 @@ def capture_calls_around(
         "before": before,
         "after": after,
         "calls_entry": calls_name,
-        "data_entry": data_name if data else None,
+        "data_entry": data_name if data_info is not None else None,
         "count": count,
         "window_start": start,
         "window_end": end - 1,

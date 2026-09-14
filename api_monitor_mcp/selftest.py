@@ -409,9 +409,11 @@ def _self_test() -> None:
             pid=1234,
             thread_number=7,
             module_base=0x7FF600001000,
+            include_data=True,
         )
         assert api_filtered["count"] == 1
         assert api_filtered["definitions_resolved"]
+        assert api_filtered["matches"][0]["record"]["data_refs"][0]["payload"]["text"] == "hello"
         timeline = capture_call_timeline(str(path), order_by="timestamp")
         assert timeline["count"] == 1
         assert timeline["timeline"][0]["record"]["context"]["timestamp_utc"] == "2020-01-01T00:00:00+00:00"
