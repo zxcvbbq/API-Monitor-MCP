@@ -690,7 +690,7 @@ def api_monitor_window_control(
     target = candidates[0]
     user32 = ctypes.WinDLL("user32", use_last_error=True)
     if action in {"show", "hide", "minimize", "restore"}:
-        command = {"show": 4, "hide": 0, "minimize": 6, "restore": 4}[action]
+        command = {"show": 4, "hide": 0, "minimize": 6, "restore": 9}[action]
         if not user32.ShowWindow(target["handle"], command):
             error = ctypes.get_last_error()
             if action != "hide" and error:
