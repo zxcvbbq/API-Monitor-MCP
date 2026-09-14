@@ -947,6 +947,31 @@ def _detect_process_architecture(pid: int) -> dict[str, Any]:
         close_handle(process)
 
 
+def _detect_process_path(pid: int) -> str:
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    open_process = kernel32.OpenProcess
+    open_process.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    open_process.restype = wintypes.HANDLE
+    close_handle = kernel32.CloseHandle
+    close_handle.argtypes = [wintypes.HANDLE]
+    query_path = kernel32.QueryFullProcessImageNameW
+    query_path.argtypes = [wintypes.HANDLE, wintypes.DWORD, wintypes.LPWSTR, ctypes.POINTER(wintypes.DWORD)]
+    query_path.restype = wintypes.BOOL
+    process = open_process(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+    if not process:
+        raise OSError(ctypes.get_last_error(), f"Could not query process {pid}")
+    try:
+        buffer = ctypes.create_unicode_buffer(32_768)
+        length = wintypes.DWORD(len(buffer))
+        if not query_path(process, 0, buffer, ctypes.byref(length)):
+            raise OSError(ctypes.get_last_error(), f"Could not query process {pid} path")
+        return buffer.value[: length.value]
+    finally:
+        close_handle(process)
+
+
 def _detect_executable_architecture(path: Path) -> dict[str, Any]:
     machine_names = {0x014C: "x86", 0x8664: "x64", 0xAA64: "arm64"}
     with path.open("rb") as handle:

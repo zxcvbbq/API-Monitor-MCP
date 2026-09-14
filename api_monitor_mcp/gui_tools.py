@@ -28,6 +28,7 @@ from .gui_runtime import (
     _capture_window_png,
     _detect_executable_architecture,
     _detect_process_architecture,
+    _detect_process_path,
     _find_api_monitor_windows,
     _find_native_menu_item,
     _find_ui_control,
@@ -212,6 +213,44 @@ def api_monitor_process_architecture(pid: int) -> dict[str, Any]:
         raise ValueError("pid must be positive")
     result = _detect_process_architecture(pid)
     return {"supported": True, **result}
+
+
+@mcp.tool()
+def api_monitor_process_details(pid: int) -> dict[str, Any]:
+    """Return attach-ready details for one running Windows process."""
+    if sys.platform != "win32":
+        return {"supported": False, "pid": pid, "path": None, "architecture": None}
+    if pid < 1:
+        raise ValueError("pid must be positive")
+    rows, error = _tasklist_rows()
+    process_row = None
+    if not error:
+        for row in rows:
+            if len(row) >= 2 and row[1].isdigit() and int(row[1]) == pid:
+                process_row = {
+                    "image": row[0],
+                    "pid": pid,
+                    "session": row[2] if len(row) > 2 else None,
+                    "memory": row[4] if len(row) > 4 else None,
+                }
+                break
+    result: dict[str, Any] = {
+        "supported": True,
+        "pid": pid,
+        "tasklist": process_row,
+        "tasklist_error": error,
+    }
+    try:
+        result["path"] = _detect_process_path(pid)
+    except OSError as exc:
+        result["path"] = None
+        result["path_error"] = str(exc)
+    try:
+        result["architecture"] = _detect_process_architecture(pid)
+    except OSError as exc:
+        result["architecture"] = None
+        result["architecture_error"] = str(exc)
+    return result
 
 
 @mcp.tool()

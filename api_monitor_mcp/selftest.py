@@ -98,6 +98,7 @@ from .gui_tools import (
     api_monitor_environment,
     api_monitor_gui_tree_check_query,
     api_monitor_process_architecture,
+    api_monitor_process_details,
     api_monitor_wait_for_new_traffic,
 )
 
@@ -1124,3 +1125,6 @@ def _self_test() -> None:
         if sys.platform == "win32":
             process_architecture = api_monitor_process_architecture(os.getpid())
             assert process_architecture["architecture"] in {"x86", "x64", "arm64"}
+            process_details = api_monitor_process_details(os.getpid())
+            assert process_details["path"]
+            assert process_details["architecture"]["architecture"] in {"x86", "x64", "arm64"}
