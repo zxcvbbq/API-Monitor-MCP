@@ -49,10 +49,13 @@ from .capture_tools import (
     capture_export_decoded_calls,
     capture_export_definitions,
     capture_export_error_summary,
+    capture_export_modules,
     capture_export_monitoring_events,
     capture_export_monitoring_log,
+    capture_export_processes,
     capture_export_search_calls,
     capture_export_slowest_calls,
+    capture_export_threads,
     capture_export_timeline,
     capture_extract_call_payload,
     capture_extract_entry,
@@ -297,6 +300,36 @@ def _self_test() -> None:
         assert events_csv_export["format"] == "csv"
         assert "calls" in events_csv_path.read_text().splitlines()[0]
         assert ",1,5%" in events_csv_path.read_text()
+        processes_json_path = Path(directory) / "processes.json"
+        processes_export = capture_export_processes(str(path), str(processes_json_path))
+        assert processes_export["count"] == 1
+        assert json.loads(processes_json_path.read_text())["processes"][0]["metadata"]["pid"] == 1234
+        processes_csv_path = Path(directory) / "processes.csv"
+        processes_csv_export = capture_export_processes(
+            str(path), str(processes_csv_path), output_format="csv"
+        )
+        assert processes_csv_export["format"] == "csv"
+        assert "call_count" in processes_csv_path.read_text().splitlines()[0]
+        modules_json_path = Path(directory) / "modules.json"
+        modules_export = capture_export_modules(str(path), str(modules_json_path))
+        assert modules_export["count"] == 1
+        assert json.loads(modules_json_path.read_text())["modules"][0]["name"] == "sample.exe"
+        modules_csv_path = Path(directory) / "modules.csv"
+        modules_csv_export = capture_export_modules(
+            str(path), str(modules_csv_path), output_format="csv"
+        )
+        assert modules_csv_export["format"] == "csv"
+        assert "occurrence_count" in modules_csv_path.read_text().splitlines()[0]
+        threads_json_path = Path(directory) / "threads.json"
+        threads_export = capture_export_threads(str(path), str(threads_json_path))
+        assert threads_export["count"] == 1
+        assert json.loads(threads_json_path.read_text())["threads"][0]["thread_id"] == 0x1234
+        threads_csv_path = Path(directory) / "threads.csv"
+        threads_csv_export = capture_export_threads(
+            str(path), str(threads_csv_path), output_format="csv"
+        )
+        assert threads_csv_export["format"] == "csv"
+        assert "thread_id" in threads_csv_path.read_text().splitlines()[0]
         full_log_entry = capture_read_entry(str(path), "log/monitoring.txt", max_bytes=1024)
         log_slice = capture_read_entry(str(path), "log/monitoring.txt", max_bytes=4, offset=7)
         assert log_slice["text"] == full_log_entry["text"][7:11]

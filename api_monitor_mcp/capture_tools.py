@@ -5780,6 +5780,75 @@ def capture_list_processes(file_path: str, limit: int = 200) -> dict[str, Any]:
 
 
 @mcp.tool()
+def capture_export_processes(
+    file_path: str,
+    output_path: str,
+    limit: int = 200,
+    output_format: str = "json",
+    overwrite: bool = False,
+) -> dict[str, Any]:
+    """Export captured process inventory as JSON or CSV."""
+    if output_format not in {"json", "csv"}:
+        raise ValueError("output_format must be json or csv")
+    output = Path(output_path).expanduser()
+    if not output.parent.is_dir():
+        raise NotADirectoryError(f"Output directory not found: {output.parent}")
+    output = output.resolve()
+    if output.exists() and not overwrite:
+        raise FileExistsError(f"Output already exists: {output}")
+    result = capture_list_processes(file_path, limit=limit)
+    if output_format == "json":
+        content = json.dumps(result, indent=2, ensure_ascii=False) + "\n"
+    else:
+        stream = io.StringIO(newline="")
+        writer = csv.writer(stream)
+        writer.writerow(
+            [
+                "index",
+                "entry",
+                "size",
+                "call_count",
+                "data_size",
+                "calls_entry",
+                "data_entry",
+                "pid",
+                "executables",
+                "modules",
+                "metadata",
+            ]
+        )
+        for process in result["processes"]:
+            metadata = process.get("metadata", {})
+            writer.writerow(
+                [
+                    process.get("index", ""),
+                    process.get("entry", ""),
+                    process.get("size", ""),
+                    process.get("call_count", ""),
+                    process.get("data_size", ""),
+                    process.get("calls_entry", ""),
+                    process.get("data_entry", ""),
+                    metadata.get("pid", "") if isinstance(metadata, dict) else "",
+                    json.dumps(process.get("executables", []), ensure_ascii=False),
+                    json.dumps(process.get("modules", []), ensure_ascii=False),
+                    json.dumps(metadata, ensure_ascii=False),
+                ]
+            )
+        content = stream.getvalue()
+    encoded, digest = _write_text_export(output, content, overwrite)
+    return {
+        "exported": True,
+        "file": result["file"],
+        "output": str(output),
+        "format": output_format,
+        "count": result["count"],
+        "truncated": result["truncated"],
+        "size": len(encoded),
+        "sha256": digest,
+    }
+
+
+@mcp.tool()
 def capture_list_modules(
     file_path: str,
     process_index: int | None = None,
@@ -5868,6 +5937,76 @@ def capture_list_modules(
         "modules": returned[:limit],
         "count": len(returned),
         "truncated": len(returned) > limit or source["truncated"],
+    }
+
+
+@mcp.tool()
+def capture_export_modules(
+    file_path: str,
+    output_path: str,
+    process_index: int | None = None,
+    query: str = "",
+    limit: int = 1000,
+    pid: int | None = None,
+    output_format: str = "json",
+    overwrite: bool = False,
+) -> dict[str, Any]:
+    """Export captured module inventory as JSON or CSV."""
+    if output_format not in {"json", "csv"}:
+        raise ValueError("output_format must be json or csv")
+    output = Path(output_path).expanduser()
+    if not output.parent.is_dir():
+        raise NotADirectoryError(f"Output directory not found: {output.parent}")
+    output = output.resolve()
+    if output.exists() and not overwrite:
+        raise FileExistsError(f"Output already exists: {output}")
+    result = capture_list_modules(
+        file_path,
+        process_index=process_index,
+        query=query,
+        limit=limit,
+        pid=pid,
+    )
+    if output_format == "json":
+        content = json.dumps(result, indent=2, ensure_ascii=False) + "\n"
+    else:
+        stream = io.StringIO(newline="")
+        writer = csv.writer(stream)
+        writer.writerow(
+            [
+                "name",
+                "path",
+                "process_indices",
+                "pids",
+                "occurrence_count",
+                "occurrences",
+            ]
+        )
+        for module in result["modules"]:
+            writer.writerow(
+                [
+                    module.get("name", ""),
+                    module.get("path", ""),
+                    json.dumps(module.get("process_indices", []), ensure_ascii=False),
+                    json.dumps(module.get("pids", []), ensure_ascii=False),
+                    len(module.get("occurrences", [])),
+                    json.dumps(module.get("occurrences", []), ensure_ascii=False),
+                ]
+            )
+        content = stream.getvalue()
+    encoded, digest = _write_text_export(output, content, overwrite)
+    return {
+        "exported": True,
+        "file": result["file"],
+        "output": str(output),
+        "format": output_format,
+        "process_index": process_index,
+        "pid": pid,
+        "query": query,
+        "count": result["count"],
+        "truncated": result["truncated"],
+        "size": len(encoded),
+        "sha256": digest,
     }
 
 
@@ -5991,6 +6130,86 @@ def capture_list_threads(
         "count": len(returned),
         "scanned_records": scanned,
         "truncated": truncated or len(returned) > limit,
+    }
+
+
+@mcp.tool()
+def capture_export_threads(
+    file_path: str,
+    output_path: str,
+    process_index: int | None = None,
+    limit: int = 1000,
+    max_records: int = 1_000_000,
+    pid: int | None = None,
+    output_format: str = "json",
+    overwrite: bool = False,
+) -> dict[str, Any]:
+    """Export captured thread activity as JSON or CSV."""
+    if output_format not in {"json", "csv"}:
+        raise ValueError("output_format must be json or csv")
+    output = Path(output_path).expanduser()
+    if not output.parent.is_dir():
+        raise NotADirectoryError(f"Output directory not found: {output.parent}")
+    output = output.resolve()
+    if output.exists() and not overwrite:
+        raise FileExistsError(f"Output already exists: {output}")
+    result = capture_list_threads(
+        file_path,
+        process_index=process_index,
+        limit=limit,
+        max_records=max_records,
+        pid=pid,
+    )
+    if output_format == "json":
+        content = json.dumps(result, indent=2, ensure_ascii=False) + "\n"
+    else:
+        stream = io.StringIO(newline="")
+        writer = csv.writer(stream)
+        writer.writerow(
+            [
+                "process_index",
+                "pid",
+                "thread_id",
+                "thread_number",
+                "count",
+                "first_record",
+                "last_record",
+                "error_count",
+                "flags",
+                "error_codes",
+                "context",
+            ]
+        )
+        for thread in result["threads"]:
+            writer.writerow(
+                [
+                    thread.get("process_index", ""),
+                    thread.get("pid", ""),
+                    thread.get("thread_id", ""),
+                    thread.get("thread_number", ""),
+                    thread.get("count", ""),
+                    thread.get("first_record", ""),
+                    thread.get("last_record", ""),
+                    thread.get("error_count", ""),
+                    json.dumps(thread.get("flags", {}), ensure_ascii=False),
+                    json.dumps(thread.get("error_codes", {}), ensure_ascii=False),
+                    json.dumps(thread.get("context", {}), ensure_ascii=False),
+                ]
+            )
+        content = stream.getvalue()
+    encoded, digest = _write_text_export(output, content, overwrite)
+    return {
+        "exported": True,
+        "file": result["file"],
+        "output": str(output),
+        "format": output_format,
+        "process_index": process_index,
+        "pid": pid,
+        "count": result["count"],
+        "scanned_records": result["scanned_records"],
+        "truncated": result["truncated"],
+        "size": len(encoded),
+        "sha256": digest,
     }
 
 
