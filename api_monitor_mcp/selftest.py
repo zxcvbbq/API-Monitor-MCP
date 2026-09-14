@@ -60,6 +60,7 @@ from .capture_tools import (
     capture_list_processes,
     capture_list_threads,
     capture_list_types,
+    capture_monitoring_events,
     capture_monitoring_log,
     capture_overview,
     capture_payload_summary,
@@ -257,6 +258,10 @@ def _self_test() -> None:
         summary_log = capture_monitoring_log(str(path), "summary", 10)
         assert summary_log["events"][0]["calls"] == 1
         assert summary_log["events"][0]["process"] == "sample.exe"
+        events = capture_monitoring_events(str(path), event_type="summary")
+        assert events["count"] == 1
+        assert events["by_type"]["summary"] == 1
+        assert events["processes"][0]["summaries"][0]["calls"] == 1
         full_log_entry = capture_read_entry(str(path), "log/monitoring.txt", max_bytes=1024)
         log_slice = capture_read_entry(str(path), "log/monitoring.txt", max_bytes=4, offset=7)
         assert log_slice["text"] == full_log_entry["text"][7:11]

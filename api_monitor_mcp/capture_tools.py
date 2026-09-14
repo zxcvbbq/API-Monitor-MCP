@@ -4286,6 +4286,64 @@ def capture_monitoring_log(
 
 
 @mcp.tool()
+def capture_monitoring_events(
+    file_path: str,
+    event_type: str = "all",
+    process_query: str = "",
+    limit: int = 1000,
+) -> dict[str, Any]:
+    """Return structured module, child-process, and summary events from a capture log."""
+    if event_type not in {"all", "module", "child_process", "summary", "unknown"}:
+        raise ValueError("event_type must be all, module, child_process, summary, or unknown")
+    if len(process_query) > 4096:
+        raise ValueError("process_query must not exceed 4096 characters")
+    limit = _limit(limit, "limit", 10_000)
+    source = capture_monitoring_log(file_path, limit=10_000)
+    wanted_process = process_query.casefold()
+    events = [
+        event
+        for event in source["events"]
+        if (event_type == "all" or event.get("type") == event_type)
+        and (
+            not wanted_process
+            or wanted_process in str(event.get("process", "")).casefold()
+        )
+    ]
+    by_type: dict[str, int] = {}
+    processes: dict[str, dict[str, Any]] = {}
+    for event in events:
+        kind = str(event.get("type", "unknown"))
+        by_type[kind] = by_type.get(kind, 0) + 1
+        process = str(event.get("process", ""))
+        if not process:
+            continue
+        item = processes.setdefault(
+            process,
+            {"process": process, "modules": [], "children": [], "summaries": []},
+        )
+        if kind == "module" and event.get("module") not in item["modules"]:
+            item["modules"].append(event.get("module"))
+        elif kind == "child_process":
+            item["children"].append(
+                {key: event.get(key) for key in ("pid", "attach") if key in event}
+            )
+        elif kind == "summary":
+            item["summaries"].append(
+                {key: event.get(key) for key in ("calls", "usage") if key in event}
+            )
+    return {
+        "file": source["file"],
+        "event_type": event_type,
+        "process_query": process_query,
+        "events": events[:limit],
+        "count": len(events),
+        "by_type": by_type,
+        "processes": list(processes.values()),
+        "truncated": source["truncated"] or len(events) > limit,
+    }
+
+
+@mcp.tool()
 def capture_export_monitoring_log(
     file_path: str,
     output_path: str,
