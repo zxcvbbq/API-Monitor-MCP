@@ -390,6 +390,15 @@ def _self_test() -> None:
         payload_export = capture_extract_call_payload(str(path), 0, 0, 0, str(extracted_payload))
         assert payload_export["size"] == 5
         assert extracted_payload.read_bytes() == b"hello"
+        protected_output = Path(directory) / "existing-payload.bin"
+        protected_output.write_bytes(b"keep")
+        try:
+            capture_extract_call_payload(str(path), 0, 0, 0, str(protected_output))
+        except FileExistsError:
+            pass
+        else:
+            raise AssertionError("exclusive payload extraction unexpectedly overwrote output")
+        assert protected_output.read_bytes() == b"keep"
         process_slice = capture_read_process_data(str(path), 0, 160, 5)
         assert process_slice["text"] == "hello"
         json_export = capture_export_calls(

@@ -1594,56 +1594,69 @@ def capture_extract_call_payload(
         raise FileExistsError(f"Output already exists: {output}")
 
     path = _capture_path(file_path)
+    if output == path:
+        raise ValueError("output_path must differ from the capture file")
     pointer_size = 4 if path.suffix.lower() == ".apmx86" else 8
     calls_name = f"process/{process_index}/calls"
     data_name = f"process/{process_index}/data"
     archive, _, _ = _open_capture_zip(path)
     with archive:
+        entries = {info.filename: info for info in archive.infolist()}
         try:
             calls = archive.read(calls_name)
         except KeyError as exc:
             raise FileNotFoundError(f"Capture call entry not found: {calls_name}") from exc
-        try:
-            data = archive.read(data_name)
-        except KeyError as exc:
-            raise FileNotFoundError(f"Capture call entry not found: {data_name}") from exc
-    if len(calls) % pointer_size:
-        raise ValueError(
-            f"process calls entry is not an array of {pointer_size * 8}-bit offsets"
+        data_info = entries.get(data_name)
+        if data_info is None:
+            raise FileNotFoundError(f"Capture data entry not found: {data_name}")
+        if len(calls) % pointer_size:
+            raise ValueError(
+                f"process calls entry is not an array of {pointer_size * 8}-bit offsets"
+            )
+        count = len(calls) // pointer_size
+        if record_index >= count:
+            raise IndexError(f"record_index {record_index} is outside {count} saved calls")
+        record = _capture_records_without_data(
+            archive,
+            data_info,
+            calls,
+            1,
+            start_index=record_index,
+            pointer_size=pointer_size,
+        )[0]
+        if not record["valid"]:
+            raise ValueError(record.get("error", "saved call record is invalid"))
+        reference = next(
+            (item for item in record["data_refs"] if item["slot"] == slot), None
         )
-    count = len(calls) // pointer_size
-    if record_index >= count:
-        raise IndexError(f"record_index {record_index} is outside {count} saved calls")
-    record = _capture_call_records(
-        calls,
-        data,
-        1,
-        False,
-        max_bytes,
-        start_index=record_index,
-        pointer_size=pointer_size,
-    )[0]
-    if not record["valid"]:
-        raise ValueError(record.get("error", "saved call record is invalid"))
-    reference = next(
-        (item for item in record["data_refs"] if item["slot"] == slot), None
-    )
-    if not reference or not reference["length"]:
-        raise ValueError(f"call record {record_index} has no payload in slot {slot}")
-    if not reference["valid"]:
-        raise ValueError(reference.get("error", "saved call payload is invalid"))
-    if reference["length"] > max_bytes:
-        raise ValueError(f"call payload exceeds max_bytes: {reference['length']}")
-    payload = data[reference["offset"] : reference["offset"] + reference["length"]]
-    digest = hashlib.sha256(payload).hexdigest()
-    try:
-        mode = "wb" if overwrite else "xb"
-        with output.open(mode) as handle:
-            handle.write(payload)
-    except Exception:
-        if output.exists() and not overwrite:
-            output.unlink()
-        raise
+        if not reference or not reference["length"]:
+            raise ValueError(f"call record {record_index} has no payload in slot {slot}")
+        if not reference["valid"]:
+            raise ValueError(reference.get("error", "saved call payload is invalid"))
+        if reference["length"] > max_bytes:
+            raise ValueError(f"call payload exceeds max_bytes: {reference['length']}")
+
+        digest = hashlib.sha256()
+        written = 0
+        created = False
+        try:
+            with archive.open(data_info) as data_stream:
+                data_stream.seek(reference["offset"])
+                with output.open("wb" if overwrite else "xb") as handle:
+                    created = True
+                    while written < reference["length"]:
+                        chunk = data_stream.read(
+                            min(1024 * 1024, reference["length"] - written)
+                        )
+                        if not chunk:
+                            raise ValueError("saved call payload ended before its declared length")
+                        handle.write(chunk)
+                        digest.update(chunk)
+                        written += len(chunk)
+        except Exception:
+            if created and output.exists():
+                output.unlink()
+            raise
     return {
         "extracted": True,
         "file": str(path),
@@ -1651,9 +1664,9 @@ def capture_extract_call_payload(
         "record_index": record_index,
         "slot": slot,
         "data_offset": reference["offset"],
-        "size": len(payload),
+        "size": written,
         "output": str(output),
-        "sha256": digest,
+        "sha256": digest.hexdigest(),
     }
 
 
