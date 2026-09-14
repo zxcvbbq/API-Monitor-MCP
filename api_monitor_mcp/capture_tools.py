@@ -4481,7 +4481,9 @@ def capture_call_graph(
         )
 
     def api_summary(key: tuple[Any, ...]) -> dict[str, Any]:
+        node_id = f"{key[0]}:{key[1]}" if key[1] is not None else f"{key[0]}:{key[3]}!{key[2]}"
         return {
+            "id": node_id,
             "offset": key[1],
             "name": key[2],
             "module": key[3],

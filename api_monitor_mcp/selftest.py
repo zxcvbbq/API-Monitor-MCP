@@ -348,6 +348,7 @@ def _self_test() -> None:
         assert sequence["matches"][0]["start_record"] == 0
         assert graph["node_count"] == 2
         assert graph["edge_count"] == 1
+        assert graph["edges"][0]["from"]["id"] == graph["nodes"][0]["id"]
         lazy_call_records = capture_call_records(str(path), include_data=False)
         assert lazy_call_records["data_entry_bytes"] == len(record) + 9
         assert lazy_call_records["records"][0]["valid"]
