@@ -3519,8 +3519,25 @@ def capture_search_calls(
     end_time_utc: str | None = None,
 ) -> dict[str, Any]:
     """Search saved call payloads, API definitions, and decoded arguments."""
-    if not query and pattern_hex is None:
-        raise ValueError("query or pattern_hex is required")
+    filter_only = any(
+        value is not None
+        for value in (
+            process_index,
+            pid,
+            thread_id,
+            error_code,
+            flags,
+            api_name,
+            api_module,
+            definition_offset,
+            min_duration_seconds,
+            max_duration_seconds,
+            start_time_utc,
+            end_time_utc,
+        )
+    )
+    if not query and pattern_hex is None and not filter_only:
+        raise ValueError("query, pattern_hex, or a call filter is required")
     if process_index is not None and process_index < 0:
         raise ValueError("process_index must be non-negative")
     if pid is not None and not 1 <= pid <= 0xFFFFFFFF:
@@ -3811,7 +3828,13 @@ def capture_search_calls(
                             "record",
                             record_offset,
                         )
-                if payload_matches or api_matches or argument_matches or byte_matches:
+                if (
+                    payload_matches
+                    or api_matches
+                    or argument_matches
+                    or byte_matches
+                    or (filter_only and not query and pattern is None)
+                ):
                     match = {
                         "process_index": index,
                         "pid": process_pid,
@@ -3839,6 +3862,7 @@ def capture_search_calls(
                             "count": len(matches),
                             "scanned_records": scanned,
                             "pattern_hex": pattern.hex(" ") if pattern is not None else None,
+                            "filter_only": filter_only,
                             "truncated": True,
                             "definitions_resolved": resolve_definitions,
                             "arguments_decoded": decode_arguments,
@@ -3856,6 +3880,7 @@ def capture_search_calls(
         "count": len(matches),
         "scanned_records": scanned,
         "pattern_hex": pattern.hex(" ") if pattern is not None else None,
+        "filter_only": filter_only,
         "truncated": scan_truncated,
         "definitions_resolved": resolve_definitions,
         "arguments_decoded": decode_arguments,

@@ -582,6 +582,14 @@ def _self_test() -> None:
             str(path), "CreateFileW", limit=1, resolve_definitions=True
         )
         assert limited_api_search["definitions_resolved"]
+        filter_only_search = capture_search_calls(str(path), api_name="CreateFileW")
+        assert filter_only_search["count"] == 1 and filter_only_search["filter_only"]
+        filter_only_path = Path(directory) / "search-filter.json"
+        filter_only_export = capture_export_search_calls(
+            str(path), str(filter_only_path), api_name="CreateFileW"
+        )
+        assert filter_only_export["count"] == 1
+        assert json.loads(filter_only_path.read_text())["filter_only"]
         search_json_path = Path(directory) / "search.json"
         search_export = capture_export_search_calls(
             str(path), str(search_json_path), query="ell"
