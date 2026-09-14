@@ -7509,3 +7509,78 @@ def capture_search_directory(
                 break
     return {"directory": str(root), "query": query, "captures": matches, "count": len(matches)}
 
+
+@mcp.tool()
+def capture_export_search_directory(
+    directory: str,
+    output_path: str,
+    query: str,
+    recursive: bool = True,
+    limit: int = 100,
+    output_format: str = "json",
+    overwrite: bool = False,
+) -> dict[str, Any]:
+    """Export directory-wide capture string search results as JSON or CSV."""
+    if output_format not in {"json", "csv"}:
+        raise ValueError("output_format must be json or csv")
+    output = Path(output_path).expanduser()
+    if not output.parent.is_dir():
+        raise NotADirectoryError(f"Output directory not found: {output.parent}")
+    output = output.resolve()
+    if output.exists() and not overwrite:
+        raise FileExistsError(f"Output already exists: {output}")
+    result = capture_search_directory(
+        directory,
+        query,
+        recursive=recursive,
+        limit=limit,
+    )
+    if output_format == "json":
+        content = json.dumps(result, indent=2, ensure_ascii=False) + "\n"
+    else:
+        stream = io.StringIO(newline="")
+        writer = csv.writer(stream)
+        writer.writerow(
+            ["file", "kind", "entry", "offset", "encoding", "text", "entry_truncated"]
+        )
+        for capture in result["captures"]:
+            file_path = capture.get("file", "")
+            for match in capture.get("matches", []):
+                writer.writerow(
+                    [
+                        file_path,
+                        "raw_string",
+                        "",
+                        match.get("offset", ""),
+                        match.get("encoding", ""),
+                        match.get("text", ""),
+                        "",
+                    ]
+                )
+            for entry in capture.get("entries", []):
+                for match in entry.get("matches", []):
+                    writer.writerow(
+                        [
+                            file_path,
+                            "entry",
+                            entry.get("entry", ""),
+                            match.get("offset", ""),
+                            match.get("encoding", ""),
+                            match.get("text", ""),
+                            entry.get("entry_truncated", ""),
+                        ]
+                    )
+        content = stream.getvalue()
+    encoded, digest = _write_text_export(output, content, overwrite)
+    return {
+        "exported": True,
+        "directory": result["directory"],
+        "output": str(output),
+        "format": output_format,
+        "query": query,
+        "recursive": recursive,
+        "count": result["count"],
+        "size": len(encoded),
+        "sha256": digest,
+    }
+

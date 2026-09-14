@@ -65,6 +65,7 @@ from .capture_tools import (
     capture_export_process_overview,
     capture_export_processes,
     capture_export_search_calls,
+    capture_export_search_directory,
     capture_export_search_entries,
     capture_export_slowest_calls,
     capture_export_threads,
@@ -1087,6 +1088,23 @@ def _self_test() -> None:
         assert listed["count"] == 1
         directory_search = capture_search_directory(directory, "CreateFile", recursive=False, limit=10)
         assert directory_search["captures"][0]["entries"][0]["entry"] == "calls.bin"
+        directory_search_json_path = Path(directory) / "directory-search.json"
+        directory_search_export = capture_export_search_directory(
+            directory, str(directory_search_json_path), "CreateFile", recursive=False
+        )
+        assert directory_search_export["count"] == directory_search["count"]
+        assert json.loads(directory_search_json_path.read_text())["captures"][0]["file"] == directory_search["captures"][0]["file"]
+        directory_search_csv_path = Path(directory) / "directory-search.csv"
+        directory_search_csv_export = capture_export_search_directory(
+            directory,
+            str(directory_search_csv_path),
+            "CreateFile",
+            recursive=False,
+            output_format="csv",
+        )
+        assert directory_search_csv_export["format"] == "csv"
+        assert directory_search_csv_path.read_text().startswith("file,kind,entry")
+        assert "calls.bin" in directory_search_csv_path.read_text()
         comparison = capture_compare(str(path), str(second_path))
         assert comparison["counts"] == {"added": 1, "removed": 8, "changed": 1}
         assert not comparison["same"]
