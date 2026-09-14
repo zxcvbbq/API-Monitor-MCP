@@ -1566,6 +1566,56 @@ def capture_list_entries(file_path: str, limit: int = 200) -> dict[str, Any]:
 
 
 @mcp.tool()
+def capture_export_entries(
+    file_path: str,
+    output_path: str,
+    limit: int = 200,
+    output_format: str = "json",
+    overwrite: bool = False,
+) -> dict[str, Any]:
+    """Export the files stored inside an APMX capture as JSON or CSV."""
+    if output_format not in {"json", "csv"}:
+        raise ValueError("output_format must be json or csv")
+    output = Path(output_path).expanduser()
+    if not output.parent.is_dir():
+        raise NotADirectoryError(f"Output directory not found: {output.parent}")
+    output = output.resolve()
+    if output.exists() and not overwrite:
+        raise FileExistsError(f"Output already exists: {output}")
+    path = _capture_path(file_path)
+    result = capture_list_entries(str(path), limit=limit)
+    if output_format == "json":
+        content = json.dumps({"file": str(path), **result}, indent=2) + "\n"
+    else:
+        stream = io.StringIO(newline="")
+        writer = csv.writer(stream)
+        writer.writerow(["file", "entry", "size", "compressed_size", "crc32", "is_dir"])
+        for entry in result["entries"]:
+            writer.writerow(
+                [
+                    str(path),
+                    entry.get("name", ""),
+                    entry.get("size", ""),
+                    entry.get("compressed_size", ""),
+                    entry.get("crc32", ""),
+                    entry.get("is_dir", ""),
+                ]
+            )
+        content = stream.getvalue()
+    encoded, digest = _write_text_export(output, content, overwrite)
+    return {
+        "exported": True,
+        "file": str(path),
+        "output": str(output),
+        "format": output_format,
+        "count": result["count"],
+        "truncated": result["truncated"],
+        "size": len(encoded),
+        "sha256": digest,
+    }
+
+
+@mcp.tool()
 def capture_strings(
     file_path: str,
     query: str = "",

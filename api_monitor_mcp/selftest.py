@@ -55,6 +55,7 @@ from .capture_tools import (
     capture_export_decoded_calls,
     capture_export_definitions,
     capture_export_directory,
+    capture_export_entries,
     capture_export_error_summary,
     capture_export_filter_calls,
     capture_export_filters,
@@ -1108,6 +1109,17 @@ def _self_test() -> None:
             "process/0/info",
             "info",
         }
+        entries_json_path = Path(directory) / "entries.json"
+        entries_export = capture_export_entries(str(path), str(entries_json_path), limit=20)
+        assert entries_export["count"] == len(entries)
+        assert json.loads(entries_json_path.read_text())["entries"][0]["name"] == "metadata.txt"
+        entries_csv_path = Path(directory) / "entries.csv"
+        entries_csv_export = capture_export_entries(
+            str(path), str(entries_csv_path), limit=20, output_format="csv"
+        )
+        assert entries_csv_export["format"] == "csv"
+        assert entries_csv_path.read_text().startswith("file,entry,size")
+        assert "metadata.txt" in entries_csv_path.read_text()
         listed = capture_list_directory(directory, recursive=False, limit=10)
         assert listed["count"] == 1
         directory_json_path = Path(directory) / "directory.json"
