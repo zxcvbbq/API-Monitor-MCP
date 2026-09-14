@@ -94,6 +94,7 @@ from .gui_runtime import (
     _named_gui_rows,
 )
 from .gui_tools import (
+    api_monitor_call_stack,
     api_monitor_environment,
     api_monitor_gui_tree_check_query,
     api_monitor_process_architecture,
@@ -1089,6 +1090,22 @@ def _self_test() -> None:
             gui_tools._set_tree_item_check = original_check
         assert tree_query["updated_count"] == 1
         assert checked_items == [(99, 101, True)]
+        original_details = gui_tools.api_monitor_traffic_details
+        gui_tools.api_monitor_traffic_details = lambda **_kwargs: {
+            "selected_call": {"row_index": 0},
+            "details": [
+                {
+                    "pane_title": "Call Stack",
+                    "rows": [["kernel32.dll", "CreateFileW"]],
+                }
+            ],
+            "summaries": [],
+        }
+        try:
+            stack = api_monitor_call_stack(row_index=0)
+        finally:
+            gui_tools.api_monitor_traffic_details = original_details
+        assert stack["supported"] and stack["stacks"][0]["pane_title"] == "Call Stack"
         delta = _gui_traffic_delta(
             {"panes": [{"list_handle": 1, "headers": ["API"], "rows": [["old"]]}]},
             {

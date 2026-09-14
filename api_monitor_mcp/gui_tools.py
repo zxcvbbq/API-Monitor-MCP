@@ -1376,6 +1376,41 @@ def api_monitor_traffic_details(
 
 
 @mcp.tool()
+def api_monitor_call_stack(
+    row_index: int | None = None,
+    query: str = "",
+    window_title: str = "",
+    limit: int = 500,
+    window_handle: int | None = None,
+) -> dict[str, Any]:
+    """Select a live API call and return its background Call Stack pane."""
+    if row_index is None and not query:
+        raise ValueError("row_index or query is required")
+    limit = _limit(limit, "limit", 2000)
+    details = api_monitor_traffic_details(
+        window_title=window_title,
+        row_index=row_index,
+        query=query,
+        limit=limit,
+        window_handle=window_handle,
+    )
+    stacks = [
+        pane
+        for pane in details.get("details", [])
+        if "call stack" in str(pane.get("pane_title") or "").casefold()
+    ]
+    return {
+        "supported": bool(stacks),
+        "method": "background-ui-automation",
+        "selected_call": details.get("selected_call"),
+        "stacks": stacks,
+        "count": len(stacks),
+        "summaries": details.get("summaries", []),
+        "reason": None if stacks else "Call Stack pane was not found",
+    }
+
+
+@mcp.tool()
 def api_monitor_wait_for_traffic(
     minimum_calls: int = 1,
     timeout_seconds: int = 30,
