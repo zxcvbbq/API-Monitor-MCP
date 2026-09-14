@@ -941,6 +941,86 @@ def capture_compare_apis(
 
 
 @mcp.tool()
+def capture_export_compare_apis(
+    first_file: str,
+    second_file: str,
+    output_path: str,
+    limit: int = 500,
+    max_records: int = 1_000_000,
+    output_format: str = "json",
+    overwrite: bool = False,
+) -> dict[str, Any]:
+    """Export API-frequency differences between two captures as JSON or CSV."""
+    if output_format not in {"json", "csv"}:
+        raise ValueError("output_format must be json or csv")
+    output = Path(output_path).expanduser()
+    if not output.parent.is_dir():
+        raise NotADirectoryError(f"Output directory not found: {output.parent}")
+    output = output.resolve()
+    if output.exists() and not overwrite:
+        raise FileExistsError(f"Output already exists: {output}")
+    result = capture_compare_apis(
+        first_file, second_file, limit=limit, max_records=max_records
+    )
+    if output_format == "json":
+        content = json.dumps(result, indent=2, ensure_ascii=False) + "\n"
+    else:
+        stream = io.StringIO(newline="")
+        writer = csv.writer(stream)
+        writer.writerow(
+            [
+                "kind",
+                "name",
+                "module",
+                "ordinal",
+                "first_count",
+                "second_count",
+                "first_process_indices",
+                "second_process_indices",
+                "first",
+                "second",
+            ]
+        )
+        rows: list[tuple[str, dict[str, Any], dict[str, Any], dict[str, Any]]] = []
+        rows.extend(("added", {}, item, item) for item in result["added"])
+        rows.extend(("removed", item, {}, item) for item in result["removed"])
+        rows.extend(
+            ("changed", item.get("first", {}), item.get("second", {}), item)
+            for item in result["changed"]
+        )
+        for kind, first, second, item in rows:
+            api = item.get("api", {}) if kind == "changed" else (second or first)
+            writer.writerow(
+                [
+                    kind,
+                    api.get("name", ""),
+                    api.get("module", ""),
+                    api.get("ordinal", ""),
+                    first.get("count", ""),
+                    second.get("count", ""),
+                    json.dumps(first.get("process_indices", []), ensure_ascii=False),
+                    json.dumps(second.get("process_indices", []), ensure_ascii=False),
+                    json.dumps(first, ensure_ascii=False) if first else "",
+                    json.dumps(second, ensure_ascii=False) if second else "",
+                ]
+            )
+        content = stream.getvalue()
+    encoded, digest = _write_text_export(output, content, overwrite)
+    return {
+        "exported": True,
+        "first": result["first"],
+        "second": result["second"],
+        "output": str(output),
+        "format": output_format,
+        "counts": result["counts"],
+        "same": result["same"],
+        "truncated": result["truncated"],
+        "size": len(encoded),
+        "sha256": digest,
+    }
+
+
+@mcp.tool()
 def capture_export_all_calls(
     file_path: str,
     output_path: str,
