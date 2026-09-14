@@ -7,6 +7,7 @@ import csv
 import difflib
 import hashlib
 import io
+import ipaddress
 import json
 import math
 import mmap
@@ -49,6 +50,36 @@ from .capture_values import (
     _xml_entry_nodes,
 )
 from .runtime import CAPTURE_SUFFIXES, PROCESS_INFO, mcp
+
+_IOC_PATTERNS = (
+    ("url", re.compile(r"\b(?:https?|ftp)://[^\s<>\"']+", re.IGNORECASE)),
+    ("email", re.compile(r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", re.IGNORECASE)),
+    (
+        "registry_key",
+        re.compile(r"\b(?:HKLM|HKCU|HKCR|HKU|HKCC)\\[^\r\n\"']+", re.IGNORECASE),
+    ),
+    (
+        "windows_path",
+        re.compile(r"(?:(?:[A-Z]:[\\/])|(?:\\\\))[^\s<>\"']+", re.IGNORECASE),
+    ),
+    (
+        "ipv4",
+        re.compile(
+            r"(?<![\w.])(?:\d{1,3}\.){3}\d{1,3}(?![\w.])"
+        ),
+    ),
+    (
+        "hash",
+        re.compile(r"(?<![0-9A-Fa-f])(?:[0-9A-Fa-f]{32}|[0-9A-Fa-f]{40}|[0-9A-Fa-f]{64})(?![0-9A-Fa-f])"),
+    ),
+    (
+        "domain",
+        re.compile(
+            r"(?<![@\w.-])(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}(?![\w.-])",
+            re.IGNORECASE,
+        ),
+    ),
+)
 
 
 def _write_text_export(
@@ -101,6 +132,22 @@ def _byte_contexts(
             raise FileNotFoundError(f"ZIP entry not found: {entry_name}") from exc
         with archive.open(info) as member:
             return [read_context(member, offset) for offset in offsets]
+
+
+def _indicator_candidates(text: str) -> list[tuple[str, str]]:
+    candidates: list[tuple[str, str]] = []
+    for kind, pattern in _IOC_PATTERNS:
+        for match in pattern.finditer(text):
+            value = match.group(0).rstrip(".,;:)]}>")
+            if not value:
+                continue
+            if kind == "ipv4":
+                try:
+                    ipaddress.ip_address(value)
+                except ValueError:
+                    continue
+            candidates.append((kind, value))
+    return candidates
 
 
 def _capture_records_without_data(
@@ -1725,6 +1772,159 @@ def capture_strings(
         "strings": strings,
         "count": len(strings),
         "limit": limit,
+    }
+
+
+@mcp.tool()
+def capture_indicators(
+    file_path: str,
+    limit: int = 200,
+    minimum_length: int = 4,
+    max_entry_bytes: int = 8 * 1024 * 1024,
+    max_total_bytes: int = 64 * 1024 * 1024,
+) -> dict[str, Any]:
+    """Extract bounded blue-team/CTF indicators from printable capture strings."""
+    limit = _limit(limit, "limit", 10_000)
+    minimum_length = _limit(minimum_length, "minimum_length", 256)
+    max_entry_bytes = _limit(max_entry_bytes, "max_entry_bytes", 64 * 1024 * 1024)
+    max_total_bytes = _limit(max_total_bytes, "max_total_bytes", 512 * 1024 * 1024)
+    path = _capture_path(file_path)
+    scan_limit = min(100_000, max(10_000, limit * 50))
+    indicators: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    category_counts: dict[str, int] = {}
+    category_truncated: set[str] = set()
+    scanned_bytes = 0
+    scanned_entries = 0
+    scanned_strings = 0
+    truncated = False
+
+    def collect(data: bytes, entry_name: str | None) -> None:
+        nonlocal scanned_strings, truncated
+        strings = _scan_strings(data, "", scan_limit, minimum_length)
+        scanned_strings += len(strings)
+        if len(strings) >= scan_limit:
+            truncated = True
+        for item in strings:
+            for kind, value in _indicator_candidates(item["text"]):
+                key = (kind, value.casefold())
+                if key in seen:
+                    continue
+                if category_counts.get(kind, 0) >= limit:
+                    category_truncated.add(kind)
+                    continue
+                seen.add(key)
+                category_counts[kind] = category_counts.get(kind, 0) + 1
+                source_text = item["text"]
+                indicators.append(
+                    {
+                        "type": kind,
+                        "value": value,
+                        "entry": entry_name,
+                        "offset": item["offset"],
+                        "encoding": item["encoding"],
+                        "source_text": source_text[:512],
+                        "source_truncated": len(source_text) > 512,
+                    }
+                )
+
+    archive, prefix, _ = _open_capture_zip(path)
+    with archive:
+        prefix_data = prefix[:max_total_bytes]
+        scanned_bytes = len(prefix_data)
+        truncated = len(prefix_data) < len(prefix)
+        collect(prefix_data, None)
+        for info in archive.infolist():
+            if info.is_dir():
+                continue
+            remaining = max_total_bytes - scanned_bytes
+            if remaining <= 0:
+                truncated = True
+                break
+            read_limit = min(max_entry_bytes, remaining)
+            with archive.open(info) as member:
+                data = member.read(read_limit + 1)
+            if len(data) > read_limit:
+                truncated = True
+            data = data[:read_limit]
+            scanned_bytes += len(data)
+            scanned_entries += 1
+            collect(data, info.filename)
+
+    indicators.sort(key=lambda item: (item["type"], item["value"].casefold()))
+    return {
+        "file": str(path),
+        "indicators": indicators,
+        "count": len(indicators),
+        "categories": dict(sorted(category_counts.items())),
+        "category_limit": limit,
+        "category_truncated": sorted(category_truncated),
+        "scanned_entries": scanned_entries,
+        "scanned_bytes": scanned_bytes,
+        "scanned_strings": scanned_strings,
+        "truncated": truncated or bool(category_truncated),
+    }
+
+
+@mcp.tool()
+def capture_export_indicators(
+    file_path: str,
+    output_path: str,
+    limit: int = 200,
+    minimum_length: int = 4,
+    max_entry_bytes: int = 8 * 1024 * 1024,
+    max_total_bytes: int = 64 * 1024 * 1024,
+    output_format: str = "json",
+    overwrite: bool = False,
+) -> dict[str, Any]:
+    """Export capture indicators as JSON or CSV."""
+    if output_format not in {"json", "csv"}:
+        raise ValueError("output_format must be json or csv")
+    output = Path(output_path).expanduser()
+    if not output.parent.is_dir():
+        raise NotADirectoryError(f"Output directory not found: {output.parent}")
+    output = output.resolve()
+    if output.exists() and not overwrite:
+        raise FileExistsError(f"Output already exists: {output}")
+    result = capture_indicators(
+        file_path,
+        limit=limit,
+        minimum_length=minimum_length,
+        max_entry_bytes=max_entry_bytes,
+        max_total_bytes=max_total_bytes,
+    )
+    if output_format == "json":
+        content = json.dumps(result, indent=2, ensure_ascii=False) + "\n"
+    else:
+        stream = io.StringIO(newline="")
+        writer = csv.writer(stream)
+        writer.writerow(
+            ["type", "value", "entry", "offset", "encoding", "source_text", "source_truncated"]
+        )
+        for item in result["indicators"]:
+            writer.writerow(
+                [
+                    item.get("type", ""),
+                    item.get("value", ""),
+                    item.get("entry", ""),
+                    item.get("offset", ""),
+                    item.get("encoding", ""),
+                    item.get("source_text", ""),
+                    item.get("source_truncated", ""),
+                ]
+            )
+        content = stream.getvalue()
+    encoded, digest = _write_text_export(output, content, overwrite)
+    return {
+        "exported": True,
+        "file": result["file"],
+        "output": str(output),
+        "format": output_format,
+        "count": result["count"],
+        "categories": result["categories"],
+        "truncated": result["truncated"],
+        "size": len(encoded),
+        "sha256": digest,
     }
 
 

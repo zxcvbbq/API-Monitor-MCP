@@ -63,6 +63,7 @@ from .capture_tools import (
     capture_export_filter_calls,
     capture_export_filters,
     capture_export_find_bytes,
+    capture_export_indicators,
     capture_export_modules,
     capture_export_monitoring_events,
     capture_export_monitoring_log,
@@ -87,6 +88,7 @@ from .capture_tools import (
     capture_filter_calls,
     capture_find_bytes,
     capture_find_call_sequence,
+    capture_indicators,
     capture_info,
     capture_list_apis,
     capture_list_definitions,
@@ -367,6 +369,23 @@ def _self_test() -> None:
         )
         assert regex_strings_export["query_regex"]
         assert json.loads(regex_strings_json_path.read_text())["query_regex"]
+        indicators = capture_indicators(str(path), limit=10)
+        indicator_values = {(item["type"], item["value"]) for item in indicators["indicators"]}
+        assert ("url", "https://example.test") in indicator_values
+        assert ("domain", "example.test") in indicator_values
+        indicators_json_path = Path(directory) / "indicators.json"
+        indicators_export = capture_export_indicators(
+            str(path), str(indicators_json_path), limit=10
+        )
+        assert indicators_export["categories"]["url"] == 1
+        assert json.loads(indicators_json_path.read_text())["count"] == indicators["count"]
+        indicators_csv_path = Path(directory) / "indicators.csv"
+        indicators_csv_export = capture_export_indicators(
+            str(path), str(indicators_csv_path), limit=10, output_format="csv"
+        )
+        assert indicators_csv_export["format"] == "csv"
+        assert indicators_csv_path.read_text().startswith("type,value,entry")
+        assert "https://example.test" in indicators_csv_path.read_text()
         log = capture_monitoring_log(str(path), "module", 10)
         assert log["lines"] == ["sample.exe: Monitoring Module 0x1234 -> C:\\sample.dll"]
         assert log["events"][0]["type"] == "module"
