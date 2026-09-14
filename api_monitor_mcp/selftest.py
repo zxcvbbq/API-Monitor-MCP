@@ -1725,6 +1725,7 @@ def _self_test() -> None:
         finally:
             gui_tools.api_monitor_traffic = original_traffic
         assert live_json_export["rows"] == 1
+        assert len(live_json_export["sha256"]) == 64
         assert json.loads(live_json.read_text())["panes"][0]["records"][0]["API"] == "CreateFileW"
         assert live_csv_export["format"] == "csv"
         assert "pane_title,list_handle,row_index" in live_csv.read_text().splitlines()[0]

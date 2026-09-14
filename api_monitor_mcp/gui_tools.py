@@ -21,7 +21,7 @@ from .capture_format import (
     _file_time,
     _limit,
 )
-from .capture_tools import capture_info, capture_validate
+from .capture_tools import _write_text_export, capture_info, capture_validate
 from .gui_runtime import (
     _api_monitor_main_window,
     _api_monitor_window_by_handle,
@@ -1445,8 +1445,8 @@ def api_monitor_export_traffic(
     path = Path(output_path).expanduser()
     if not path.parent.is_dir():
         raise FileNotFoundError(f"Output directory not found: {path.parent}")
-    existed = path.exists()
-    if existed and not overwrite:
+    path = path.resolve()
+    if path.exists() and not overwrite:
         raise FileExistsError(f"Output already exists: {path}")
 
     traffic = api_monitor_traffic(window_title, limit, window_handle)
@@ -1462,7 +1462,7 @@ def api_monitor_export_traffic(
         for row_index, record in enumerate(pane.get("records", []))
     ]
     if output_format == "json":
-        payload = (json.dumps(traffic, indent=2, ensure_ascii=False) + "\n").encode("utf-8")
+        content = json.dumps(traffic, indent=2, ensure_ascii=False) + "\n"
     else:
         base_fields = ["pane_title", "list_handle", "row_index"]
         fields = set().union(*(record.keys() for record in records)) if records else set()
@@ -1479,17 +1479,8 @@ def api_monitor_export_traffic(
                     for key, value in record.items()
                 }
             )
-        payload = stream.getvalue().encode("utf-8")
-    try:
-        if overwrite:
-            path.write_bytes(payload)
-        else:
-            with path.open("xb") as stream:
-                stream.write(payload)
-    except Exception:
-        if not existed and path.is_file():
-            path.unlink()
-        raise
+        content = stream.getvalue()
+    payload, digest = _write_text_export(path, content, overwrite)
     return {
         "exported": True,
         "output": str(path),
@@ -1499,6 +1490,7 @@ def api_monitor_export_traffic(
         "rows": len(records),
         "truncated": any(pane.get("truncated", False) for pane in panes),
         "size": len(payload),
+        "sha256": digest,
     }
 
 
