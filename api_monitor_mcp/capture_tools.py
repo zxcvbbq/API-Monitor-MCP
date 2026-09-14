@@ -5912,6 +5912,93 @@ def capture_api_transitions(
 
 
 @mcp.tool()
+def capture_export_api_transitions(
+    file_path: str,
+    output_path: str,
+    process_index: int | None = None,
+    pid: int | None = None,
+    thread_id: int | None = None,
+    api_module: str | None = None,
+    limit: int = 1000,
+    max_records: int = 100_000,
+    output_format: str = "json",
+    overwrite: bool = False,
+) -> dict[str, Any]:
+    """Export adjacent resolved API transitions as JSON or CSV."""
+    if output_format not in {"json", "csv"}:
+        raise ValueError("output_format must be json or csv")
+    output = Path(output_path).expanduser()
+    if not output.parent.is_dir():
+        raise NotADirectoryError(f"Output directory not found: {output.parent}")
+    output = output.resolve()
+    if output.exists() and not overwrite:
+        raise FileExistsError(f"Output already exists: {output}")
+    result = capture_api_transitions(
+        file_path,
+        process_index=process_index,
+        pid=pid,
+        thread_id=thread_id,
+        api_module=api_module,
+        limit=limit,
+        max_records=max_records,
+    )
+    if output_format == "json":
+        content = json.dumps(result, indent=2, ensure_ascii=False) + "\n"
+    else:
+        stream = io.StringIO(newline="")
+        writer = csv.writer(stream)
+        writer.writerow(
+            [
+                "process_index",
+                "pid",
+                "thread_id",
+                "from_module",
+                "from_api",
+                "to_module",
+                "to_api",
+                "count",
+                "first_from_record",
+                "first_to_record",
+                "last_from_record",
+                "last_to_record",
+            ]
+        )
+        for transition in result["transitions"]:
+            source = transition.get("from", {})
+            target = transition.get("to", {})
+            first = transition.get("first_transition", {})
+            last = transition.get("last_transition", {})
+            writer.writerow(
+                [
+                    transition.get("process_index", ""),
+                    transition.get("pid", ""),
+                    transition.get("thread_id", ""),
+                    source.get("module", ""),
+                    source.get("name", ""),
+                    target.get("module", ""),
+                    target.get("name", ""),
+                    transition.get("count", ""),
+                    first.get("from_record", ""),
+                    first.get("to_record", ""),
+                    last.get("from_record", ""),
+                    last.get("to_record", ""),
+                ]
+            )
+        content = stream.getvalue()
+    encoded, digest = _write_text_export(output, content, overwrite)
+    return {
+        "exported": True,
+        "file": result["file"],
+        "output": str(output),
+        "format": output_format,
+        "count": result["count"],
+        "truncated": result["truncated"],
+        "size": len(encoded),
+        "sha256": digest,
+    }
+
+
+@mcp.tool()
 def capture_find_call_sequence(
     file_path: str,
     api_sequence: list[str],

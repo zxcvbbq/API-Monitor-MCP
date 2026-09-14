@@ -44,6 +44,7 @@ from .capture_tools import (
     capture_error_summary,
     capture_export_all_calls,
     capture_export_api_summary,
+    capture_export_api_transitions,
     capture_export_call_bytes,
     capture_export_call_graph,
     capture_export_call_stats,
@@ -523,6 +524,14 @@ def _self_test() -> None:
         }
         try:
             transitions = capture_api_transitions(str(path))
+            transitions_json = Path(directory) / "transitions.json"
+            transitions_export = capture_export_api_transitions(
+                str(path), str(transitions_json)
+            )
+            transitions_csv = Path(directory) / "transitions.csv"
+            transitions_csv_export = capture_export_api_transitions(
+                str(path), str(transitions_csv), output_format="csv"
+            )
             sequence = capture_find_call_sequence(
                 str(path), ["CreateFileW", "ReadFile"], max_gap=0
             )
@@ -538,6 +547,11 @@ def _self_test() -> None:
         assert transitions["count"] == 1
         assert transitions["transitions"][0]["from"]["name"] == "CreateFileW"
         assert transitions["transitions"][0]["to"]["name"] == "ReadFile"
+        assert transitions_export["count"] == transitions["count"]
+        assert json.loads(transitions_json.read_text())["count"] == 1
+        assert transitions_csv_export["format"] == "csv"
+        assert "from_api" in transitions_csv.read_text().splitlines()[0]
+        assert "CreateFileW" in transitions_csv.read_text()
         assert sequence["count"] == 1
         assert sequence["matches"][0]["start_record"] == 0
         assert graph["node_count"] == 2
