@@ -81,6 +81,138 @@ _IOC_PATTERNS = (
     ),
 )
 
+_BEHAVIOR_RULES = (
+    (
+        "process_injection",
+        "high",
+        (
+            "createremotethread",
+            "writeprocessmemory",
+            "virtualallocex",
+            "virtualprotectex",
+            "queueuserapc",
+            "setthreadcontext",
+            "ntmapviewofsection",
+            "ntunmapviewofsection",
+        ),
+    ),
+    (
+        "persistence",
+        "high",
+        (
+            "regsetvalue",
+            "regcreatekey",
+            "createservice",
+            "openservice",
+            "startservice",
+            "schtasks",
+            "tasksch",
+            "winlogon",
+            "appcertdlls",
+        ),
+    ),
+    (
+        "credential_access",
+        "high",
+        (
+            "cryptunprotectdata",
+            "credread",
+            "cred enumerat",
+            "lsaopen",
+            "samopen",
+            "minidump",
+            "logonuser",
+        ),
+    ),
+    (
+        "process_execution",
+        "high",
+        (
+            "createprocess",
+            "winexec",
+            "shellexecute",
+            "rundll32",
+            "loadlibrary",
+            "wscript",
+            "powershell",
+            "cmd.exe",
+            "ntcreateuserprocess",
+        ),
+    ),
+    (
+        "anti_debug",
+        "medium",
+        (
+            "isdebuggerpresent",
+            "checkremotedebuggerpresent",
+            "ntqueryinformationprocess",
+            "outputdebugstring",
+            "debugactiveprocess",
+            "queryperformancecounter",
+            "gettickcount",
+        ),
+    ),
+    (
+        "network",
+        "medium",
+        (
+            "internetopen",
+            "internetconnect",
+            "httpopenrequest",
+            "winhttp",
+            "wsastartup",
+            "connect",
+            "send",
+            "recv",
+            "dnsquery",
+            "urldownloadtofile",
+        ),
+    ),
+    (
+        "registry",
+        "medium",
+        (
+            "regopenkey",
+            "regqueryvalue",
+            "regsetvalue",
+            "regcreatekey",
+            "ntopenkey",
+            "ntqueryvaluekey",
+            "ntsetvaluekey",
+        ),
+    ),
+    (
+        "memory",
+        "medium",
+        (
+            "virtualalloc",
+            "virtualprotect",
+            "mapviewoffile",
+            "heapalloc",
+            "rtlallocateheap",
+        ),
+    ),
+    (
+        "file",
+        "low",
+        (
+            "createfile",
+            "writefile",
+            "deletefile",
+            "movefile",
+            "copyfile",
+            "deviceiocontrol",
+            "ntreadfile",
+            "ntwritefile",
+        ),
+    ),
+    (
+        "crypto",
+        "low",
+        ("crypt", "bcrypt", "ncrypt", "encrypt", "decrypt", "hash"),
+    ),
+)
+
 
 def _write_text_export(
     output: Path, content: str, overwrite: bool
@@ -4431,6 +4563,163 @@ def capture_export_api_summary(
         "format": output_format,
         "count": result["count"],
         "scanned_records": result["scanned_records"],
+        "truncated": result["truncated"],
+        "size": len(encoded),
+        "sha256": digest,
+    }
+
+
+@mcp.tool()
+def capture_behavior_summary(
+    file_path: str,
+    process_index: int | None = None,
+    pid: int | None = None,
+    limit: int = 1000,
+    max_records: int = 100_000,
+) -> dict[str, Any]:
+    """Summarize heuristic behavior signals from observed API names."""
+    limit = _limit(limit, "limit", 10_000)
+    max_records = _limit(max_records, "max_records", 1_000_000)
+    result = capture_list_apis(
+        file_path,
+        process_index=process_index,
+        limit=10_000,
+        max_records=max_records,
+        pid=pid,
+    )
+    findings: list[dict[str, Any]] = []
+    category_counts: dict[str, dict[str, Any]] = {}
+    for api in result["apis"]:
+        haystack = f"{api.get('module', '')}!{api.get('name', '')}".casefold()
+        for category, severity, patterns in _BEHAVIOR_RULES:
+            matched = next((pattern for pattern in patterns if pattern in haystack), None)
+            if matched is None:
+                continue
+            item = category_counts.setdefault(
+                category,
+                {"category": category, "severity": severity, "call_count": 0, "api_count": 0},
+            )
+            item["call_count"] += int(api.get("count", 0))
+            item["api_count"] += 1
+            findings.append(
+                {
+                    "category": category,
+                    "severity": severity,
+                    "matched_pattern": matched,
+                    "api": {
+                        "name": api.get("name"),
+                        "module": api.get("module"),
+                        "count": api.get("count", 0),
+                        "process_indices": api.get("process_indices", []),
+                        "pids": api.get("pids", []),
+                        "context": api.get("context", {}),
+                    },
+                }
+            )
+            if len(findings) >= limit:
+                break
+        if len(findings) >= limit:
+            break
+    severity_order = {"high": 0, "medium": 1, "low": 2}
+    findings.sort(
+        key=lambda item: (
+            severity_order[item["severity"]],
+            -item["api"]["count"],
+            item["category"],
+            item["api"].get("name") or "",
+        )
+    )
+    categories = sorted(
+        category_counts.values(),
+        key=lambda item: (severity_order[item["severity"]], -item["call_count"], item["category"]),
+    )
+    return {
+        "file": result["file"],
+        "process_index": process_index,
+        "pid": pid,
+        "heuristic": True,
+        "basis": "case-insensitive API name/module substring matching; verify arguments and payloads",
+        "categories": categories,
+        "findings": findings,
+        "count": len(findings),
+        "matched_api_count": len({
+            (item["api"].get("module"), item["api"].get("name")) for item in findings
+        }),
+        "scanned_api_count": result["count"],
+        "scanned_records": result["scanned_records"],
+        "truncated": result["truncated"] or len(findings) >= limit,
+    }
+
+
+@mcp.tool()
+def capture_export_behavior_summary(
+    file_path: str,
+    output_path: str,
+    process_index: int | None = None,
+    pid: int | None = None,
+    limit: int = 1000,
+    max_records: int = 100_000,
+    output_format: str = "json",
+    overwrite: bool = False,
+) -> dict[str, Any]:
+    """Export heuristic behavior signals as JSON or CSV."""
+    if output_format not in {"json", "csv"}:
+        raise ValueError("output_format must be json or csv")
+    output = Path(output_path).expanduser()
+    if not output.parent.is_dir():
+        raise NotADirectoryError(f"Output directory not found: {output.parent}")
+    output = output.resolve()
+    if output.exists() and not overwrite:
+        raise FileExistsError(f"Output already exists: {output}")
+    result = capture_behavior_summary(
+        file_path,
+        process_index=process_index,
+        pid=pid,
+        limit=limit,
+        max_records=max_records,
+    )
+    if output_format == "json":
+        content = json.dumps(result, indent=2, ensure_ascii=False) + "\n"
+    else:
+        stream = io.StringIO(newline="")
+        writer = csv.writer(stream)
+        writer.writerow(
+            [
+                "category",
+                "severity",
+                "matched_pattern",
+                "api_name",
+                "api_module",
+                "count",
+                "process_indices",
+                "pids",
+                "context",
+            ]
+        )
+        for finding in result["findings"]:
+            api = finding["api"]
+            writer.writerow(
+                [
+                    finding["category"],
+                    finding["severity"],
+                    finding["matched_pattern"],
+                    api.get("name", ""),
+                    api.get("module", ""),
+                    api.get("count", ""),
+                    json.dumps(api.get("process_indices", []), ensure_ascii=False),
+                    json.dumps(api.get("pids", []), ensure_ascii=False),
+                    json.dumps(api.get("context", {}), ensure_ascii=False),
+                ]
+            )
+        content = stream.getvalue()
+    encoded, digest = _write_text_export(output, content, overwrite)
+    return {
+        "exported": True,
+        "file": result["file"],
+        "output": str(output),
+        "format": output_format,
+        "count": result["count"],
+        "categories": result["categories"],
         "truncated": result["truncated"],
         "size": len(encoded),
         "sha256": digest,

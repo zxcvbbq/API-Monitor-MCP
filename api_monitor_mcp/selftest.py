@@ -27,6 +27,7 @@ from .capture_format import (
 )
 from .capture_tools import (
     capture_api_transitions,
+    capture_behavior_summary,
     capture_call_graph,
     capture_call_records,
     capture_call_stats,
@@ -45,6 +46,7 @@ from .capture_tools import (
     capture_export_all_calls,
     capture_export_api_summary,
     capture_export_api_transitions,
+    capture_export_behavior_summary,
     capture_export_call_bytes,
     capture_export_call_graph,
     capture_export_call_sequence,
@@ -1210,6 +1212,23 @@ def _self_test() -> None:
         assert api_csv_export["format"] == "csv"
         assert "process_indices" in api_csv_path.read_text().splitlines()[0]
         assert "CreateFileW" in api_csv_path.read_text()
+        behavior = capture_behavior_summary(str(path))
+        assert behavior["heuristic"]
+        assert behavior["categories"][0]["category"] == "file"
+        assert behavior["findings"][0]["api"]["name"] == "CreateFileW"
+        behavior_json_path = Path(directory) / "behavior.json"
+        behavior_export = capture_export_behavior_summary(
+            str(path), str(behavior_json_path)
+        )
+        assert behavior_export["count"] == behavior["count"]
+        assert json.loads(behavior_json_path.read_text())["heuristic"]
+        behavior_csv_path = Path(directory) / "behavior.csv"
+        behavior_csv_export = capture_export_behavior_summary(
+            str(path), str(behavior_csv_path), output_format="csv"
+        )
+        assert behavior_csv_export["format"] == "csv"
+        assert behavior_csv_path.read_text().startswith("category,severity")
+        assert "CreateFileW" in behavior_csv_path.read_text()
         error_summary = capture_error_summary(str(path))
         assert error_summary["error_count"] == 1
         assert error_summary["errors"][0]["hex"] == "0x00000005"
