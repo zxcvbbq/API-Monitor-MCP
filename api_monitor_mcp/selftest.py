@@ -263,6 +263,10 @@ def _self_test() -> None:
         log = capture_monitoring_log(str(path), "module", 10)
         assert log["lines"] == ["sample.exe: Monitoring Module 0x1234 -> C:\\sample.dll"]
         assert log["events"][0]["type"] == "module"
+        regex_log = capture_monitoring_log(
+            str(path), r"sample\.exe:.*Module", 10, query_regex=True
+        )
+        assert regex_log["count"] == 1 and regex_log["query_regex"]
         summary_log = capture_monitoring_log(str(path), "summary", 10)
         assert summary_log["events"][0]["calls"] == 1
         assert summary_log["events"][0]["process"] == "sample.exe"
@@ -270,6 +274,10 @@ def _self_test() -> None:
         assert events["count"] == 1
         assert events["by_type"]["summary"] == 1
         assert events["processes"][0]["summaries"][0]["calls"] == 1
+        regex_events = capture_monitoring_events(
+            str(path), process_query=r"sample\.exe", process_query_regex=True
+        )
+        assert regex_events["count"] == 2 and regex_events["process_query_regex"]
         full_log_entry = capture_read_entry(str(path), "log/monitoring.txt", max_bytes=1024)
         log_slice = capture_read_entry(str(path), "log/monitoring.txt", max_bytes=4, offset=7)
         assert log_slice["text"] == full_log_entry["text"][7:11]
@@ -278,6 +286,14 @@ def _self_test() -> None:
         log_export = capture_export_monitoring_log(str(path), str(log_json), query="module")
         assert log_export["count"] == 1
         assert json.loads(log_json.read_text())["events"][0]["module"] == r"C:\sample.dll"
+        regex_log_json = Path(directory) / "monitoring-regex.json"
+        regex_export = capture_export_monitoring_log(
+            str(path),
+            str(regex_log_json),
+            query=r"sample\.exe:.*Module",
+            query_regex=True,
+        )
+        assert regex_export["count"] == 1
         log_csv = Path(directory) / "monitoring.csv"
         log_csv_export = capture_export_monitoring_log(
             str(path), str(log_csv), query="module", output_format="csv"

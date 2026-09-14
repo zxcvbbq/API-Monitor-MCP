@@ -5107,24 +5107,35 @@ def capture_monitoring_log(
     file_path: str,
     query: str = "",
     limit: int = 1000,
+    query_regex: bool = False,
 ) -> dict[str, Any]:
     """Read and search the monitoring log stored in an APMX capture."""
+    if len(query) > 4096:
+        raise ValueError("query must not exceed 4096 characters")
     limit = _limit(limit, "limit", 10_000)
     result = capture_read_entry(file_path, "log/monitoring.txt", 16 * 1024 * 1024)
     text = result.get("text")
     if text is None:
         raise ValueError("Capture monitoring log is not text")
     text = text.lstrip("\ufeff")
+    expression = None
+    if query_regex and query:
+        try:
+            expression = re.compile(query, re.IGNORECASE)
+        except re.error as exc:
+            raise ValueError(f"query is not a valid regex: {exc}") from exc
     needle = query.casefold()
     lines = [
         line.rstrip("\r")
         for line in text.splitlines()
-        if not needle or needle in line.casefold()
+        if not needle
+        or (expression.search(line) is not None if expression else needle in line.casefold())
     ]
     returned = lines[:limit]
     return {
         "file": str(_capture_path(file_path)),
         "query": query,
+        "query_regex": query_regex,
         "lines": returned,
         "events": [
             {"line": line, **_monitoring_event(line)}
@@ -5141,12 +5152,19 @@ def capture_monitoring_events(
     event_type: str = "all",
     process_query: str = "",
     limit: int = 1000,
+    process_query_regex: bool = False,
 ) -> dict[str, Any]:
     """Return structured module, child-process, and summary events from a capture log."""
     if event_type not in {"all", "module", "child_process", "summary", "unknown"}:
         raise ValueError("event_type must be all, module, child_process, summary, or unknown")
     if len(process_query) > 4096:
         raise ValueError("process_query must not exceed 4096 characters")
+    process_expression = None
+    if process_query_regex and process_query:
+        try:
+            process_expression = re.compile(process_query, re.IGNORECASE)
+        except re.error as exc:
+            raise ValueError(f"process_query is not a valid regex: {exc}") from exc
     limit = _limit(limit, "limit", 10_000)
     source = capture_monitoring_log(file_path, limit=10_000)
     wanted_process = process_query.casefold()
@@ -5156,7 +5174,11 @@ def capture_monitoring_events(
         if (event_type == "all" or event.get("type") == event_type)
         and (
             not wanted_process
-            or wanted_process in str(event.get("process", "")).casefold()
+            or (
+                process_expression.search(str(event.get("process", ""))) is not None
+                if process_expression
+                else wanted_process in str(event.get("process", "")).casefold()
+            )
         )
     ]
     by_type: dict[str, int] = {}
@@ -5185,6 +5207,7 @@ def capture_monitoring_events(
         "file": source["file"],
         "event_type": event_type,
         "process_query": process_query,
+        "process_query_regex": process_query_regex,
         "events": events[:limit],
         "count": len(events),
         "by_type": by_type,
@@ -5201,6 +5224,7 @@ def capture_export_monitoring_log(
     limit: int = 10_000,
     output_format: str = "json",
     overwrite: bool = False,
+    query_regex: bool = False,
 ) -> dict[str, Any]:
     """Export parsed monitoring-log events as bounded JSON or CSV."""
     if output_format not in {"json", "csv"}:
@@ -5213,7 +5237,9 @@ def capture_export_monitoring_log(
     if output.exists() and not overwrite:
         raise FileExistsError(f"Output already exists: {output}")
 
-    result = capture_monitoring_log(file_path, query=query, limit=limit)
+    result = capture_monitoring_log(
+        file_path, query=query, limit=limit, query_regex=query_regex
+    )
     if output_format == "json":
         content = json.dumps(result, indent=2, ensure_ascii=False) + "\n"
     else:
@@ -5253,6 +5279,7 @@ def capture_export_monitoring_log(
         "output": str(output),
         "format": output_format,
         "query": query,
+        "query_regex": query_regex,
         "count": len(result["events"]),
         "matched_count": result["count"],
         "truncated": result["truncated"],
