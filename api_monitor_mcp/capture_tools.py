@@ -1621,12 +1621,28 @@ def capture_strings(
     query: str = "",
     limit: int = 100,
     minimum_length: int = 4,
+    query_regex: bool = False,
 ) -> dict[str, Any]:
     """Extract/search printable ANSI and UTF-16LE strings from an APMX capture."""
+    if len(query) > 4096:
+        raise ValueError("query must not exceed 4096 characters")
     limit = _limit(limit, "limit", 2000)
     minimum_length = _limit(minimum_length, "minimum_length", 256)
-    strings = _capture_strings(_capture_path(file_path), query, limit, minimum_length)
-    return {"query": query, "strings": strings, "count": len(strings), "limit": limit}
+    if query_regex and query:
+        try:
+            re.compile(query, re.IGNORECASE)
+        except re.error as exc:
+            raise ValueError(f"query is not a valid regex: {exc}") from exc
+    strings = _capture_strings(
+        _capture_path(file_path), query, limit, minimum_length, query_regex
+    )
+    return {
+        "query": query,
+        "query_regex": query_regex,
+        "strings": strings,
+        "count": len(strings),
+        "limit": limit,
+    }
 
 
 @mcp.tool()
@@ -1638,6 +1654,7 @@ def capture_export_strings(
     minimum_length: int = 4,
     output_format: str = "json",
     overwrite: bool = False,
+    query_regex: bool = False,
 ) -> dict[str, Any]:
     """Export printable capture strings as JSON or CSV."""
     if output_format not in {"json", "csv"}:
@@ -1653,6 +1670,7 @@ def capture_export_strings(
         query=query,
         limit=limit,
         minimum_length=minimum_length,
+        query_regex=query_regex,
     )
     if output_format == "json":
         content = json.dumps(
@@ -1676,6 +1694,7 @@ def capture_export_strings(
         "output": str(output),
         "format": output_format,
         "query": query,
+        "query_regex": query_regex,
         "count": result["count"],
         "limit": result["limit"],
         "size": len(encoded),

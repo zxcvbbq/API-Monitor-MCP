@@ -1028,16 +1028,25 @@ def _capture_call_stats(
     return stats
 
 
-def _scan_strings(data: bytes | mmap.mmap, query: str, limit: int, minimum: int) -> list[dict[str, Any]]:
+def _scan_strings(
+    data: bytes | mmap.mmap,
+    query: str,
+    limit: int,
+    minimum: int,
+    query_regex: bool = False,
+) -> list[dict[str, Any]]:
     ascii_pattern = re.compile(rb"[\x20-\x7e]{" + str(minimum).encode() + rb",}")
     utf16_pattern = re.compile(rb"(?:[\x20-\x7e]\x00){" + str(minimum).encode() + rb",}")
     needle = query.casefold()
+    expression = re.compile(query, re.IGNORECASE) if query_regex and query else None
     matches: list[dict[str, Any]] = []
 
     for pattern, encoding in ((ascii_pattern, "ascii"), (utf16_pattern, "utf-16-le")):
         for match in pattern.finditer(data):
             text = match.group().decode(encoding, errors="replace").rstrip("\x00")
-            if needle and needle not in text.casefold():
+            if expression is not None and expression.search(text) is None:
+                continue
+            if expression is None and needle and needle not in text.casefold():
                 continue
             matches.append({"offset": match.start(), "encoding": encoding, "text": text})
 
@@ -1073,9 +1082,11 @@ def _monitoring_event(line: str) -> dict[str, Any]:
     return {"type": "unknown"}
 
 
-def _capture_strings(path: Path, query: str, limit: int, minimum: int) -> list[dict[str, Any]]:
+def _capture_strings(
+    path: Path, query: str, limit: int, minimum: int, query_regex: bool = False
+) -> list[dict[str, Any]]:
     with path.open("rb") as handle:
         if path.stat().st_size == 0:
             return []
         with mmap.mmap(handle.fileno(), 0, access=mmap.ACCESS_READ) as data:
-            return _scan_strings(data, query, limit, minimum)
+            return _scan_strings(data, query, limit, minimum, query_regex)

@@ -324,6 +324,11 @@ def _self_test() -> None:
         strings = _capture_strings(path, "CreateFile", 10, 4)
         assert strings and "CreateFileW" in strings[0]["text"]
         capture_string_result = capture_strings(str(path), query="CreateFile", limit=10)
+        regex_string_result = capture_strings(
+            str(path), query=r"CreateFile(W|A)", limit=10, query_regex=True
+        )
+        assert regex_string_result["query_regex"]
+        assert any("CreateFileW" in item["text"] for item in regex_string_result["strings"])
         strings_json_path = Path(directory) / "strings.json"
         strings_export = capture_export_strings(
             str(path), str(strings_json_path), query="CreateFile", limit=10
@@ -337,6 +342,15 @@ def _self_test() -> None:
         assert strings_csv_export["format"] == "csv"
         assert strings_csv_path.read_text().startswith("offset,encoding,text")
         assert "CreateFileW" in strings_csv_path.read_text()
+        regex_strings_json_path = Path(directory) / "strings-regex.json"
+        regex_strings_export = capture_export_strings(
+            str(path),
+            str(regex_strings_json_path),
+            query=r"CreateFile(W|A)",
+            query_regex=True,
+        )
+        assert regex_strings_export["query_regex"]
+        assert json.loads(regex_strings_json_path.read_text())["query_regex"]
         log = capture_monitoring_log(str(path), "module", 10)
         assert log["lines"] == ["sample.exe: Monitoring Module 0x1234 -> C:\\sample.dll"]
         assert log["events"][0]["type"] == "module"
