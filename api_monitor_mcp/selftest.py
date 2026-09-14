@@ -76,6 +76,7 @@ from .capture_tools import (
     capture_search_entries,
     capture_slowest_calls,
     capture_validate,
+    capture_wait_for_calls,
     capture_xml_entry,
 )
 from .capture_values import (
@@ -730,6 +731,10 @@ def _self_test() -> None:
         assert call_context_stats["thread_count"] == 1
         assert call_context_stats["duration_seconds"]["average"] == 0.125
         assert call_context_stats["first_timestamp_utc"] == "2020-01-01T00:00:00+00:00"
+        waited_capture = capture_wait_for_calls(
+            str(path), minimum_calls=1, timeout_seconds=1, poll_interval_seconds=0.01
+        )
+        assert waited_capture["ready"] and waited_capture["calls"] == 1
         api_list = capture_list_apis(str(path))
         assert api_list["count"] == 1
         assert api_list["apis"][0]["name"] == "CreateFileW"

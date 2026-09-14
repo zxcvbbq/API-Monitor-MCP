@@ -12,6 +12,7 @@ import math
 import mmap
 import re
 import struct
+import time
 import zipfile
 from pathlib import Path
 from typing import Any
@@ -2484,6 +2485,81 @@ def capture_call_stats(
         "processes": processes,
         "totals": totals,
         "count": len(processes),
+    }
+
+
+@mcp.tool()
+def capture_wait_for_calls(
+    file_path: str,
+    minimum_calls: int = 1,
+    process_index: int | None = None,
+    timeout_seconds: float = 30.0,
+    poll_interval_seconds: float = 0.5,
+    max_records: int = 1_000_000,
+) -> dict[str, Any]:
+    """Wait for a saved capture to become readable and reach a call count."""
+    if minimum_calls < 0:
+        raise ValueError("minimum_calls must be non-negative")
+    if process_index is not None and process_index < 0:
+        raise ValueError("process_index must be non-negative")
+    if not math.isfinite(timeout_seconds) or not 0 < timeout_seconds <= 300:
+        raise ValueError("timeout_seconds must be finite and between 0 and 300")
+    if not math.isfinite(poll_interval_seconds) or not 0.01 <= poll_interval_seconds <= 5:
+        raise ValueError("poll_interval_seconds must be finite and between 0.01 and 5")
+    max_records = _limit(max_records, "max_records", 1_000_000)
+    candidate = Path(file_path).expanduser()
+    if candidate.suffix.lower() not in CAPTURE_SUFFIXES:
+        raise ValueError("file_path must end in .apmx64 or .apmx86")
+    path = candidate.resolve()
+    started = time.monotonic()
+    deadline = started + timeout_seconds
+    attempts = 0
+    last_stats: dict[str, Any] | None = None
+    last_error: str | None = None
+    while True:
+        attempts += 1
+        if path.is_file():
+            try:
+                stats = capture_call_stats(
+                    str(path), process_index=process_index, max_records=max_records
+                )
+                last_stats = stats
+                last_error = None
+                calls = sum(item["count"] for item in stats["processes"])
+                if calls >= minimum_calls:
+                    return {
+                        "ready": True,
+                        "file": str(path),
+                        "minimum_calls": minimum_calls,
+                        "calls": calls,
+                        "process_index": process_index,
+                        "attempts": attempts,
+                        "elapsed_seconds": round(time.monotonic() - started, 3),
+                        "stats": stats,
+                    }
+            except (KeyError, OSError, ValueError, zipfile.BadZipFile) as exc:
+                last_error = str(exc)
+        else:
+            last_error = f"Capture file not found: {path}"
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        time.sleep(min(poll_interval_seconds, remaining))
+    calls = (
+        sum(item["count"] for item in last_stats["processes"])
+        if last_stats is not None
+        else 0
+    )
+    return {
+        "ready": False,
+        "file": str(path),
+        "minimum_calls": minimum_calls,
+        "calls": calls,
+        "process_index": process_index,
+        "attempts": attempts,
+        "elapsed_seconds": round(time.monotonic() - started, 3),
+        "stats": last_stats,
+        "error": last_error,
     }
 
 
