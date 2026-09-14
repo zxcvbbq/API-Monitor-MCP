@@ -54,6 +54,7 @@ from .capture_tools import (
     capture_export_decoded_calls,
     capture_export_definitions,
     capture_export_error_summary,
+    capture_export_filter_calls,
     capture_export_modules,
     capture_export_monitoring_events,
     capture_export_monitoring_log,
@@ -522,6 +523,33 @@ def _self_test() -> None:
         assert filtered["count"] == 1
         assert filtered["matches"][0]["record"]["index"] == 0
         assert filtered["matches"][0]["pid"] == 1234
+        filter_json_path = Path(directory) / "filtered.json"
+        filter_export = capture_export_filter_calls(
+            str(path),
+            str(filter_json_path),
+            thread_id=0x1234,
+            error_code=5,
+            min_duration_seconds=0.1,
+            max_duration_seconds=0.2,
+            start_time_utc="2020-01-01T00:00:00Z",
+            end_time_utc="2020-01-01T00:00:01+00:00",
+            include_data=True,
+            resolve_definitions=True,
+        )
+        assert filter_export["count"] == 1
+        assert json.loads(filter_json_path.read_text())["matches"][0]["record"]["index"] == 0
+        filter_csv_path = Path(directory) / "filtered.csv"
+        filter_csv_export = capture_export_filter_calls(
+            str(path),
+            str(filter_csv_path),
+            thread_id=0x1234,
+            error_code=5,
+            resolve_definitions=True,
+            output_format="csv",
+        )
+        assert filter_csv_export["format"] == "csv"
+        assert filter_csv_path.read_text().startswith("process_index,pid,record_index")
+        assert "CreateFileW" in filter_csv_path.read_text()
         slowest = capture_slowest_calls(str(path))
         assert slowest["count"] == 1
         assert slowest["calls"][0]["record"]["context"]["duration_seconds"] == 0.125
