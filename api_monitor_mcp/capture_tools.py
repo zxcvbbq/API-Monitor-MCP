@@ -4433,6 +4433,144 @@ def capture_find_call_sequence(
 
 
 @mcp.tool()
+def capture_call_graph(
+    file_path: str,
+    process_index: int | None = None,
+    pid: int | None = None,
+    thread_id: int | None = None,
+    api_module: str | None = None,
+    limit: int = 1000,
+    max_records: int = 100_000,
+) -> dict[str, Any]:
+    """Build a bounded API call graph with per-API counts and transitions."""
+    if process_index is not None and process_index < 0:
+        raise ValueError("process_index must be non-negative")
+    if pid is not None and not 1 <= pid <= 0xFFFFFFFF:
+        raise ValueError("pid must be between 1 and 4294967295")
+    if thread_id is not None and not 0 <= thread_id <= 0xFFFFFFFF:
+        raise ValueError("thread_id must be between 0 and 4294967295")
+    if api_module is not None and not api_module.strip():
+        raise ValueError("api_module must be non-empty when provided")
+    limit = _limit(limit, "limit", 10_000)
+    max_records = _limit(max_records, "max_records", 1_000_000)
+    timeline = capture_call_timeline(
+        file_path,
+        process_index=process_index,
+        order_by="capture",
+        limit=10_000,
+        max_records=max_records,
+        resolve_definitions=True,
+        api_module=api_module,
+        pid=pid,
+        thread_id=thread_id,
+    )
+    nodes: dict[tuple[Any, ...], dict[str, Any]] = {}
+    edges: dict[tuple[Any, ...], dict[str, Any]] = {}
+    previous: dict[tuple[int, int], tuple[tuple[Any, ...], dict[str, Any]]] = {}
+
+    def api_key(event: dict[str, Any]) -> tuple[Any, ...] | None:
+        definition = event.get("record", {}).get("definition", {})
+        if not definition.get("valid") or not definition.get("name"):
+            return None
+        return (
+            int(event.get("process_index", 0)),
+            definition.get("offset"),
+            str(definition.get("name") or ""),
+            str(definition.get("module") or ""),
+            definition.get("ordinal"),
+        )
+
+    def api_summary(key: tuple[Any, ...]) -> dict[str, Any]:
+        return {
+            "offset": key[1],
+            "name": key[2],
+            "module": key[3],
+            "ordinal": key[4],
+        }
+
+    for event in timeline["timeline"]:
+        key = api_key(event)
+        if key is None:
+            continue
+        process = key[0]
+        record = event.get("record", {})
+        context = record.get("context", {})
+        stream = (process, int(context.get("thread_id", 0)))
+        node = nodes.setdefault(
+            key,
+            {
+                "id": f"{process}:{key[1]}" if key[1] is not None else f"{process}:{key[3]}!{key[2]}",
+                "process_index": process,
+                "api": api_summary(key),
+                "count": 0,
+                "thread_ids": set(),
+                "pids": set(),
+                "first_record": record.get("index"),
+                "last_record": record.get("index"),
+            },
+        )
+        node["count"] += 1
+        node["thread_ids"].add(stream[1])
+        if event.get("pid") is not None:
+            node["pids"].add(event["pid"])
+        node["first_record"] = min(node["first_record"], record.get("index"))
+        node["last_record"] = max(node["last_record"], record.get("index"))
+        prior = previous.get(stream)
+        if prior is not None:
+            prior_key, prior_record = prior
+            edge_key = (process, stream[1], prior_key, key)
+            edge = edges.setdefault(
+                edge_key,
+                {
+                    "process_index": process,
+                    "thread_id": stream[1],
+                    "from": api_summary(prior_key),
+                    "to": api_summary(key),
+                    "count": 0,
+                    "first_transition": {
+                        "from_record": prior_record.get("index"),
+                        "to_record": record.get("index"),
+                    },
+                    "last_transition": {
+                        "from_record": prior_record.get("index"),
+                        "to_record": record.get("index"),
+                    },
+                },
+            )
+            edge["count"] += 1
+            edge["last_transition"] = {
+                "from_record": prior_record.get("index"),
+                "to_record": record.get("index"),
+            }
+        previous[stream] = (key, record)
+
+    node_values = list(nodes.values())
+    for node in node_values:
+        node["thread_ids"] = sorted(node["thread_ids"])
+        node["pids"] = sorted(node["pids"])
+    edge_values = list(edges.values())
+    node_values.sort(key=lambda item: (-item["count"], item["process_index"], item["id"]))
+    edge_values.sort(
+        key=lambda item: (-item["count"], item["process_index"], item["thread_id"])
+    )
+    return {
+        "file": timeline["file"],
+        "process_index": process_index,
+        "pid": pid,
+        "thread_id": thread_id,
+        "api_module": api_module,
+        "nodes": node_values[:limit],
+        "edges": edge_values[:limit],
+        "node_count": len(node_values),
+        "edge_count": len(edge_values),
+        "count": len(edge_values[:limit]),
+        "scanned_records": timeline["scanned_records"],
+        "truncated": timeline["truncated"] or len(node_values) > limit or len(edge_values) > limit,
+        "definitions_resolved": timeline["definitions_resolved"],
+    }
+
+
+@mcp.tool()
 def capture_export_timeline(
     file_path: str,
     output_path: str,

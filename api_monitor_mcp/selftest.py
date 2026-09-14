@@ -27,6 +27,7 @@ from .capture_format import (
 )
 from .capture_tools import (
     capture_api_transitions,
+    capture_call_graph,
     capture_call_records,
     capture_call_stats,
     capture_call_timeline,
@@ -337,6 +338,7 @@ def _self_test() -> None:
             sequence = capture_find_call_sequence(
                 str(path), ["CreateFileW", "ReadFile"], max_gap=0
             )
+            graph = capture_call_graph(str(path))
         finally:
             capture_tools.capture_call_timeline = original_timeline
         assert transitions["count"] == 1
@@ -344,6 +346,8 @@ def _self_test() -> None:
         assert transitions["transitions"][0]["to"]["name"] == "ReadFile"
         assert sequence["count"] == 1
         assert sequence["matches"][0]["start_record"] == 0
+        assert graph["node_count"] == 2
+        assert graph["edge_count"] == 1
         lazy_call_records = capture_call_records(str(path), include_data=False)
         assert lazy_call_records["data_entry_bytes"] == len(record) + 9
         assert lazy_call_records["records"][0]["valid"]
