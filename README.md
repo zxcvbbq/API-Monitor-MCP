@@ -4,11 +4,18 @@ MCP bridge for the installed Rohitab API Monitor on Windows.
 
 ## Install
 
+### Codex
+
+```powershell
+codex plugin marketplace add zxcvbbq/API-Monitor-MCP
+codex plugin add api-monitor-mcp@api-monitor-mcp
+```
+
+### Claude Code
+
 ```powershell
 claude plugin marketplace add https://github.com/zxcvbbq/API-Monitor-MCP.git
 claude plugin install api-monitor-mcp@api-monitor-mcp
-codex plugin marketplace add zxcvbbq/API-Monitor-MCP
-codex plugin add api-monitor-mcp@api-monitor-mcp
 ```
 
 ## Features
