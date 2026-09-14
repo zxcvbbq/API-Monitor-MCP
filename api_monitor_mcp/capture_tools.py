@@ -14,6 +14,7 @@ import re
 import struct
 import time
 import zipfile
+from contextlib import ExitStack
 from pathlib import Path
 from typing import Any
 from xml.etree import ElementTree
@@ -3528,7 +3529,7 @@ def capture_search_calls(
     scanned = 0
     scan_truncated = False
     process_indices: set[int] = set()
-    with archive:
+    with archive, ExitStack() as streams:
         entries = {info.filename: info for info in archive.infolist()}
         for name in entries:
             match = re.fullmatch(r"process/(\d+)/calls", name, re.IGNORECASE)
@@ -3539,7 +3540,20 @@ def capture_search_calls(
             if pid is not None and process_pid != pid:
                 continue
             calls = archive.read(f"process/{index}/calls")
-            data = archive.read(f"process/{index}/data") if f"process/{index}/data" in entries else b""
+            data_info = entries.get(f"process/{index}/data")
+            data_size = data_info.file_size if data_info is not None else 0
+            data_stream = (
+                streams.enter_context(archive.open(data_info))
+                if data_info is not None
+                else None
+            )
+
+            def read_data(offset: int, size: int, stream: Any = data_stream) -> bytes:
+                if stream is None:
+                    return b""
+                stream.seek(offset)
+                return stream.read(size)
+
             definitions = archive.read("definitions") if resolve_definitions and "definitions" in entries else None
             if len(calls) % pointer_size:
                 raise ValueError(
@@ -3550,12 +3564,14 @@ def capture_search_calls(
                 scan_truncated = True
             records = _capture_call_records(
                 calls,
-                data,
+                b"",
                 min(record_count, max_records - scanned),
                 True,
                 max_data_bytes,
                 definitions=definitions,
                 pointer_size=pointer_size,
+                data_size=data_size,
+                data_reader=read_data if data_stream is not None else None,
             )
             for record in records:
                 scanned += 1
@@ -3680,9 +3696,11 @@ def capture_search_calls(
                             continue
                         relative = reference["offset"]
                         end = relative + reference["length"]
-                        if end > len(data):
+                        if end > data_size:
                             continue
-                        payload = data[relative:end]
+                        payload = read_data(relative, reference["length"])
+                        if len(payload) < reference["length"]:
+                            continue
                         collect_byte_matches(
                             payload, pattern, byte_matches, "payload", relative, reference["slot"]
                         )
@@ -3690,7 +3708,7 @@ def capture_search_calls(
                         record_offset = int(record["offset"])
                         record_size = int(record["size"])
                         collect_byte_matches(
-                            data[record_offset : record_offset + record_size],
+                            read_data(record_offset, record_size),
                             pattern,
                             byte_matches,
                             "record",
