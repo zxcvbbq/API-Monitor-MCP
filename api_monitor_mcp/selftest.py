@@ -73,6 +73,7 @@ from .capture_tools import (
     capture_search_definitions,
     capture_search_directory,
     capture_search_entries,
+    capture_slowest_calls,
     capture_validate,
     capture_xml_entry,
 )
@@ -374,6 +375,9 @@ def _self_test() -> None:
         assert filtered["count"] == 1
         assert filtered["matches"][0]["record"]["index"] == 0
         assert filtered["matches"][0]["pid"] == 1234
+        slowest = capture_slowest_calls(str(path))
+        assert slowest["count"] == 1
+        assert slowest["calls"][0]["record"]["context"]["duration_seconds"] == 0.125
         api_filtered = capture_filter_calls(
             str(path),
             api_name="CreateFileW",

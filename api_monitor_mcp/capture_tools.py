@@ -3658,6 +3658,72 @@ def capture_filter_calls(
 
 
 @mcp.tool()
+def capture_slowest_calls(
+    file_path: str,
+    process_index: int | None = None,
+    pid: int | None = None,
+    thread_id: int | None = None,
+    api_name: str | None = None,
+    api_module: str | None = None,
+    min_duration_seconds: float = 0.0,
+    limit: int = 100,
+    max_records: int = 100_000,
+    include_data: bool = False,
+    max_data_bytes: int = 4096,
+    resolve_definitions: bool = True,
+) -> dict[str, Any]:
+    """Return the slowest measured saved calls in descending duration order."""
+    if not math.isfinite(min_duration_seconds) or min_duration_seconds < 0:
+        raise ValueError("min_duration_seconds must be finite and non-negative")
+    limit = _limit(limit, "limit", 10_000)
+    max_records = _limit(max_records, "max_records", 1_000_000)
+    max_data_bytes = _limit(max_data_bytes, "max_data_bytes", 16 * 1024 * 1024)
+    filtered = capture_filter_calls(
+        file_path,
+        process_index=process_index,
+        pid=pid,
+        thread_id=thread_id,
+        api_name=api_name,
+        api_module=api_module,
+        min_duration_seconds=min_duration_seconds,
+        limit=10_000,
+        max_records=max_records,
+        include_data=include_data,
+        max_data_bytes=max_data_bytes,
+        resolve_definitions=resolve_definitions,
+    )
+    measured = [
+        item
+        for item in filtered["matches"]
+        if item["record"].get("context", {}).get("duration_valid")
+        and isinstance(item["record"].get("context", {}).get("duration_seconds"), (int, float))
+        and math.isfinite(item["record"]["context"]["duration_seconds"])
+    ]
+    measured.sort(
+        key=lambda item: (
+            -item["record"]["context"]["duration_seconds"],
+            item["process_index"],
+            item["record"].get("index", 0),
+        )
+    )
+    return {
+        "file": filtered["file"],
+        "process_index": process_index,
+        "pid": pid,
+        "thread_id": thread_id,
+        "api_name": api_name,
+        "api_module": api_module,
+        "min_duration_seconds": min_duration_seconds,
+        "calls": measured[:limit],
+        "count": len(measured),
+        "measured_count": len(measured),
+        "scanned_records": filtered["scanned_records"],
+        "truncated": filtered["truncated"] or len(measured) > limit,
+        "definitions_resolved": resolve_definitions,
+    }
+
+
+@mcp.tool()
 def capture_call_timeline(
     file_path: str,
     process_index: int | None = None,
