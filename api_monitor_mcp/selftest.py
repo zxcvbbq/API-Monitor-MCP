@@ -48,6 +48,7 @@ from .capture_tools import (
     capture_export_decoded_calls,
     capture_export_definitions,
     capture_export_monitoring_log,
+    capture_export_search_calls,
     capture_export_timeline,
     capture_extract_call_payload,
     capture_extract_entry,
@@ -581,6 +582,23 @@ def _self_test() -> None:
             str(path), "CreateFileW", limit=1, resolve_definitions=True
         )
         assert limited_api_search["definitions_resolved"]
+        search_json_path = Path(directory) / "search.json"
+        search_export = capture_export_search_calls(
+            str(path), str(search_json_path), query="ell"
+        )
+        assert search_export["count"] == 1
+        assert json.loads(search_json_path.read_text())["matches"][0]["pid"] == 1234
+        search_csv_path = Path(directory) / "search.csv"
+        search_csv_export = capture_export_search_calls(
+            str(path),
+            str(search_csv_path),
+            query=r"he..o",
+            query_regex=True,
+            output_format="csv",
+        )
+        assert search_csv_export["format"] == "csv"
+        assert "payload_matches" in search_csv_path.read_text().splitlines()[0]
+        assert "hello" in search_csv_path.read_text()
         argument_path = Path(directory) / "variants" / "arguments.apmx64"
         argument_record = bytearray(160)
         argument_record[2] = 1

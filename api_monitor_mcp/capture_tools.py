@@ -3864,6 +3864,144 @@ def capture_search_calls(
 
 
 @mcp.tool()
+def capture_export_search_calls(
+    file_path: str,
+    output_path: str,
+    query: str = "",
+    output_format: str = "json",
+    overwrite: bool = False,
+    process_index: int | None = None,
+    limit: int = 100,
+    max_records: int = 100_000,
+    max_data_bytes: int = 16_384,
+    resolve_definitions: bool = False,
+    decode_arguments: bool = False,
+    pattern_hex: str | None = None,
+    include_record_bytes: bool = False,
+    pid: int | None = None,
+    query_regex: bool = False,
+    thread_id: int | None = None,
+    error_code: int | None = None,
+    flags: int | None = None,
+    api_name: str | None = None,
+    api_module: str | None = None,
+    definition_offset: int | None = None,
+    min_duration_seconds: float | None = None,
+    max_duration_seconds: float | None = None,
+    start_time_utc: str | None = None,
+    end_time_utc: str | None = None,
+) -> dict[str, Any]:
+    """Export bounded saved-call search results as JSON or CSV."""
+    if output_format not in {"json", "csv"}:
+        raise ValueError("output_format must be json or csv")
+    output = Path(output_path).expanduser()
+    if not output.parent.is_dir():
+        raise NotADirectoryError(f"Output directory not found: {output.parent}")
+    output = output.resolve()
+    if output.exists() and not overwrite:
+        raise FileExistsError(f"Output already exists: {output}")
+
+    result = capture_search_calls(
+        file_path,
+        query=query,
+        process_index=process_index,
+        limit=limit,
+        max_records=max_records,
+        max_data_bytes=max_data_bytes,
+        resolve_definitions=resolve_definitions,
+        decode_arguments=decode_arguments,
+        pattern_hex=pattern_hex,
+        include_record_bytes=include_record_bytes,
+        pid=pid,
+        query_regex=query_regex,
+        thread_id=thread_id,
+        error_code=error_code,
+        flags=flags,
+        api_name=api_name,
+        api_module=api_module,
+        definition_offset=definition_offset,
+        min_duration_seconds=min_duration_seconds,
+        max_duration_seconds=max_duration_seconds,
+        start_time_utc=start_time_utc,
+        end_time_utc=end_time_utc,
+    )
+    if output_format == "json":
+        content = json.dumps(result, indent=2, ensure_ascii=False) + "\n"
+    else:
+        stream = io.StringIO(newline="")
+        writer = csv.writer(stream)
+        writer.writerow(
+            [
+                "process_index",
+                "pid",
+                "record_index",
+                "offset",
+                "size",
+                "api_name",
+                "api_module",
+                "thread_id",
+                "thread_number",
+                "timestamp_utc",
+                "duration_seconds",
+                "error_code",
+                "payload_matches",
+                "api_matches",
+                "argument_matches",
+                "byte_matches",
+                "record_json",
+            ]
+        )
+        for match in result["matches"]:
+            record = match.get("record", {})
+            definition = record.get("definition", {})
+            context = record.get("context", {})
+            writer.writerow(
+                [
+                    match.get("process_index", ""),
+                    match.get("pid", ""),
+                    record.get("index", ""),
+                    record.get("offset", ""),
+                    record.get("size", ""),
+                    definition.get("name", ""),
+                    definition.get("module", ""),
+                    context.get("thread_id", ""),
+                    context.get("thread_number", ""),
+                    context.get("timestamp_utc", ""),
+                    context.get("duration_seconds", ""),
+                    context.get("error_code", ""),
+                    json.dumps(match.get("payload_matches", []), ensure_ascii=False),
+                    json.dumps(match.get("api_matches", []), ensure_ascii=False),
+                    json.dumps(match.get("argument_matches", []), ensure_ascii=False),
+                    json.dumps(match.get("byte_matches", []), ensure_ascii=False),
+                    json.dumps(record, ensure_ascii=False),
+                ]
+            )
+        content = stream.getvalue()
+    encoded = content.encode("utf-8")
+    digest = hashlib.sha256(encoded).hexdigest()
+    try:
+        mode = "wb" if overwrite else "xb"
+        with output.open(mode) as handle:
+            handle.write(encoded)
+    except Exception:
+        if output.exists() and not overwrite:
+            output.unlink()
+        raise
+    return {
+        "exported": True,
+        "file": result["file"],
+        "output": str(output),
+        "format": output_format,
+        "query": query,
+        "count": result["count"],
+        "scanned_records": result["scanned_records"],
+        "truncated": result["truncated"],
+        "size": len(encoded),
+        "sha256": digest,
+    }
+
+
+@mcp.tool()
 def capture_filter_calls(
     file_path: str,
     process_index: int | None = None,
