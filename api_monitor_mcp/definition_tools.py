@@ -303,7 +303,17 @@ def api_monitor_search_variables(
     results: list[dict[str, Any]] = []
     for xml_path in sorted(api_root.rglob("*.xml")):
         try:
-            root = ElementTree.parse(xml_path).getroot()
+            text = xml_path.read_text(encoding="utf-8-sig", errors="replace")
+        except OSError:
+            continue
+        if (
+            needle not in text.casefold()
+            and needle not in str(xml_path).casefold()
+            and needle not in "name attributes fields displays enums definition sets"
+        ):
+            continue
+        try:
+            root = ElementTree.fromstring(text)
         except ElementTree.ParseError:
             continue
         for variable in root.iter("Variable"):
