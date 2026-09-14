@@ -216,6 +216,9 @@ _BEHAVIOR_RULES = (
     ),
 )
 
+# ponytail: cap in-memory data at 256 MiB; larger entries use streaming until a chunked reader is needed.
+_SEARCH_DATA_MEMORY_LIMIT = 256 * 1024 * 1024
+
 
 def _write_text_export(
     output: Path, content: str, overwrite: bool
@@ -315,6 +318,18 @@ def _capture_records_without_data(
             start_index=start_index,
             definitions=definitions,
             pointer_size=pointer_size,
+        )
+    if data_info.file_size <= _SEARCH_DATA_MEMORY_LIMIT:
+        return _capture_call_records(
+            calls,
+            archive.read(data_info),
+            limit,
+            False,
+            0,
+            start_index=start_index,
+            definitions=definitions,
+            pointer_size=pointer_size,
+            data_size=data_info.file_size,
         )
     with archive.open(data_info) as data_stream:
         def read_data(offset: int, size: int) -> bytes:
@@ -2755,7 +2770,19 @@ def capture_call_records(
         count = len(calls) // pointer_size
         if start_index > count:
             raise IndexError(f"start_index {start_index} is outside {count} saved calls")
-        if data_info is not None and include_data:
+        if data_info is not None and include_data and data_entry_bytes <= _SEARCH_DATA_MEMORY_LIMIT:
+            records = _capture_call_records(
+                calls,
+                archive.read(data_info),
+                limit,
+                True,
+                max_data_bytes,
+                start_index=start_index,
+                definitions=definitions,
+                pointer_size=pointer_size,
+                data_size=data_entry_bytes,
+            )
+        elif data_info is not None and include_data:
             with archive.open(data_info) as data_stream:
                 def read_data(offset: int, size: int) -> bytes:
                     data_stream.seek(offset)
@@ -4115,7 +4142,15 @@ def capture_call_stats(
             data_name = f"process/{index}/data"
             calls = archive.read(calls_name)
             data_size = entries[data_name].file_size if data_name in entries else 0
-            if data_size:
+            if data_size and data_size <= _SEARCH_DATA_MEMORY_LIMIT:
+                stats = _capture_call_stats(
+                    calls,
+                    archive.read(entries[data_name]),
+                    max_records,
+                    pointer_size,
+                    data_size=data_size,
+                )
+            elif data_size:
                 with archive.open(data_name) as data_stream:
                     def read_data(offset: int, size: int) -> bytes:
                         data_stream.seek(offset)
@@ -5752,13 +5787,25 @@ def capture_search_calls(
             calls = archive.read(f"process/{index}/calls")
             data_info = entries.get(f"process/{index}/data")
             data_size = data_info.file_size if data_info is not None else 0
-            data_stream = (
+            data_bytes = (
+                archive.read(data_info)
+                if data_info is not None and data_size <= _SEARCH_DATA_MEMORY_LIMIT
+                else None
+            )
+            data_stream = None if data_bytes is not None else (
                 streams.enter_context(archive.open(data_info))
                 if data_info is not None
                 else None
             )
 
-            def read_data(offset: int, size: int, stream: Any = data_stream) -> bytes:
+            def read_data(
+                offset: int,
+                size: int,
+                data: bytes | None = data_bytes,
+                stream: Any = data_stream,
+            ) -> bytes:
+                if data is not None:
+                    return data[offset : offset + size]
                 if stream is None:
                     return b""
                 stream.seek(offset)
@@ -5773,15 +5820,31 @@ def capture_search_calls(
                 scan_truncated = True
             records = _capture_call_records(
                 calls,
-                b"",
+                data_bytes or b"",
                 min(record_count, max_records - scanned),
-                True,
-                max_data_bytes,
+                False,
+                0,
                 definitions=definitions,
                 pointer_size=pointer_size,
                 data_size=data_size,
-                data_reader=read_data if data_stream is not None else None,
+                data_reader=read_data if data_bytes is None and data_stream is not None else None,
             )
+
+            def hydrate_payloads(record: dict[str, Any]) -> None:
+                for reference in record.get("data_refs", []):
+                    if not reference.get("valid"):
+                        continue
+                    length = int(reference["length"])
+                    if length > max_data_bytes:
+                        reference["truncated"] = True
+                        continue
+                    payload = read_data(int(reference["offset"]), length)
+                    if len(payload) < length:
+                        reference["valid"] = False
+                        reference["error"] = "data reference could not be fully read"
+                    else:
+                        reference["payload"] = _read_payload(payload)
+
             for record in records:
                 scanned += 1
                 context = record.get("context", {})
@@ -5818,6 +5881,8 @@ def capture_search_calls(
                     duration is None or duration > max_duration_seconds
                 ):
                     continue
+                if wanted:
+                    hydrate_payloads(record)
                 payload_matches = []
                 for reference in record.get("data_refs", []):
                     text = reference.get("payload", {}).get("text")
@@ -5930,6 +5995,8 @@ def capture_search_calls(
                     or byte_matches
                     or (filter_only and not query and pattern is None)
                 ):
+                    if not wanted:
+                        hydrate_payloads(record)
                     match = {
                         "process_index": index,
                         "pid": process_pid,

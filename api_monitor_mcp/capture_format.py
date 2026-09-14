@@ -831,6 +831,7 @@ def _capture_call_records(
         return data_reader(offset, size) if data_reader is not None else data[offset : offset + size]
 
     records: list[dict[str, Any]] = []
+    definition_cache: dict[int, dict[str, Any]] = {}
     count = len(calls) // pointer_size
     end_index = min(count, start_index + limit)
     window = _capture_offsets(
@@ -869,9 +870,13 @@ def _capture_call_records(
         definition_offset = struct.unpack_from(offset_format, record_bytes, definition_field_offset)[0]
         record["definition_offset"] = definition_offset
         if definitions is not None:
-            record["definition"] = _capture_definition_info(
-                definitions, definition_offset, pointer_size
-            )
+            definition = definition_cache.get(definition_offset)
+            if definition is None:
+                definition = _capture_definition_info(
+                    definitions, definition_offset, pointer_size
+                )
+                definition_cache[definition_offset] = definition
+            record["definition"] = definition
         if not record["valid"]:
             record["error"] = "record extends beyond process data"
             records.append(record)
